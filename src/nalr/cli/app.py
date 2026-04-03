@@ -7,6 +7,7 @@ from typing import Annotated
 
 import typer
 
+from nalr.cil.runtime import CommandInterfaceLayer
 from nalr.runtime.controller import RuntimeController
 from nalr.schemas.models import RoundEvent, to_dict
 
@@ -15,12 +16,14 @@ app = typer.Typer(help="NeuroAnthropic Living Runtime CLI")
 state_app = typer.Typer()
 body_app = typer.Typer()
 mood_app = typer.Typer()
+relation_app = typer.Typer()
 focus_app = typer.Typer()
 memory_app = typer.Typer()
 habit_app = typer.Typer()
 mode_app = typer.Typer()
 trace_app = typer.Typer()
 agent_app = typer.Typer()
+skill_app = typer.Typer()
 checkpoint_app = typer.Typer()
 safe_app = typer.Typer()
 budget_app = typer.Typer()
@@ -33,12 +36,14 @@ eval_app = typer.Typer()
 app.add_typer(state_app, name="state")
 app.add_typer(body_app, name="body")
 app.add_typer(mood_app, name="mood")
+app.add_typer(relation_app, name="relation")
 app.add_typer(focus_app, name="focus")
 app.add_typer(memory_app, name="memory")
 app.add_typer(habit_app, name="habit")
 app.add_typer(mode_app, name="mode")
 app.add_typer(trace_app, name="trace")
 app.add_typer(agent_app, name="agent")
+app.add_typer(skill_app, name="skill")
 app.add_typer(checkpoint_app, name="checkpoint")
 app.add_typer(safe_app, name="safe")
 app.add_typer(budget_app, name="budget")
@@ -56,41 +61,57 @@ def get_controller() -> RuntimeController:
     return RuntimeController(project_root=project_root, config_root=config_dir, home_path=home)
 
 
+def get_cil() -> CommandInterfaceLayer:
+    return CommandInterfaceLayer(get_controller())
+
+
 def emit(payload: object) -> None:
     typer.echo(json.dumps(to_dict(payload), ensure_ascii=False, indent=2))
 
 
 @state_app.command("show")
 def state_show() -> None:
-    emit(get_controller().state_payload())
+    emit(get_cil().show_state())
 
 
 @body_app.command("show")
 def body_show() -> None:
-    emit({"body_energy": get_controller().load_runtime_state().body_energy})
+    emit(get_cil().show_body())
+
+
+@body_app.command("rest")
+def body_rest() -> None:
+    emit(get_cil().apply("body rest"))
 
 
 @mood_app.command("show")
 def mood_show() -> None:
-    emit({"mood": get_controller().load_runtime_state().mood})
+    emit(get_cil().show_mood())
+
+
+@mood_app.command("calm")
+def mood_calm() -> None:
+    emit(get_cil().apply("mood calm"))
+
+
+@relation_app.command("show")
+def relation_show(target: str) -> None:
+    emit(get_cil().show_relation(target))
 
 
 @focus_app.command("show")
 def focus_show() -> None:
-    controller = get_controller()
-    if controller.load_runtime_state().round_count == 0:
-        controller.tick(RoundEvent(source="system", content="focus probe"), scenario=os.environ.get("NALR_SCENARIO", "chat"), mode=os.environ.get("NALR_MODE", "interactive"))
-    emit({"focus": controller.load_runtime_state().focus})
+    emit(get_cil().show_focus())
 
 
 @memory_app.command("top")
 def memory_top(limit: int = 5) -> None:
-    emit(get_controller().memory_top(limit))
+    emit(get_cil().memory_top(limit))
 
 
 @habit_app.command("top")
 def habit_top(limit: int = 5) -> None:
-    emit(get_controller().habit_top(limit))
+    emit(get_cil().habit_top(limit))
 
 
 @mode_app.command("set")
@@ -131,6 +152,16 @@ def agent_disable(agent_name: str) -> None:
 @agent_app.command("enable")
 def agent_enable(agent_name: str) -> None:
     emit(get_controller().apply_command(f"agent enable {agent_name}"))
+
+
+@skill_app.command("stats")
+def skill_stats() -> None:
+    emit(get_cil().skill_stats())
+
+
+@skill_app.command("profile")
+def skill_profile(skill_name: str) -> None:
+    emit(get_cil().skill_profile(skill_name))
 
 
 @checkpoint_app.command("create")
@@ -190,6 +221,16 @@ def what_changed(window: int = 5) -> None:
 @eval_app.command("longrun")
 def eval_longrun(rounds: int = 1000) -> None:
     emit(get_controller().eval_longrun(rounds=rounds))
+
+
+@app.command("rest")
+def rest_alias() -> None:
+    emit(get_cil().relation_alias_rest())
+
+
+@app.command("calm")
+def calm_alias() -> None:
+    emit(get_cil().relation_alias_calm())
 
 
 def main() -> None:

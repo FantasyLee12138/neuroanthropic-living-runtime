@@ -143,6 +143,12 @@ class MemoryStore:
                 return item["closeness"]
         return 0.5
 
+    def relation_state(self, target: str) -> dict:
+        for item in self._read_list(self.relation_path):
+            if item["target"] == target:
+                return {"target": target, "closeness": item["closeness"], "known": True}
+        return {"target": target, "closeness": 0.5, "known": False}
+
     def compact_layers(self) -> None:
         hot = sorted(self._read_list(self.episodic_hot_path), key=lambda item: item.get("last_seen", 0), reverse=True)
         warm = sorted(self._read_list(self.episodic_warm_path), key=lambda item: item.get("last_seen", 0), reverse=True)

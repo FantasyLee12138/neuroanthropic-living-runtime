@@ -4,6 +4,8 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from nalr.cli.app import app
+from nalr.runtime.controller import RuntimeController
+from nalr.schemas.models import RoundEvent
 
 
 RUNNER = CliRunner()
@@ -74,3 +76,32 @@ def test_cli_debug_weight_replay_why_not_and_trace_compact(tmp_path, monkeypatch
     assert '"blocked_by"' in why_not_result.stdout
     assert compact_result.exit_code == 0
     assert '"rows_written"' in compact_result.stdout
+
+
+def test_cli_skill_relation_and_user_alias_commands(tmp_path, monkeypatch):
+    monkeypatch.setenv("NALR_HOME", str(tmp_path / ".alive"))
+    monkeypatch.setenv("NALR_CONFIG_DIR", str(Path(__file__).resolve().parents[2] / "config"))
+
+    controller = RuntimeController(project_root=tmp_path, config_root=Path(__file__).resolve().parents[2] / "config")
+    controller.tick(
+        RoundEvent(source="user", content="hello there", target="user", valence=0.3),
+        scenario="companion",
+        mode="interactive",
+    )
+
+    skill_stats_result = RUNNER.invoke(app, ["skill", "stats"])
+    skill_profile_result = RUNNER.invoke(app, ["skill", "profile", "generate_candidates"])
+    relation_result = RUNNER.invoke(app, ["relation", "show", "user"])
+    rest_result = RUNNER.invoke(app, ["rest"])
+    calm_result = RUNNER.invoke(app, ["calm"])
+
+    assert skill_stats_result.exit_code == 0
+    assert '"skill_name": "generate_candidates"' in skill_stats_result.stdout
+    assert skill_profile_result.exit_code == 0
+    assert '"owner_module": "PFCAgent"' in skill_profile_result.stdout
+    assert relation_result.exit_code == 0
+    assert '"target": "user"' in relation_result.stdout
+    assert rest_result.exit_code == 0
+    assert '"body_energy"' in rest_result.stdout
+    assert calm_result.exit_code == 0
+    assert '"mood"' in calm_result.stdout

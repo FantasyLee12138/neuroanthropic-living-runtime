@@ -15,6 +15,7 @@ class TraceStore:
         self.jsonl_dir = self.root / "traces" / "jsonl"
         self.parquet_dir = self.root / "traces" / "parquet"
         self.jsonl_path = self.jsonl_dir / "rounds.jsonl"
+        self.contributions_jsonl_path = self.jsonl_dir / "contributions.jsonl"
         self.parquet_path = self.parquet_dir / "rounds.parquet"
         self.commands_path = self.root / "traces" / "command_traces.json"
         self.rounds_dir.mkdir(parents=True, exist_ok=True)
@@ -25,6 +26,8 @@ class TraceStore:
             self.commands_path.write_text("[]", encoding="utf-8")
         if not self.jsonl_path.exists():
             self.jsonl_path.write_text("", encoding="utf-8")
+        if not self.contributions_jsonl_path.exists():
+            self.contributions_jsonl_path.write_text("", encoding="utf-8")
 
     def write_round(self, trace: RoundTrace) -> None:
         path = self.rounds_dir / f"round_{trace.round_id}.json"
@@ -45,7 +48,14 @@ class TraceStore:
             traces.append(json.loads(path.read_text(encoding="utf-8")))
         return traces
 
-    def append_command(self, command: str, result: CommandResult, before_state_hash: str, after_state_hash: str) -> None:
+    def append_command(
+        self,
+        command: str,
+        result: CommandResult,
+        before_state_hash: str,
+        after_state_hash: str,
+        operator_level: str,
+    ) -> None:
         payload = json.loads(self.commands_path.read_text(encoding="utf-8"))
         payload.append(
             {
@@ -58,35 +68,64 @@ class TraceStore:
                 "rollback_hint": result.rollback_hint,
                 "before_state_hash": before_state_hash,
                 "after_state_hash": after_state_hash,
+                "operator_level": operator_level,
+                "rollback_available": bool(result.rollback_hint),
             }
         )
         self.commands_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def compact_rounds(self) -> dict:
         rounds = self.list_rounds()
+        rows = []
+        for trace in rounds:
+            for contribution in trace.get("contributions", []):
+                rows.append(
+                    {
+                        "date": "local",
+                        "session_id": str(self.root),
+                        "round_id": trace["round_id"],
+                        "scenario": trace["scenario"],
+                        "mode": trace["mode"],
+                        "sampled_action": trace["sampled_action"],
+                        "agent": contribution["agent_name"],
+                        "action": contribution["action_name"],
+                        "delta_p": contribution.get("delta_p", 0.0),
+                        "sigma_scale": contribution.get("sigma_scale", 1.0),
+                        "confidence": contribution.get("confidence", 0.0),
+                        "weight_applied": contribution.get("weight_applied", 1.0),
+                        "resample_idx": contribution.get("resample_idx", 0),
+                        "conflict_score": trace.get("conflict_score", 0.0),
+                        "plausibility_fail_score": trace.get("plausibility_fail_score", 0.0),
+                        "selected": contribution.get("selected", False),
+                        "latency_ms": contribution.get("latency_ms", 0),
+                        "provider": contribution.get("provider", trace.get("provider", "upstream_contract")),
+                        "model": contribution.get("model", trace.get("model", "pending-merge")),
+                        "tags": contribution.get("tags", []),
+                        "budget_remaining": trace["state_snapshot"].get("budget_remaining", 0.0),
+                    }
+                )
+
+        self.contributions_jsonl_path.write_text("", encoding="utf-8")
+        with self.contributions_jsonl_path.open("a", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
         connection = duckdb.connect()
         try:
-            connection.execute(
-                f"""
-                COPY (
-                  SELECT
-                    round_id,
-                    scenario,
-                    mode,
-                    sampled_action,
-                    conflict_score,
-                    plausibility_fail_score,
-                    provider,
-                    model,
-                    state_snapshot.budget_remaining AS budget_remaining
-                  FROM read_json_auto('{self.jsonl_path}', format='newline_delimited')
-                ) TO '{self.parquet_path}' (FORMAT PARQUET)
-                """
-            )
+            if rows:
+                connection.execute(
+                    f"""
+                    COPY (
+                      SELECT *
+                      FROM read_json_auto('{self.contributions_jsonl_path}', format='newline_delimited')
+                    ) TO '{self.parquet_path}' (FORMAT PARQUET)
+                    """
+                )
         finally:
             connection.close()
         return {
             "jsonl_path": str(self.jsonl_path),
+            "contributions_jsonl_path": str(self.contributions_jsonl_path),
             "parquet_path": str(self.parquet_path),
-            "rows_written": len(rounds),
+            "rows_written": len(rows),
         }

@@ -1,4 +1,7 @@
 from pathlib import Path
+import json
+
+import duckdb
 
 from nalr.runtime.controller import RuntimeController
 from nalr.schemas.models import RoundEvent
@@ -137,3 +140,68 @@ def test_safe_mode_disables_dmn_and_perspective_contributions(tmp_path):
     names = {item.agent_name for item in result.trace.contributions}
     assert "DMNAgent" not in names
     assert "PerspectiveModel" not in names
+
+
+def test_compact_traces_writes_v056_contribution_fields(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(source="user", content="Help me remember tea and plan a reply.", target="friend", cue="tea"),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    compacted = controller.compact_traces()
+
+    connection = duckdb.connect()
+    try:
+        row = connection.execute(
+            f"""
+            SELECT
+              delta_p,
+              sigma_scale,
+              confidence,
+              weight_applied,
+              resample_idx,
+              conflict_score,
+              plausibility_fail_score,
+              selected,
+              latency_ms,
+              provider,
+              model,
+              tags
+            FROM read_parquet('{compacted["parquet_path"]}')
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert row is not None
+
+
+def test_command_trace_records_operator_level_and_rollback_availability(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    controller.apply_command("safe on")
+
+    commands_path = tmp_path / ".alive" / "traces" / "command_traces.json"
+    commands = json.loads(commands_path.read_text(encoding="utf-8"))
+
+    assert commands[-1]["operator_level"] == "ops_admin"
+    assert commands[-1]["rollback_available"] is True
+
+
+def test_eval_longrun_returns_v056_metric_summary(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    summary = controller.eval_longrun(rounds=30)
+
+    assert "crash_rate" in summary
+    assert "safe_mode_rate" in summary
+    assert "conflict_deadloop_rate" in summary
+    assert "scarcity_burn_drop" in summary
+    assert "habit_gradient" in summary
+    assert "gist_detail_ratio" in summary
+    assert "relation_consistency" in summary
+    assert "task_success_rate" in summary
+    assert "top_driver_coverage" in summary

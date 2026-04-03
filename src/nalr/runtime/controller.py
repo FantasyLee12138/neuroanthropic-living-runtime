@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +11,7 @@ import yaml
 from nalr.agents.modules import build_agents
 from nalr.memory.store import MemoryStore
 from nalr.output.style import compute_style_profile
+from nalr.runtime.adapters import adapt_proposal, adapt_skill_spec
 from nalr.runtime.decision import (
     BehaviorPlausibilityGuard,
     ConflictMonitorAgent,
@@ -40,6 +40,16 @@ from nalr.trace.store import TraceStore
 
 def _clip(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return max(low, min(high, value))
+
+
+def _operator_level(command: str) -> str:
+    if command.startswith(("safe ", "checkpoint ", "mode set")):
+        return "ops_admin"
+    if command.startswith(("agent ", "debug ")):
+        return "debug_control"
+    if command.startswith(("body rest", "mood calm")):
+        return "soft_intervene"
+    return "read_only"
 
 
 class RuntimeController:
@@ -137,31 +147,30 @@ class RuntimeController:
             if state.safe_mode and agent.name in safe_mode_blocked:
                 continue
             proposal = agent.propose(event, state, scenario_cfg, context)
-            raw.append(to_dict(proposal))
-            if proposal.veto or not proposal.action_preferences:
-                continue
             weight = state.agent_weights.get(agent.name, 1.0)
-            top_action = max(proposal.action_preferences, key=proposal.action_preferences.get)
-            top_score = proposal.action_preferences[top_action] * weight
+            adapted = adapt_proposal(proposal, weight=weight, resample_idx=resample_idx)
+            raw.append(adapted)
+            if adapted["veto"] or not adapted["action_preferences"]:
+                continue
             contributions.append(
                 AgentContribution(
-                    agent_name=proposal.agent_name,
-                    action_name=top_action,
-                    score=round(top_score, 4),
-                    reason=proposal.reason,
-                    delta_p=round(top_score, 4),
-                    sigma_scale=proposal.sigma_scale,
-                    confidence=proposal.confidence,
-                    weight_applied=weight,
-                    resample_idx=resample_idx,
+                    agent_name=adapted["agent_name"],
+                    action_name=adapted["top_action"],
+                    score=adapted["top_score"],
+                    reason=adapted["reason"],
+                    delta_p=adapted["top_score"],
+                    sigma_scale=adapted["sigma_scale"],
+                    confidence=adapted["confidence"],
+                    weight_applied=adapted["weight_applied"],
+                    resample_idx=adapted["resample_idx"],
                     selected=False,
-                    latency_ms=proposal.latency_ms,
-                    provider=proposal.provider,
-                    model=proposal.model,
-                    tags=list(proposal.trace_tags),
+                    latency_ms=adapted["latency_ms"],
+                    provider=adapted["provider"],
+                    model=adapted["model"],
+                    tags=list(adapted["trace_tags"]),
                 )
             )
-            for action_name, score in proposal.action_preferences.items():
+            for action_name, score in adapted["action_preferences"].items():
                 scores[action_name] = scores.get(action_name, 0.0) + (score * weight)
         return scores, contributions, raw
 
@@ -407,10 +416,31 @@ class RuntimeController:
                 ttl="until changed",
                 rollback_hint=f"alive debug weight {parts[2]} 1.0",
             )
+        elif parts[:2] == ["body", "rest"]:
+            state.body_energy = _clip(state.body_energy + 0.15)
+            state.budget_remaining = _clip(state.budget_remaining + 0.03)
+            result = CommandResult(
+                applied=True,
+                scope="body",
+                delta={"body_energy": state.body_energy, "budget_remaining": state.budget_remaining},
+                ttl="1 round",
+                risk_note="may reduce responsiveness",
+                rollback_hint="alive mode set interactive",
+            )
+        elif parts[:2] == ["mood", "calm"]:
+            state.mood = round(state.mood + ((0.55 - state.mood) * 0.35), 4)
+            result = CommandResult(
+                applied=True,
+                scope="mood",
+                delta={"mood": state.mood},
+                ttl="1 round",
+                risk_note="may reduce emotional variance",
+                rollback_hint="allow a few rounds of natural drift",
+            )
 
         self._save_state(state)
         after_hash = self._state_hash(state)
-        self.trace_store.append_command(command, result, before_hash, after_hash)
+        self.trace_store.append_command(command, result, before_hash, after_hash, operator_level=_operator_level(command))
         return result
 
     def checkpoint(self) -> CheckpointRef:
@@ -443,7 +473,13 @@ class RuntimeController:
             delta={"checkpoint_id": checkpoint_id, "restored": True, "safe_mode": restored_state.safe_mode, "mode": restored_state.mode},
             rollback_hint="create a fresh checkpoint before further changes",
         )
-        self.trace_store.append_command(f"checkpoint rewind {checkpoint_id}", result, before_hash, after_hash)
+        self.trace_store.append_command(
+            f"checkpoint rewind {checkpoint_id}",
+            result,
+            before_hash,
+            after_hash,
+            operator_level="ops_admin",
+        )
         return result
 
     def memory_top(self, limit: int = 5) -> list[dict]:
@@ -451,6 +487,9 @@ class RuntimeController:
 
     def habit_top(self, limit: int = 5) -> list[dict]:
         return self.memory_store.habit_top(limit=limit)
+
+    def relation_show(self, target: str) -> dict[str, Any]:
+        return self.memory_store.relation_state(target)
 
     def state_payload(self) -> dict[str, Any]:
         return to_dict(self.load_runtime_state())
@@ -617,8 +656,52 @@ class RuntimeController:
                 scenario="task" if idx % 3 == 0 else "chat",
                 mode="interactive",
             )
+        generated_rounds = self.trace_store.list_rounds()[start_round:]
         summary = self.metrics_summary()
-        summary["generated_rounds"] = self.load_runtime_state().round_count - start_round
+        total = len(generated_rounds) or 1
+        critical_conflicts = [
+            item for item in generated_rounds if item.get("conflict_score", 0.0) >= self.config["thresholds"]["thresholds"]["conflict_critical"]
+        ]
+        safe_mode_rounds = sum(1 for item in generated_rounds if item["state_snapshot"].get("safe_mode"))
+        scarce_threshold = self.config["resource_rules"]["resource_defaults"]["scarce_threshold"]
+        scarce_round = next(
+            (idx for idx, item in enumerate(generated_rounds) if item["state_snapshot"].get("budget_remaining", 1.0) <= scarce_threshold),
+            None,
+        )
+        scarcity_burn_drop = 0.0
+        if scarce_round is not None and scarce_round >= 3 and scarce_round + 3 < len(generated_rounds):
+            before = generated_rounds[scarce_round - 3 : scarce_round]
+            after = generated_rounds[scarce_round : scarce_round + 3]
+            before_burn = before[0]["state_snapshot"]["budget_remaining"] - before[-1]["state_snapshot"]["budget_remaining"]
+            after_burn = after[0]["state_snapshot"]["budget_remaining"] - after[-1]["state_snapshot"]["budget_remaining"]
+            if before_burn > 0:
+                scarcity_burn_drop = round(max(0.0, (before_burn - after_burn) / before_burn), 4)
+        recall_gist = sum(1 for item in generated_rounds if item.get("decision_context", {}).get("recall", {}).get("mode") == "gist")
+        recall_detail = sum(1 for item in generated_rounds if item.get("decision_context", {}).get("recall", {}).get("mode") == "detail")
+        task_rounds = [item for item in generated_rounds if item["scenario"] == "task"]
+        task_successes = sum(1 for item in task_rounds if item["sampled_action"] in {"respond", "plan", "recall", "clarify"})
+        relation_checks = []
+        for item in generated_rounds:
+            target = item.get("event_payload", {}).get("target")
+            if not target:
+                continue
+            closeness = item.get("decision_context", {}).get("closeness", 0.5)
+            action = item["sampled_action"]
+            if closeness >= 0.55:
+                relation_checks.append(action in {"connect", "clarify", "respond", "recall"})
+            else:
+                relation_checks.append(action != "connect")
+        habit_strengths = [item["strength"] for item in self.habit_top(limit=10)]
+        summary["generated_rounds"] = total
+        summary["crash_rate"] = 0.0
+        summary["safe_mode_rate"] = round(safe_mode_rounds / total, 4)
+        summary["conflict_deadloop_rate"] = round(len(critical_conflicts) / total, 4)
+        summary["scarcity_burn_drop"] = scarcity_burn_drop
+        summary["habit_gradient"] = round((sum(habit_strengths) / max(len(habit_strengths), 1)) / total, 4)
+        summary["gist_detail_ratio"] = round(recall_gist / max(recall_detail, 1), 4)
+        summary["relation_consistency"] = round(sum(1 for item in relation_checks if item) / max(len(relation_checks), 1), 4)
+        summary["task_success_rate"] = round(task_successes / max(len(task_rounds), 1), 4)
+        summary["top_driver_coverage"] = round(sum(1 for item in generated_rounds if len(item.get("top_drivers", [])) >= 3) / total, 4)
         return summary
 
     def agent_list(self) -> list[dict[str, Any]]:
@@ -628,10 +711,61 @@ class RuntimeController:
             {
                 "name": name,
                 "enabled": state.agents_enabled.get(name, cfg.get("enabled", True)),
-                "weight": cfg.get("weight", 1.0),
+                "weight": state.agent_weights.get(name, cfg.get("weight", 1.0)),
             }
             for name, cfg in agent_cfg.items()
         ]
 
     def skill_list(self) -> list[dict[str, Any]]:
-        return [asdict(spec) for spec in self.skills.values()]
+        return [adapt_skill_spec(spec) for spec in self.skills.values()]
+
+    def skill_stats(self) -> dict[str, Any]:
+        rounds = self.trace_store.list_rounds()
+        skill_rows = []
+        for spec in self.skills.values():
+            adapted = adapt_skill_spec(spec)
+            observed = []
+            observed_rounds = set()
+            for trace in rounds:
+                for contribution in trace.get("contributions", []):
+                    if contribution["agent_name"] != adapted["owner_module"]:
+                        continue
+                    observed.append(contribution)
+                    observed_rounds.add(trace["round_id"])
+            skill_rows.append(
+                {
+                    "skill_name": adapted["name"],
+                    "owner_module": adapted["owner_module"],
+                    "timeout_ms": adapted["timeout_ms"],
+                    "cost_class": adapted["cost_class"],
+                    "failure_policy": adapted["failure_policy"],
+                    "trace_tags": adapted["trace_tags"],
+                    "observed_rounds": len(observed_rounds),
+                    "contribution_hits": len(observed),
+                    "selected_hits": sum(1 for item in observed if item.get("selected")),
+                    "average_latency_ms": round(
+                        sum(item.get("latency_ms", 0) for item in observed) / max(len(observed), 1),
+                        4,
+                    ),
+                }
+            )
+        return {"skills": skill_rows, "total_skills": len(skill_rows)}
+
+    def skill_profile(self, skill_name: str) -> dict[str, Any]:
+        if skill_name not in self.skills:
+            raise FileNotFoundError(f"skill {skill_name} not found")
+        adapted = adapt_skill_spec(self.skills[skill_name])
+        observed = []
+        observed_rounds = set()
+        for trace in self.trace_store.list_rounds():
+            for contribution in trace.get("contributions", []):
+                if contribution["agent_name"] != adapted["owner_module"]:
+                    continue
+                observed.append(contribution)
+                observed_rounds.add(trace["round_id"])
+        return {
+            **adapted,
+            "observed_rounds": len(observed_rounds),
+            "selected_hits": sum(1 for item in observed if item.get("selected")),
+            "providers": sorted({item.get("provider", "upstream_contract") for item in observed} or {"upstream_contract"}),
+        }

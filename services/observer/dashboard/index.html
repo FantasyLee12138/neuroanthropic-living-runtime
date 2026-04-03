@@ -120,6 +120,10 @@
           <h2>Latest Replay</h2>
           <div class="table" id="replay"></div>
         </div>
+        <div class="card">
+          <h2>Skill Registry</h2>
+          <div class="table" id="skills"></div>
+        </div>
       </section>
     </main>
     <script>
@@ -177,17 +181,29 @@
         `;
       }
 
+      function renderSkills(skillStats) {
+        const root = document.getElementById("skills");
+        root.innerHTML = (skillStats.skills || []).slice(0, 6).map((item) => `
+          <div class="table-row">
+            <div>${item.skill_name}</div>
+            <div>${item.owner_module} · hits ${item.contribution_hits}</div>
+          </div>
+        `).join("");
+      }
+
       Promise.all([
         loadJson("/metrics/summary"),
         loadJson("/metrics/timeline"),
         loadJson("/metrics/heatmap"),
         loadJson("/replay/1?seed=7").catch(() => ({ ablations: [] })),
-      ]).then(([summary, timeline, heatmap, replay]) => {
+        loadJson("/skills/stats"),
+      ]).then(([summary, timeline, heatmap, replay, skillStats]) => {
         renderStats(summary);
         renderActions(summary);
         renderTimeline(timeline);
         renderHeatmap(heatmap);
         renderReplay(replay);
+        renderSkills(skillStats);
       });
     </script>
   </body>

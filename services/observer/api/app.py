@@ -68,6 +68,17 @@ def create_app(project_root: Path | str | None = None, config_root: Path | str |
     def why_not(round_id: int, action: str) -> dict:
         return controller.why_not(round_id, action)
 
+    @app.get("/skills/stats")
+    def skill_stats() -> dict:
+        return controller.skill_stats()
+
+    @app.get("/skills/profile/{skill_name}")
+    def skill_profile(skill_name: str) -> dict:
+        try:
+            return controller.skill_profile(skill_name)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     dashboard_path = project_root_path / "services" / "observer" / "dashboard" / "index.html"
     if not dashboard_path.exists():
         dashboard_path = Path(__file__).resolve().parents[1] / "dashboard" / "index.html"
