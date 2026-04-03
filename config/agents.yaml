@@ -1,0 +1,32 @@
+agents:
+  BodyStateAgent:
+    enabled: true
+    weight: 1.0
+  ResourceAgent:
+    enabled: true
+    weight: 1.0
+  PFCAgent:
+    enabled: true
+    weight: 1.0
+  ThalamusAttentionAgent:
+    enabled: true
+    weight: 1.0
+  HippocampusAgent:
+    enabled: true
+    weight: 0.9
+  HabitAgent:
+    enabled: true
+    weight: 0.8
+  RelationshipAgent:
+    enabled: true
+    weight: 0.7
+  DMNAgent:
+    enabled: true
+    weight: 0.4
+  PerspectiveModel:
+    enabled: true
+    weight: 0.5
+  OutputStyleLayer:
+    enabled: true
+    weight: 0.6
+

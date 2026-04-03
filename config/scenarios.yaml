@@ -1,0 +1,26 @@
+scenarios:
+  chat:
+    pfc_base_share: 0.26
+    relationship_weight: 0.22
+    habit_weight: 0.14
+    dmn_weight: 0.10
+    output_warmth_variance: 0.20
+    memory_gist_bias: 0.62
+    delay_tolerance: 0.18
+  companion:
+    pfc_base_share: 0.22
+    relationship_weight: 0.30
+    habit_weight: 0.18
+    dmn_weight: 0.14
+    output_warmth_variance: 0.30
+    memory_gist_bias: 0.70
+    delay_tolerance: 0.28
+  task:
+    pfc_base_share: 0.34
+    relationship_weight: 0.12
+    habit_weight: 0.20
+    dmn_weight: 0.05
+    output_warmth_variance: 0.08
+    memory_gist_bias: 0.50
+    delay_tolerance: 0.10
+

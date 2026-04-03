@@ -1,0 +1,18 @@
+thresholds:
+  p_floor: 0.01
+  p_cap: 0.85
+  ci_min: 0.08
+  ci_max: 0.55
+  salience_high: 0.78
+  salience_critical: 0.90
+  conflict_high: 0.65
+  conflict_critical: 0.82
+  plausibility_fail: 0.70
+  similarity_medium: 0.68
+  similarity_high: 0.82
+  max_resample_rounds: 2
+  max_mode_lock_rounds: 6
+  cue_refresh_window_rounds: 12
+  gist_threshold: 0.25
+  detail_threshold: 0.50
+

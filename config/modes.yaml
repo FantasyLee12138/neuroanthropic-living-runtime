@@ -1,0 +1,22 @@
+modes:
+  interactive:
+    cognitive_budget_ms: 1200
+    allow_dmn: true
+    response_floor: 0.3
+  auto:
+    cognitive_budget_ms: 1000
+    allow_dmn: true
+    response_floor: 0.2
+  idle:
+    cognitive_budget_ms: 300
+    allow_dmn: true
+    response_floor: 0.1
+  sleep:
+    cognitive_budget_ms: 120
+    allow_dmn: false
+    response_floor: 0.0
+  safe:
+    cognitive_budget_ms: 180
+    allow_dmn: false
+    response_floor: 0.5
+

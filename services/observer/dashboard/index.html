@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NALR Observer</title>
+    <style>
+      :root {
+        --bg: #f5f1e8;
+        --ink: #1e2a29;
+        --accent: #aa4a44;
+        --card: #fffaf2;
+      }
+      body {
+        margin: 0;
+        font-family: "Iowan Old Style", "Palatino Linotype", serif;
+        background: radial-gradient(circle at top, #fff6de 0%, var(--bg) 60%);
+        color: var(--ink);
+      }
+      main {
+        max-width: 860px;
+        margin: 0 auto;
+        padding: 64px 24px;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid rgba(30, 42, 41, 0.12);
+        border-radius: 20px;
+        padding: 24px;
+        box-shadow: 0 24px 60px rgba(30, 42, 41, 0.08);
+      }
+      h1 {
+        font-size: clamp(2rem, 6vw, 4rem);
+        margin-bottom: 12px;
+      }
+      p {
+        line-height: 1.6;
+      }
+      code {
+        color: var(--accent);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="card">
+        <h1>NALR Observer</h1>
+        <p>This sidecar is intentionally read-only. Start with <code>/state</code> and <code>/trace/{round_id}</code>, then layer a richer dashboard on top.</p>
+      </div>
+    </main>
+  </body>
+</html>

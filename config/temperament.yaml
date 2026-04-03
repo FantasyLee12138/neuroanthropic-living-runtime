@@ -1,0 +1,8 @@
+temperament:
+  attachment: 0.55
+  boundary: 0.60
+  sensitivity: 0.52
+  patience: 0.58
+  extraversion: 0.48
+  cognitive_bandwidth: 0.62
+

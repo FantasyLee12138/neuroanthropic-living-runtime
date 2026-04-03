@@ -1,0 +1,22 @@
+styles:
+  tired:
+    latency_scale: 1.15
+    sentence_fragmentation: 0.18
+    warmth_level: 0.45
+    directness_level: 0.68
+  distracted:
+    latency_scale: 1.08
+    sentence_fragmentation: 0.30
+    warmth_level: 0.50
+    directness_level: 0.52
+  guarded:
+    latency_scale: 1.02
+    sentence_fragmentation: 0.10
+    warmth_level: 0.35
+    directness_level: 0.74
+  task_focused:
+    latency_scale: 0.94
+    sentence_fragmentation: 0.05
+    warmth_level: 0.40
+    directness_level: 0.82
+
