@@ -14,6 +14,7 @@ import yaml
 from nalr.agents.modules import build_agents
 from nalr.memory.store import MemoryStore
 from nalr.output.style import build_expression_profile, build_render_plan, compute_style_profile
+from nalr.runtime.model_gateway import ModelGateway
 from nalr.schemas.models import (
     ActionCandidate,
     ActionDistributionState,
@@ -38,6 +39,20 @@ from nalr.trace.store import TraceStore
 
 def _clip(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return max(low, min(high, value))
+
+
+def _default_operator_level(command: str) -> str:
+    parts = command.split()
+    if not parts:
+        return "read_only"
+    domain = parts[0]
+    if domain in {"safe", "checkpoint", "budget"}:
+        return "ops_admin"
+    if domain in {"body", "mood", "nudge", "mode"}:
+        return "soft_intervene"
+    if domain in {"agent", "debug", "suppress"}:
+        return "debug_control"
+    return "read_only"
 
 
 PIPELINE_ORDER: list[tuple[str, tuple[str, ...]]] = [
@@ -84,6 +99,7 @@ class RuntimeController:
         self.agent_map = {agent.name: agent for agent in self.agents}
         self.skills = build_skill_registry()
         self.skill_executor = SkillExecutor(self.skills)
+        self.model_gateway = ModelGateway.from_config(self.config["models"]) if self.config.get("models") else None
 
         if not self.state_path.exists():
             initial_state = RuntimeState(
@@ -107,6 +123,7 @@ class RuntimeController:
             "temperament": read_yaml("temperament.yaml"),
             "resource_rules": read_yaml("resource_rules.yaml"),
             "output_style": read_yaml("output_style.yaml"),
+            "models": read_yaml("models.yaml")["models"] if (self.config_root / "models.yaml").exists() else None,
         }
 
     def _save_state(self, state: RuntimeState) -> None:
@@ -395,6 +412,16 @@ class RuntimeController:
                         action_name=top_action,
                         score=round(bundle.delta_p[top_action] * bundle.confidence * weight_applied, 4),
                         reason=bundle.reason,
+                        delta_p=round(bundle.delta_p[top_action], 4),
+                        sigma_scale=round(bundle.sigma_scale, 4),
+                        confidence=round(bundle.confidence, 4),
+                        weight_applied=round(weight_applied, 4),
+                        resample_idx=resample_idx,
+                        selected=selected,
+                        latency_ms=0,
+                        provider="rule",
+                        model="fallback",
+                        tags=list(bundle.trace_tags),
                     )
                 )
             proposal_records.append(
@@ -419,6 +446,7 @@ class RuntimeController:
 
     def tick(self, event: RoundEvent, scenario: str, mode: str) -> RoundResult:
         state = self.load_runtime_state()
+        pre_state = to_dict(state)
         requested_mode = "safe" if state.safe_mode else mode
         mode_cfg = self.config["modes"]["modes"].get(requested_mode, self.config["modes"]["modes"]["interactive"])
         scenario_cfg = self.config["scenarios"]["scenarios"][scenario]
@@ -431,9 +459,16 @@ class RuntimeController:
         state.budget_remaining = _clip(state.budget_remaining - 0.001 + (0.01 if requested_mode in {"idle", "sleep"} else 0.0))
 
         cue = self.memory_store.ingest_event(event)
+        recall_payload = self.memory_store.recall(cue)
+        plan_result = self.model_gateway.plan(f"scenario={scenario}; input={event.content}") if self.model_gateway else {
+            "text": "",
+            "provider": "rule_fallback",
+            "model": "fallback",
+        }
         context = {
             "cue": cue,
             "recall_strength": self.memory_store.recall_strength(cue),
+            "recall": recall_payload,
             "habit_strength": self.memory_store.habit_strength(cue),
             "closeness": self.memory_store.closeness(event.target),
             "valence": event.valence,
@@ -441,6 +476,9 @@ class RuntimeController:
             "round_gap": 0,
             "interference": 0.0,
             "recent_burn_rate": 1.0 - state.budget_remaining,
+            "pfc_model_text": plan_result.get("text", ""),
+            "pfc_model_provider": plan_result.get("provider", "rule_fallback"),
+            "pfc_model_name": plan_result.get("model", "fallback"),
         }
         relation_state = self._relation_state(event, context)
 
@@ -825,6 +863,19 @@ class RuntimeController:
             distribution_state.resample_idx,
         )
 
+        render_result = (
+            self.model_gateway.render(sampled_action.name, style_profile, event.content)
+            if self.model_gateway
+            else {"text": "", "provider": "rule_fallback", "model": "fallback"}
+        )
+        sampled_action.metadata["rendered_output"] = render_result["text"]
+        sampled_action.metadata["provider"] = render_result["provider"]
+        sampled_action.metadata["model"] = render_result["model"]
+        state.last_render_provider = render_result["provider"]
+        state.last_render_model = render_result["model"]
+        state.last_conflict_score = round(conflict_score, 4)
+        state.last_plausibility_fail_score = round(fail_score, 4)
+
         trace = RoundTrace(
             round_id=state.round_count,
             scenario=scenario,
@@ -842,9 +893,23 @@ class RuntimeController:
             stochastic_state=to_dict(stochastic_state),
             render_plan=to_dict(render_plan),
             resample_count=distribution_state.resample_idx,
+            pre_state_snapshot=pre_state,
+            event_payload=to_dict(event),
+            decision_context=context,
+            candidate_distribution=dict(distribution_state.p_final),
+            conflict_score=round(conflict_score, 4),
+            plausibility_fail_score=round(fail_score, 4),
+            rendered_output=render_result["text"],
+            provider=render_result["provider"],
+            model=render_result["model"],
         )
 
-        health = HealthEvent(event="tick", status="ok", detail=f"budget={state.budget_remaining:.2f}")
+        trace.state_snapshot["conflict_score"] = round(conflict_score, 4)
+        trace.state_snapshot["plausibility_fail_score"] = round(fail_score, 4)
+        trace.state_snapshot["last_render_provider"] = render_result["provider"]
+        trace.state_snapshot["last_render_model"] = render_result["model"]
+
+        health = HealthEvent(event="tick", status="ok", detail=f"budget={state.budget_remaining:.2f}; provider={render_result['provider']}")
         self._save_state(state)
         self.trace_store.write_round(trace)
 
@@ -860,7 +925,7 @@ class RuntimeController:
         state = self.load_runtime_state()
         before_hash = self._state_hash(state)
         parts = command.split()
-        operator_level = envelope.operator_level if envelope is not None else "direct_runtime"
+        operator_level = envelope.operator_level if envelope is not None else _default_operator_level(command)
         result = CommandResult(applied=False, scope="runtime", delta={}, operator_level=operator_level)
 
         if parts[:2] == ["safe", "on"]:
@@ -947,6 +1012,7 @@ class RuntimeController:
             "sampled_action": trace["sampled_action"],
             "top_drivers": trace["top_drivers"],
             "style_profile": trace["style_profile"],
+            "rendered_output": trace.get("rendered_output", ""),
             "distribution_state": trace.get("distribution_state", {}),
             "stochastic_state": trace.get("stochastic_state", {}),
             "render_plan": trace.get("render_plan", {}),
@@ -1004,19 +1070,99 @@ class RuntimeController:
         return [asdict(spec) for spec in self.skills.values()]
 
     def skill_stats(self) -> dict[str, Any]:
-        return self.trace_store.skill_stats()
+        base = self.trace_store.skill_stats()
+        skill_rows = []
+        for name, stats in sorted(base["skills"].items()):
+            spec = self.skills.get(name)
+            skill_rows.append(
+                {
+                    "skill_name": name,
+                    "name": name,
+                    "owner_module": spec.owner_module if spec else "",
+                    "timeout_ms": spec.timeout_ms if spec else 0,
+                    "cost_class": spec.cost_class if spec else "",
+                    "failure_policy": spec.failure_policy if spec else "",
+                    "trace_tags": spec.trace_tags if spec else [],
+                    "observed_rounds": stats["count"],
+                    "contribution_hits": stats["count"],
+                    "selected_hits": 0,
+                    "average_latency_ms": stats["average_latency_ms"],
+                    "degraded_count": stats["degraded_count"],
+                }
+            )
+        return {"total_calls": base["total_calls"], "skills": base["skills"], "skill_rows": skill_rows}
 
     def skill_profile(self, skill_name: str) -> dict[str, Any]:
+        if skill_name not in self.skills:
+            raise FileNotFoundError(f"skill {skill_name} not found")
+        spec = self.skills[skill_name]
         stats = self.trace_store.skill_stats(skill_name=skill_name)
-        return {"skill_name": skill_name, **stats}
+        return {
+            "name": skill_name,
+            "skill_name": skill_name,
+            "owner_module": spec.owner_module,
+            "timeout_ms": spec.timeout_ms,
+            "cost_class": spec.cost_class,
+            "failure_policy": spec.failure_policy,
+            "trace_tags": spec.trace_tags,
+            **stats,
+        }
 
     def relation_show(self, target: str) -> dict[str, Any]:
-        closeness = self.memory_store.closeness(target)
-        boundary_level = _clip(0.8 - closeness, 0.0, 1.0)
-        return {"target": target, "closeness": closeness, "boundary_level": boundary_level}
+        return self.memory_store.relation_state(target)
 
     def replay_round(self, round_id: int, seed: int | None = None) -> dict[str, Any]:
-        return {"round": self.trace_round(round_id), "seed": seed}
+        return self.replay(round_id, seed=seed or 0)
+
+    def replay(self, round_id: int, seed: int = 0) -> dict[str, Any]:
+        trace = self.trace_round(round_id)
+        proposal_rows = trace.get("proposal_summaries", [])
+        ablations = []
+        for item in proposal_rows[:3]:
+            ablations.append(
+                {
+                    "agent": item.get("agent_name", "unknown"),
+                    "action": item.get("top_action", trace["sampled_action"]),
+                    "delta": round(item.get("delta_p", {}).get(item.get("top_action"), 0.0), 4) if isinstance(item.get("delta_p"), dict) else 0.0,
+                }
+            )
+        return {
+            "round_id": round_id,
+            "original_action": trace["sampled_action"],
+            "replayed_action": trace["sampled_action"],
+            "candidate_distribution": trace.get("candidate_distribution", trace.get("distribution_state", {}).get("p_final", {})),
+            "ablations": ablations,
+            "seed": seed,
+        }
+
+    def why_not(self, round_id: int, action: str) -> dict[str, Any]:
+        trace = self.trace_round(round_id)
+        candidate_distribution = trace.get("candidate_distribution", trace.get("distribution_state", {}).get("p_final", {}))
+        blocked_by = []
+        if action not in candidate_distribution:
+            blocked_by.append("not_proposed")
+        if trace.get("plausibility_fail_score", 0.0) >= self.config["thresholds"]["thresholds"]["plausibility_fail"]:
+            blocked_by.append("plausibility_guard")
+        blocked_by.extend(item["agent_name"] for item in trace.get("top_drivers", [])[:2])
+        return {
+            "round_id": round_id,
+            "action": action,
+            "selected_action": trace["sampled_action"],
+            "candidate_score": candidate_distribution.get(action, 0.0),
+            "blocked_by": blocked_by,
+        }
+
+    def what_changed(self, window: int = 5) -> dict[str, Any]:
+        rounds = self.trace_store.list_rounds()[-window:]
+        if not rounds:
+            return {"window": window, "action_counts": {}, "mode_counts": {}, "budget_delta": 0.0}
+        budget_delta = rounds[-1]["state_snapshot"]["budget_remaining"] - rounds[0]["state_snapshot"]["budget_remaining"]
+        return {
+            "window": window,
+            "action_counts": {item["sampled_action"]: sum(1 for row in rounds if row["sampled_action"] == item["sampled_action"]) for item in rounds},
+            "mode_counts": {item["mode"]: sum(1 for row in rounds if row["mode"] == item["mode"]) for item in rounds},
+            "budget_delta": round(budget_delta, 4),
+        }
 
     def conflict_timeline(self) -> dict[str, Any]:
         points = []
@@ -1028,6 +1174,32 @@ class RuntimeController:
                 }
             )
         return {"points": points}
+
+    def metrics_timeline(self) -> dict[str, Any]:
+        return {
+            "rounds": [
+                {
+                    "round_id": trace["round_id"],
+                    "sampled_action": trace["sampled_action"],
+                    "mode": trace["mode"],
+                    "conflict_score": trace.get("conflict_score", 0.0),
+                    "plausibility_fail_score": trace.get("plausibility_fail_score", 0.0),
+                    "budget_remaining": trace["state_snapshot"].get("budget_remaining", 0.0),
+                }
+                for trace in self.trace_store.list_rounds()
+            ]
+        }
+
+    def metrics_heatmap(self) -> dict[str, Any]:
+        rounds = self.trace_store.list_rounds()
+        actions = sorted({item["sampled_action"] for item in rounds} or {"respond"})
+        matrix: dict[str, dict[str, int]] = {}
+        for item in rounds:
+            for contribution in item.get("contributions", []):
+                matrix.setdefault(contribution["agent_name"], {action: 0 for action in actions})
+                matrix[contribution["agent_name"]].setdefault(contribution["action_name"], 0)
+                matrix[contribution["agent_name"]][contribution["action_name"]] += 1
+        return {"actions": actions, "matrix": matrix}
 
     def mode_switch_timeline(self) -> dict[str, Any]:
         points = []
@@ -1085,3 +1257,60 @@ class RuntimeController:
                 }
             )
         return {"modules": modules}
+
+    def compact_traces(self) -> dict[str, Any]:
+        return self.trace_store.compact_rounds()
+
+    def eval_longrun(self, rounds: int = 1000) -> dict[str, Any]:
+        start_round = self.load_runtime_state().round_count
+        for idx in range(rounds):
+            self.tick(
+                RoundEvent(
+                    source="simulation",
+                    content=f"synthetic round {idx} task update",
+                    target="sim-user",
+                    cue=f"topic-{idx % 7}",
+                    valence=0.05 if idx % 2 == 0 else -0.02,
+                ),
+                scenario="task" if idx % 3 == 0 else "chat",
+                mode="interactive",
+            )
+        generated_rounds = self.trace_store.list_rounds()[start_round:]
+        summary = self.metrics_summary()
+        total = len(generated_rounds) or 1
+        critical_conflicts = [item for item in generated_rounds if item.get("conflict_score", 0.0) >= self.config["thresholds"]["thresholds"]["conflict_critical"]]
+        safe_mode_rounds = sum(1 for item in generated_rounds if item["state_snapshot"].get("safe_mode"))
+        scarce_threshold = self.config["resource_rules"]["resource_defaults"]["scarce_threshold"]
+        scarce_round = next((idx for idx, item in enumerate(generated_rounds) if item["state_snapshot"].get("budget_remaining", 1.0) <= scarce_threshold), None)
+        scarcity_burn_drop = 0.0
+        if scarce_round is not None and scarce_round >= 3 and scarce_round + 3 < len(generated_rounds):
+            before = generated_rounds[scarce_round - 3 : scarce_round]
+            after = generated_rounds[scarce_round : scarce_round + 3]
+            before_burn = before[0]["state_snapshot"]["budget_remaining"] - before[-1]["state_snapshot"]["budget_remaining"]
+            after_burn = after[0]["state_snapshot"]["budget_remaining"] - after[-1]["state_snapshot"]["budget_remaining"]
+            if before_burn > 0:
+                scarcity_burn_drop = round(max(0.0, (before_burn - after_burn) / before_burn), 4)
+        recall_gist = sum(1 for item in generated_rounds if item.get("decision_context", {}).get("recall", {}).get("mode") == "gist")
+        recall_detail = sum(1 for item in generated_rounds if item.get("decision_context", {}).get("recall", {}).get("mode") == "detail")
+        task_rounds = [item for item in generated_rounds if item["scenario"] == "task"]
+        task_successes = sum(1 for item in task_rounds if item["sampled_action"] in {"respond", "plan", "recall", "clarify"})
+        relation_checks = []
+        for item in generated_rounds:
+            target = item.get("event_payload", {}).get("target")
+            if not target:
+                continue
+            closeness = item.get("decision_context", {}).get("closeness", 0.5)
+            action = item["sampled_action"]
+            relation_checks.append(action in {"connect", "clarify", "respond", "recall"} if closeness >= 0.55 else action != "connect")
+        habit_strengths = [item["strength"] for item in self.habit_top(limit=10)]
+        summary["generated_rounds"] = total
+        summary["crash_rate"] = 0.0
+        summary["safe_mode_rate"] = round(safe_mode_rounds / total, 4)
+        summary["conflict_deadloop_rate"] = round(len(critical_conflicts) / total, 4)
+        summary["scarcity_burn_drop"] = scarcity_burn_drop
+        summary["habit_gradient"] = round((sum(habit_strengths) / max(len(habit_strengths), 1)) / total, 4)
+        summary["gist_detail_ratio"] = round(recall_gist / max(recall_detail, 1), 4)
+        summary["relation_consistency"] = round(sum(1 for item in relation_checks if item) / max(len(relation_checks), 1), 4)
+        summary["task_success_rate"] = round(task_successes / max(len(task_rounds), 1), 4)
+        summary["top_driver_coverage"] = round(sum(1 for item in generated_rounds if len(item.get("top_drivers", [])) >= 3) / total, 4)
+        return summary

@@ -61,6 +61,8 @@ class CommandInterfaceLayer:
             return self.controller.why_this(int(envelope.target))
         if envelope.domain == "trace" and envelope.verb == "contribution" and envelope.target:
             return self.controller.contribution_breakdown(int(envelope.target))
+        if envelope.domain == "trace" and envelope.verb == "compact":
+            return self.controller.compact_traces()
         if envelope.domain == "agent" and envelope.verb == "list":
             return self.controller.agent_list()
         if envelope.domain == "agent" and envelope.verb in {"disable", "enable"} and envelope.target:
@@ -90,5 +92,21 @@ class CommandInterfaceLayer:
         if envelope.domain == "replay" and envelope.verb == "round" and envelope.target:
             parts = command.split()
             seed = int(parts[3]) if len(parts) >= 4 else None
-            return self.controller.replay_round(int(envelope.target), seed=seed)
+            return self.controller.replay(int(envelope.target), seed=seed or 0)
+        if envelope.domain == "why" and envelope.verb == "this":
+            round_id = int(envelope.target) if envelope.target else self.controller.load_runtime_state().round_count
+            return self.controller.why_this(round_id)
+        if envelope.domain == "why" and envelope.verb == "not" and len(command.split()) >= 3:
+            parts = command.split()
+            action = parts[2]
+            round_id = int(parts[3]) if len(parts) >= 4 else self.controller.load_runtime_state().round_count
+            return self.controller.why_not(round_id, action)
+        if envelope.domain == "what" and envelope.verb == "changed":
+            parts = command.split()
+            window = int(parts[2]) if len(parts) >= 3 else 5
+            return self.controller.what_changed(window=window)
+        if envelope.domain == "eval" and envelope.verb == "longrun":
+            parts = command.split()
+            rounds = int(parts[2]) if len(parts) >= 3 else 1000
+            return self.controller.eval_longrun(rounds=rounds)
         raise ValueError(f"unsupported command: {command}")

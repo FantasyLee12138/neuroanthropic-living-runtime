@@ -6,6 +6,10 @@ from pathlib import Path
 from nalr.schemas.models import RoundEvent
 
 
+def _clip(value: float, low: float = 0.0, high: float = 1.0) -> float:
+    return max(low, min(high, value))
+
+
 def _derive_cue(event: RoundEvent) -> str | None:
     if event.cue:
         return event.cue.lower()
@@ -17,8 +21,10 @@ def _derive_cue(event: RoundEvent) -> str | None:
 
 
 class MemoryStore:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, hot_limit: int = 500, warm_limit: int = 2500) -> None:
         self.root = root
+        self.hot_limit = hot_limit
+        self.warm_limit = warm_limit
         self.memory_dir = self.root / "memory"
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         self.episodic_hot_dir = self.memory_dir / "episodic_hot"
@@ -186,6 +192,73 @@ class MemoryStore:
                 return item["closeness"]
         return 0.5
 
+    def relation_state(self, target: str) -> dict:
+        closeness = self.closeness(target)
+        return {
+            "target": target,
+            "closeness": closeness,
+            "boundary_level": _clip(0.8 - closeness, 0.0, 1.0),
+            "known": any(item["target"] == target for item in self._read_list(self.relation_path)),
+        }
+
+    def compact_layers(self) -> None:
+        hot = sorted(self._read_list(self.episodic_path), key=lambda item: item.get("count", 0), reverse=True)
+        warm = sorted(self._read_list(self.episodic_warm_path), key=lambda item: item.get("count", 0), reverse=True)
+        archive = sorted(self._read_list(self.episodic_archive_path), key=lambda item: item.get("count", 0), reverse=True)
+
+        while len(hot) > self.hot_limit:
+            demoted = hot.pop()
+            demoted["detail_strength"] = min(demoted.get("detail_strength", 0.0), 0.49)
+            warm.append(demoted)
+
+        while len(warm) > self.warm_limit:
+            demoted = warm.pop()
+            demoted["detail_strength"] = min(demoted.get("detail_strength", 0.0), 0.24)
+            demoted["summary"] = demoted.get("summary", f"Archived memory for {demoted['cue']}")
+            archive.append(demoted)
+
+        self._write_list(self.episodic_path, hot)
+        self._write_list(self.episodic_warm_path, warm)
+        self._write_list(self.episodic_archive_path, archive)
+
+    def tier_counts(self) -> dict[str, int]:
+        return {
+            "hot": len(self._read_list(self.episodic_path)),
+            "warm": len(self._read_list(self.episodic_warm_path)),
+            "archive": len(self._read_list(self.episodic_archive_path)),
+        }
+
+    def recall(self, cue: str | None, allow_detail: bool = True) -> dict:
+        if not cue:
+            return {"cue": None, "mode": "none", "strength": 0.0, "content": ""}
+        for tier, path in (
+            ("hot", self.episodic_path),
+            ("warm", self.episodic_warm_path),
+            ("archive", self.episodic_archive_path),
+        ):
+            for item in self._read_list(path):
+                if item["cue"] != cue:
+                    continue
+                detail_strength = item.get("detail_strength", 0.0)
+                gist_strength = item.get("gist_strength", 0.0)
+                if allow_detail and detail_strength >= 0.50:
+                    return {
+                        "cue": cue,
+                        "tier": tier,
+                        "mode": "detail",
+                        "strength": detail_strength,
+                        "content": item.get("last_content", item.get("summary", "")),
+                    }
+                if gist_strength > 0:
+                    return {
+                        "cue": cue,
+                        "tier": tier,
+                        "mode": "gist",
+                        "strength": gist_strength,
+                        "content": item.get("summary", item.get("last_content", "")),
+                    }
+        return {"cue": cue, "mode": "none", "strength": 0.0, "content": ""}
+
     def _sync_memory_tiers(self, memory: dict) -> None:
         if memory["count"] >= 4:
             warm = self._read_list(self.episodic_warm_path)
@@ -203,3 +276,4 @@ class MemoryStore:
                 archive.append(archive_item)
             archive_item.update(memory)
             self._write_list(self.episodic_archive_path, archive)
+        self.compact_layers()

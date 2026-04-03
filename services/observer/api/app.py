@@ -58,7 +58,10 @@ def create_app(project_root: Path | str | None = None, config_root: Path | str |
 
     @app.get("/skills/profile/{skill_name}")
     def skill_profile(skill_name: str) -> dict:
-        return controller.skill_profile(skill_name)
+        try:
+            return controller.skill_profile(skill_name)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/metrics/conflicts")
     def conflict_timeline() -> dict:
@@ -71,6 +74,28 @@ def create_app(project_root: Path | str | None = None, config_root: Path | str |
     @app.get("/analysis/ablation")
     def ablation_summary() -> dict:
         return controller.ablation_summary()
+
+    @app.get("/metrics/timeline")
+    def metrics_timeline() -> dict:
+        return controller.metrics_timeline()
+
+    @app.get("/metrics/heatmap")
+    def metrics_heatmap() -> dict:
+        return controller.metrics_heatmap()
+
+    @app.get("/replay/{round_id}")
+    def replay(round_id: int, seed: int = 0) -> dict:
+        try:
+            return controller.replay(round_id, seed=seed)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/why-not/{round_id}/{action}")
+    def why_not(round_id: int, action: str) -> dict:
+        try:
+            return controller.why_not(round_id, action)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     dashboard_path = project_root_path / "services" / "observer" / "dashboard" / "index.html"
     if not dashboard_path.exists():

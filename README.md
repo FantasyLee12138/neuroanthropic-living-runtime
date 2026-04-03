@@ -16,7 +16,6 @@ NeuroAnthropic Living Runtime（NALR）是一个基于 [开发文档v0.56](./开
 ## Current Observable Capabilities
 
 - Current stable baseline still supports `.venv/bin/alive state show`, `.venv/bin/alive trace round 1`, `.venv/bin/alive agent list`.
-- Development branch for this rollout: `codex/v056-runtime`.
 - Registry skeleton is live and enumerable through `RuntimeController.skill_list()` and the new unit contract tests.
 - Runtime trace now exposes `distribution_state`, `stochastic_state`, `render_plan`, stage order, and stage-level proposal summaries.
 - Formula-driven decision core is active: `P_base`, per-agent `delta_p`, CI update, clip/normalize, stochastic mixing, distribution-level plausibility gating, and output gating all leave trace evidence.
@@ -24,20 +23,22 @@ NeuroAnthropic Living Runtime（NALR）是一个基于 [开发文档v0.56](./开
 - Skill-level trace is written to `.alive/traces/skills/skill_traces.jsonl`.
 - Command trace now includes `operator_level` and `rollback_available`.
 - CIL-backed commands now include `.venv/bin/alive skill stats`, `.venv/bin/alive relation show user`, `.venv/bin/alive rest`, `.venv/bin/alive calm`.
-- Observer diagnostics now include `GET /skills/stats`, `GET /skills/profile/{skill_name}`, `GET /metrics/conflicts`, `GET /metrics/mode-switches`, `GET /analysis/ablation`.
+- Replay and diagnostics commands now include `.venv/bin/alive replay round 1 --seed 7`, `.venv/bin/alive why this 1`, `.venv/bin/alive why not rest 1`, `.venv/bin/alive what changed 5`, `.venv/bin/alive trace compact`, `.venv/bin/alive eval longrun --rounds 1000`.
+- Observer diagnostics now include `GET /skills/stats`, `GET /skills/profile/{skill_name}`, `GET /metrics/conflicts`, `GET /metrics/mode-switches`, `GET /analysis/ablation`, `GET /metrics/timeline`, `GET /metrics/heatmap`, `GET /replay/{round_id}`, `GET /why-not/{round_id}/{action}`.
+- Doubao ARK gateway is wired through `config/models.yaml`; renderer path uses the gateway and falls back to rules when `ARK_API_KEY` is absent.
 - Longrun smoke currently holds for 1000 interactive rounds without falling into `safe_mode`.
 
 ## Next Milestone
 
-- Keep the runtime stable while replacing remaining heuristic providers with model-backed `PFC`, `Perspective`, and renderer implementations.
+- Keep the merged runtime stable while finishing analytic-store Parquet indexing, 10k longrun validation, and higher-fidelity provider routing for `PFC`, `Perspective`, and renderer.
 
 ## Known Gaps Against v0.56
 
-- Parquet analytics output is not enabled yet; current trace dual-path is JSON round files + JSONL streams.
-- `ConflictMonitorAgent` still uses a lightweight heuristic conflict score and capped resample loop, not the full multi-pass controller from the spec.
-- `SkillExecutor` currently applies lightweight input validation and strict output validation; it is not yet a typed runtime validator.
-- High-cost model providers for `PFCAgent`, `PerspectiveModel`, and renderer are still fallback-first interfaces.
-- Trace storage layout already reserves the v0.56 layers, but Parquet export and richer archive compaction are still missing.
+- Parquet export exists, but it is still not the full analytic store / partitioned index layout described in the document.
+- `10k` longrun has not been completed as a release gate; current published smoke remains `1k`.
+- `ConflictMonitorAgent` still uses a bounded heuristic conflict loop rather than the full multi-pass controller from the spec.
+- High-cost model providers for `PFCAgent`, `PerspectiveModel`, and renderer are still fallback-first or partially routed interfaces.
+- Security policy, cultural calibration, and multi-user / multi-session resource scheduling are still open.
 
 ## v0.56 公式层实现
 
@@ -125,12 +126,23 @@ alive mode set task
 alive trace round 1
 alive trace why 1
 alive trace contribution 1
+alive trace compact
 alive agent list
 alive agent disable DMNAgent
+alive skill stats
+alive skill profile generate_candidates
+alive relation show user
+alive replay round 1 --seed 7
+alive why this 1
+alive why not rest 1
+alive what changed 5
+alive eval longrun --rounds 1000
 alive checkpoint create
 alive checkpoint rewind ckpt-0000
 alive safe on
 alive budget show
+alive rest
+alive calm
 ```
 
 observer 诊断入口：
@@ -141,6 +153,15 @@ GET /trace/{round_id}
 GET /why/{round_id}
 GET /contributions/{round_id}
 GET /metrics/summary
+GET /skills/stats
+GET /skills/profile/{skill_name}
+GET /metrics/conflicts
+GET /metrics/mode-switches
+GET /analysis/ablation
+GET /metrics/timeline
+GET /metrics/heatmap
+GET /replay/{round_id}
+GET /why-not/{round_id}/{action}
 GET /dashboard
 ```
 
