@@ -1,7 +1,0 @@
-{
-  "read_source_default": "parquet",
-  "trace_sync_state": "healthy",
-  "parquet_live_ready": true,
-  "degraded_reason": null,
-  "last_sync_at": "2026-04-03T18:07:23Z"
-}
