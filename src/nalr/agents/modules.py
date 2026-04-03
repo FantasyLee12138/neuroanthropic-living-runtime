@@ -56,7 +56,16 @@ class PFCAgent(BaseAgent):
             prefs["plan"] = 0.55
         if "remember" in content or context["cue"]:
             prefs["recall"] = max(prefs.get("recall", 0.0), 0.32)
-        return Proposal(self.name, prefs, confidence=0.83, trace_tags=["pfc"], reason=_top_reason(prefs, "deliberate planner"))
+        reason = "deliberate planner"
+        provider = "rule"
+        model = "fallback"
+        if context.get("pfc_model_text"):
+            reason = f"{reason}; model_hint={context['pfc_model_text'][:64]}"
+            provider = context.get("pfc_model_provider", "rule")
+            model = context.get("pfc_model_name", "fallback")
+            if any(token in context["pfc_model_text"].lower() for token in ["plan", "step", "organize"]):
+                prefs["plan"] = max(prefs.get("plan", 0.0), 0.62)
+        return Proposal(self.name, prefs, confidence=0.83, trace_tags=["pfc"], reason=_top_reason(prefs, reason), provider=provider, model=model)
 
 
 class HippocampusAgent(BaseAgent):
@@ -129,4 +138,3 @@ def build_agents() -> list[BaseAgent]:
         DMNAgent(),
         PerspectiveModel(),
     ]
-

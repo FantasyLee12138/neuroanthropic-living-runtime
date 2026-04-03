@@ -73,3 +73,67 @@ def test_why_this_and_metrics_summary_surface_trace_evidence(tmp_path):
     assert why_payload["top_drivers"]
     assert metrics["total_rounds"] == 1
     assert metrics["sampled_actions"]
+
+
+def test_tick_exposes_conflict_and_guard_trace_fields(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    result = controller.tick(
+        RoundEvent(
+            source="user",
+            content="Help me plan a careful but emotionally warm reply while also remembering brunch.",
+            target="friend",
+            cue="brunch",
+            valence=0.4,
+        ),
+        scenario="companion",
+        mode="interactive",
+    )
+
+    assert "conflict_score" in result.trace.state_snapshot
+    assert "plausibility_fail_score" in result.trace.state_snapshot
+    assert all(hasattr(item, "confidence") for item in result.trace.contributions)
+    assert result.trace.state_snapshot["last_render_provider"]
+
+
+def test_replay_why_not_and_what_changed_return_counterfactuals(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    controller.tick(
+        RoundEvent(source="user", content="Help me plan dinner and remember pasta.", target="friend", cue="pasta"),
+        scenario="task",
+        mode="interactive",
+    )
+    controller.tick(
+        RoundEvent(source="user", content="Remember pasta again but be careful.", target="friend", cue="pasta"),
+        scenario="companion",
+        mode="interactive",
+    )
+
+    replay_payload = controller.replay(1, seed=7)
+    why_not_payload = controller.why_not(2, "rest")
+    changed_payload = controller.what_changed(window=2)
+
+    assert replay_payload["round_id"] == 1
+    assert "original_action" in replay_payload
+    assert "ablations" in replay_payload
+    assert why_not_payload["round_id"] == 2
+    assert why_not_payload["action"] == "rest"
+    assert why_not_payload["blocked_by"]
+    assert changed_payload["window"] == 2
+    assert changed_payload["action_counts"]
+
+
+def test_safe_mode_disables_dmn_and_perspective_contributions(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.apply_command("safe on")
+
+    result = controller.tick(
+        RoundEvent(source="user", content="I am drifting and need a gentle response.", target="friend"),
+        scenario="companion",
+        mode="idle",
+    )
+
+    names = {item.agent_name for item in result.trace.contributions}
+    assert "DMNAgent" not in names
+    assert "PerspectiveModel" not in names

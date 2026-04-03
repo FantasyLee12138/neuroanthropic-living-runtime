@@ -52,6 +52,22 @@ def create_app(project_root: Path | str | None = None, config_root: Path | str |
     def metrics_summary() -> dict:
         return controller.metrics_summary()
 
+    @app.get("/metrics/timeline")
+    def metrics_timeline() -> dict:
+        return controller.metrics_timeline()
+
+    @app.get("/metrics/heatmap")
+    def metrics_heatmap() -> dict:
+        return controller.metrics_heatmap()
+
+    @app.get("/replay/{round_id}")
+    def replay(round_id: int, seed: int = 0) -> dict:
+        return controller.replay(round_id, seed=seed)
+
+    @app.get("/why-not/{round_id}/{action}")
+    def why_not(round_id: int, action: str) -> dict:
+        return controller.why_not(round_id, action)
+
     dashboard_path = project_root_path / "services" / "observer" / "dashboard" / "index.html"
     if not dashboard_path.exists():
         dashboard_path = Path(__file__).resolve().parents[1] / "dashboard" / "index.html"

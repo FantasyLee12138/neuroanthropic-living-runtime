@@ -36,6 +36,9 @@ class Proposal:
     veto: bool = False
     trace_tags: list[str] = field(default_factory=list)
     reason: str = ""
+    provider: str = "rule"
+    model: str = "fallback"
+    latency_ms: int = 0
 
 
 @dataclass
@@ -52,6 +55,16 @@ class AgentContribution:
     action_name: str
     score: float
     reason: str
+    delta_p: float = 0.0
+    sigma_scale: float = 1.0
+    confidence: float = 0.0
+    weight_applied: float = 1.0
+    resample_idx: int = 0
+    selected: bool = False
+    latency_ms: int = 0
+    provider: str = "rule"
+    model: str = "fallback"
+    tags: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -64,6 +77,16 @@ class RoundTrace:
     top_drivers: list[AgentContribution]
     style_profile: dict[str, Any]
     state_snapshot: dict[str, Any]
+    pre_state_snapshot: dict[str, Any] = field(default_factory=dict)
+    event_payload: dict[str, Any] = field(default_factory=dict)
+    decision_context: dict[str, Any] = field(default_factory=dict)
+    candidate_distribution: dict[str, float] = field(default_factory=dict)
+    conflict_score: float = 0.0
+    plausibility_fail_score: float = 0.0
+    resample_count: int = 0
+    rendered_output: str = ""
+    provider: str = "rule_fallback"
+    model: str = "fallback"
 
 
 @dataclass
@@ -85,6 +108,15 @@ class RuntimeState:
     last_action: str = "boot"
     last_checkpoint_id: str | None = None
     agents_enabled: dict[str, bool] = field(default_factory=dict)
+    agent_weights: dict[str, float] = field(default_factory=dict)
+    recent_actions: list[str] = field(default_factory=list)
+    recent_modes: list[str] = field(default_factory=list)
+    model_failure_streak: int = 0
+    conflict_hot: int = 0
+    last_render_provider: str = "rule_fallback"
+    last_render_model: str = "fallback"
+    last_conflict_score: float = 0.0
+    last_plausibility_fail_score: float = 0.0
 
 
 @dataclass
@@ -94,6 +126,7 @@ class RoundResult:
     trace: RoundTrace
     state: RuntimeState
     health: HealthEvent
+    rendered_output: str = ""
 
 
 @dataclass

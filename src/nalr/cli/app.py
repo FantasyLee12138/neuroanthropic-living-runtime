@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Annotated
 
 import typer
 
@@ -23,6 +24,11 @@ agent_app = typer.Typer()
 checkpoint_app = typer.Typer()
 safe_app = typer.Typer()
 budget_app = typer.Typer()
+debug_app = typer.Typer()
+replay_app = typer.Typer()
+why_app = typer.Typer()
+what_app = typer.Typer()
+eval_app = typer.Typer()
 
 app.add_typer(state_app, name="state")
 app.add_typer(body_app, name="body")
@@ -36,6 +42,11 @@ app.add_typer(agent_app, name="agent")
 app.add_typer(checkpoint_app, name="checkpoint")
 app.add_typer(safe_app, name="safe")
 app.add_typer(budget_app, name="budget")
+app.add_typer(debug_app, name="debug")
+app.add_typer(replay_app, name="replay")
+app.add_typer(why_app, name="why")
+app.add_typer(what_app, name="what")
+app.add_typer(eval_app, name="eval")
 
 
 def get_controller() -> RuntimeController:
@@ -102,6 +113,11 @@ def trace_contribution(round_id: int) -> None:
     emit(get_controller().contribution_breakdown(round_id))
 
 
+@trace_app.command("compact")
+def trace_compact() -> None:
+    emit(get_controller().compact_traces())
+
+
 @agent_app.command("list")
 def agent_list() -> None:
     emit(get_controller().agent_list())
@@ -140,6 +156,40 @@ def safe_off() -> None:
 @budget_app.command("show")
 def budget_show() -> None:
     emit({"budget_remaining": get_controller().load_runtime_state().budget_remaining})
+
+
+@debug_app.command("weight")
+def debug_weight(agent_name: str, weight: float) -> None:
+    emit(get_controller().apply_command(f"debug weight {agent_name} {weight}"))
+
+
+@replay_app.command("round")
+def replay_round(round_id: int, seed: int = 0) -> None:
+    emit(get_controller().replay(round_id, seed=seed))
+
+
+@why_app.command("this")
+def why_this(round_id: Annotated[int, typer.Argument()] = 0) -> None:
+    controller = get_controller()
+    round_id = round_id or controller.load_runtime_state().round_count
+    emit(controller.why_this(round_id))
+
+
+@why_app.command("not")
+def why_not(action: Annotated[str, typer.Argument()], round_id: Annotated[int, typer.Argument()] = 0) -> None:
+    controller = get_controller()
+    round_id = round_id or controller.load_runtime_state().round_count
+    emit(controller.why_not(round_id, action))
+
+
+@what_app.command("changed")
+def what_changed(window: int = 5) -> None:
+    emit(get_controller().what_changed(window=window))
+
+
+@eval_app.command("longrun")
+def eval_longrun(rounds: int = 1000) -> None:
+    emit(get_controller().eval_longrun(rounds=rounds))
 
 
 def main() -> None:

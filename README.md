@@ -19,6 +19,7 @@ NeuroAnthropic Living Runtime（NALR）是一个基于 [开发文档v0.56](./开
 - `src/nalr/output`：输出风格映射
 - `src/nalr/cli`：`alive` CLI
 - `services/observer`：只读 observer API 与 dashboard 占位
+- `config/models.yaml`：Doubao ARK 模型网关配置
 
 ## 目录说明
 
@@ -62,6 +63,10 @@ export NALR_HOME=.alive
 export NALR_CONFIG_DIR=config
 export NALR_SCENARIO=chat
 export NALR_MODE=interactive
+export NALR_MODEL_PROVIDER=doubao_ark
+export NALR_PRIMARY_MODEL=doubao-seed-2-0-pro-260215
+export NALR_FAST_MODEL=doubao-seed-2-0-pro-260215
+export ARK_API_KEY=...
 ```
 
 ## CLI 示例
@@ -77,12 +82,19 @@ alive mode set task
 alive trace round 1
 alive trace why 1
 alive trace contribution 1
+alive trace compact
 alive agent list
 alive agent disable DMNAgent
 alive checkpoint create
 alive checkpoint rewind ckpt-0000
 alive safe on
 alive budget show
+alive debug weight PFCAgent 0.3
+alive replay round 1 --seed 7
+alive why this 1
+alive why not rest 1
+alive what changed --window 5
+alive eval longrun --rounds 1000
 ```
 
 observer 诊断入口：
@@ -93,6 +105,10 @@ GET /trace/{round_id}
 GET /why/{round_id}
 GET /contributions/{round_id}
 GET /metrics/summary
+GET /metrics/timeline
+GET /metrics/heatmap
+GET /replay/{round_id}
+GET /why-not/{round_id}/{action}
 GET /dashboard
 ```
 
@@ -100,8 +116,8 @@ GET /dashboard
 
 1. 把当前基于规则的 runtime 扩展成更细的 proposal/veto 分层。
 2. 将记忆热层扩展为 hot/warm/archive 压缩与 replay。
-3. 将 observer 从只读 JSON API 扩展到 why-this、贡献度和长跑指标面板。
-4. 为 PFC/renderer 接入真正的主模型与小模型路由。
+3. 将 observer 从只读 JSON API 扩展到 why-this、贡献度、heatmap 和长跑指标面板。
+4. 为 PFC/renderer 接入真正的主模型与小模型路由，并保留规则回退。
 
 ## 运行截图占位
 

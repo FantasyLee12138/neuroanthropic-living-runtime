@@ -12,6 +12,15 @@ import yaml
 from nalr.agents.modules import build_agents
 from nalr.memory.store import MemoryStore
 from nalr.output.style import compute_style_profile
+from nalr.runtime.decision import (
+    BehaviorPlausibilityGuard,
+    ConflictMonitorAgent,
+    ForcedModeSwitch,
+    ValueAgent,
+    sample_action,
+    summarize_counts,
+)
+from nalr.runtime.model_gateway import ModelGateway
 from nalr.schemas.models import (
     ActionCandidate,
     AgentContribution,
@@ -49,13 +58,22 @@ class RuntimeController:
         self.memory_store = MemoryStore(self.home_path)
         self.agents = build_agents()
         self.skills = build_skill_registry()
+        self.model_gateway = ModelGateway.from_config(self.config["models"])
+        self.value_agent = ValueAgent()
+        self.conflict_agent = ConflictMonitorAgent()
+        self.plausibility_guard = BehaviorPlausibilityGuard()
+        self.forced_mode_switch = ForcedModeSwitch()
 
         if not self.state_path.exists():
             initial_state = RuntimeState(
                 agents_enabled={
                     name: agent_cfg.get("enabled", True)
                     for name, agent_cfg in self.config["agents"]["agents"].items()
-                }
+                },
+                agent_weights={
+                    name: agent_cfg.get("weight", 1.0)
+                    for name, agent_cfg in self.config["agents"]["agents"].items()
+                },
             )
             self._save_state(initial_state)
 
@@ -72,6 +90,7 @@ class RuntimeController:
             "temperament": read_yaml("temperament.yaml"),
             "resource_rules": read_yaml("resource_rules.yaml"),
             "output_style": read_yaml("output_style.yaml"),
+            "models": read_yaml("models.yaml")["models"],
         }
 
     def _save_state(self, state: RuntimeState) -> None:
@@ -84,47 +103,173 @@ class RuntimeController:
     def _state_hash(self, state: RuntimeState) -> str:
         return hashlib.sha1(json.dumps(to_dict(state), sort_keys=True).encode("utf-8")).hexdigest()
 
-    def _aggregate(self, proposals: list[Proposal], state: RuntimeState) -> tuple[ActionCandidate, list[AgentContribution]]:
+    def _candidate_from_state(self, state_payload: dict[str, Any]) -> RuntimeState:
+        return RuntimeState(**state_payload)
+
+    def _append_history(self, items: list[str], value: str, limit: int = 8) -> list[str]:
+        updated = [*items, value]
+        return updated[-limit:]
+
+    def _build_context(self, event: RoundEvent, state: RuntimeState, scenario_cfg: dict[str, Any], allow_detail: bool = True) -> dict[str, Any]:
+        cue = self.memory_store.ingest_event(event)
+        recall = self.memory_store.recall(cue, allow_detail=allow_detail)
+        model_plan = self.model_gateway.plan(f"Scenario={scenario_cfg}; user={event.content}")
+        return {
+            "cue": cue,
+            "recall_strength": self.memory_store.recall_strength(cue),
+            "recall": recall,
+            "habit_strength": self.memory_store.habit_strength(cue),
+            "closeness": self.memory_store.closeness(event.target),
+            "body_energy": state.body_energy,
+            "pfc_model_text": model_plan["text"],
+            "pfc_model_provider": model_plan["provider"],
+            "pfc_model_name": model_plan["model"],
+        }
+
+    def _collect_proposals(self, event: RoundEvent, state: RuntimeState, scenario_cfg: dict[str, Any], context: dict[str, Any], resample_idx: int = 0) -> tuple[dict[str, float], list[AgentContribution], list[dict[str, Any]]]:
         scores: dict[str, float] = {}
         contributions: list[AgentContribution] = []
-
-        for proposal in proposals:
-            if proposal.veto:
+        raw: list[dict[str, Any]] = []
+        safe_mode_blocked = {"DMNAgent", "PerspectiveModel"}
+        for agent in self.agents:
+            if not state.agents_enabled.get(agent.name, True):
                 continue
-            if not proposal.action_preferences:
+            if state.safe_mode and agent.name in safe_mode_blocked:
                 continue
+            proposal = agent.propose(event, state, scenario_cfg, context)
+            raw.append(to_dict(proposal))
+            if proposal.veto or not proposal.action_preferences:
+                continue
+            weight = state.agent_weights.get(agent.name, 1.0)
             top_action = max(proposal.action_preferences, key=proposal.action_preferences.get)
-            top_score = proposal.action_preferences[top_action]
+            top_score = proposal.action_preferences[top_action] * weight
             contributions.append(
                 AgentContribution(
                     agent_name=proposal.agent_name,
                     action_name=top_action,
                     score=round(top_score, 4),
                     reason=proposal.reason,
+                    delta_p=round(top_score, 4),
+                    sigma_scale=proposal.sigma_scale,
+                    confidence=proposal.confidence,
+                    weight_applied=weight,
+                    resample_idx=resample_idx,
+                    selected=False,
+                    latency_ms=proposal.latency_ms,
+                    provider=proposal.provider,
+                    model=proposal.model,
+                    tags=list(proposal.trace_tags),
                 )
             )
             for action_name, score in proposal.action_preferences.items():
-                scores[action_name] = scores.get(action_name, 0.0) + score
+                scores[action_name] = scores.get(action_name, 0.0) + (score * weight)
+        return scores, contributions, raw
 
-        if not scores:
-            scores["respond"] = 0.1
+    def _run_decision_loop(
+        self,
+        event: RoundEvent,
+        state: RuntimeState,
+        scenario_name: str,
+        scenario_cfg: dict[str, Any],
+        context: dict[str, Any],
+        seed: int | None = None,
+    ) -> dict[str, Any]:
+        scores, contributions, raw_proposals = self._collect_proposals(event, state, scenario_cfg, context)
+        scores, value_reason = self.value_agent.apply(scores, scenario_name, to_dict(state), context)
+        contributions.append(
+            AgentContribution(
+                agent_name="ValueAgent",
+                action_name=max(scores, key=scores.get) if scores else "respond",
+                score=round(max(scores.values()) if scores else 0.0, 4),
+                reason=value_reason,
+                confidence=0.72,
+                weight_applied=state.agent_weights.get("ValueAgent", 0.9),
+                provider="rule",
+                model="value-heuristic",
+                tags=["value"],
+            )
+        )
 
+        scores, forced_switch = self.forced_mode_switch.apply(
+            scores,
+            state.recent_actions,
+            self.config["thresholds"]["thresholds"]["max_mode_lock_rounds"],
+        )
+        if forced_switch:
+            contributions.append(
+                AgentContribution(
+                    agent_name="ForcedModeSwitch",
+                    action_name=max(scores, key=scores.get),
+                    score=round(scores[max(scores, key=scores.get)], 4),
+                    reason="forced focus switch",
+                    confidence=0.65,
+                    weight_applied=state.agent_weights.get("ForcedModeSwitch", 0.8),
+                    provider="rule",
+                    model="forced-mode",
+                    tags=["guard"],
+                )
+            )
+
+        conflict_score, resample_limit = self.conflict_agent.score(scores, raw_proposals, context)
         if state.safe_mode:
-            scores["respond"] = scores.get("respond", 0.0) + 0.2
+            resample_limit = 0
+        candidate_name, distribution = sample_action(scores, seed=seed)
+        plausibility_fail = self.plausibility_guard.score(candidate_name, scenario_name, to_dict(state), {**context, "style_name": "neutral"})
+        resample_count = 0
 
-        total = sum(max(score, 0.0) for score in scores.values()) or 1.0
-        sampled_name = max(scores, key=scores.get)
-        probability = round(scores[sampled_name] / total, 4)
+        while resample_count < resample_limit and plausibility_fail >= 0.70:
+            scores, _ = self.plausibility_guard.apply(scores, candidate_name, plausibility_fail)
+            resample_count += 1
+            candidate_name, distribution = sample_action(scores, seed=(None if seed is None else seed + resample_count))
+            plausibility_fail = self.plausibility_guard.score(candidate_name, scenario_name, to_dict(state), {**context, "style_name": "neutral"})
+
+        scores, guard_reason = self.plausibility_guard.apply(scores, candidate_name, plausibility_fail)
+        candidate_name, distribution = sample_action(scores, seed=(None if seed is None else seed + 99))
+        contributions.append(
+            AgentContribution(
+                agent_name="ConflictMonitorAgent",
+                action_name=candidate_name,
+                score=conflict_score,
+                reason=f"conflict={conflict_score}",
+                confidence=0.70,
+                weight_applied=state.agent_weights.get("ConflictMonitorAgent", 0.9),
+                provider="rule",
+                model="conflict-heuristic",
+                tags=["conflict"],
+            )
+        )
+        contributions.append(
+            AgentContribution(
+                agent_name="BehaviorPlausibilityGuard",
+                action_name=candidate_name,
+                score=plausibility_fail,
+                reason=guard_reason,
+                confidence=0.76,
+                weight_applied=state.agent_weights.get("BehaviorPlausibilityGuard", 1.0),
+                provider="rule",
+                model="guard-heuristic",
+                tags=["guard"],
+            )
+        )
+        for item in contributions:
+            if item.action_name == candidate_name:
+                item.selected = True
+
+        probability = round(distribution.get(candidate_name, 0.0), 4)
         rationale = "; ".join(item.reason for item in sorted(contributions, key=lambda item: item.score, reverse=True)[:3])
-        candidate = ActionCandidate(name=sampled_name, probability=probability, rationale=rationale)
-        return candidate, sorted(contributions, key=lambda item: item.score, reverse=True)
+        return {
+            "candidate": ActionCandidate(name=candidate_name, probability=probability, rationale=rationale, metadata={}),
+            "distribution": distribution,
+            "contributions": sorted(contributions, key=lambda item: item.score, reverse=True),
+            "conflict_score": conflict_score,
+            "plausibility_fail_score": plausibility_fail,
+            "resample_count": resample_count,
+        }
 
     def tick(self, event: RoundEvent, scenario: str, mode: str) -> RoundResult:
         state = self.load_runtime_state()
-        cue = self.memory_store.ingest_event(event)
-
+        pre_state = to_dict(state)
         requested_mode = "safe" if state.safe_mode else mode
-        mode_cfg = self.config["modes"]["modes"].get(requested_mode, self.config["modes"]["modes"]["interactive"])
         scenario_cfg = self.config["scenarios"]["scenarios"][scenario]
 
         state.mode = requested_mode
@@ -132,24 +277,16 @@ class RuntimeController:
         state.body_energy = _clip(state.body_energy + event.energy_delta)
         state.mood = _clip(state.mood + (event.valence * 0.1))
         state.budget_remaining = _clip(state.budget_remaining - 0.002 + (0.01 if requested_mode in {"idle", "sleep"} else 0.0))
-
-        context = {
-            "cue": cue,
-            "recall_strength": self.memory_store.recall_strength(cue),
-            "habit_strength": self.memory_store.habit_strength(cue),
-            "closeness": self.memory_store.closeness(event.target),
-        }
-
-        proposals = []
-        for agent in self.agents:
-            if not state.agents_enabled.get(agent.name, True):
-                continue
-            proposal = agent.propose(event, state, scenario_cfg, context)
-            proposals.append(proposal)
-
-        sampled_action, contributions = self._aggregate(proposals, state)
+        context = self._build_context(event, state, scenario_cfg)
+        decision = self._run_decision_loop(event, state, scenario, scenario_cfg, context)
+        sampled_action = decision["candidate"]
+        contributions = decision["contributions"]
         state.focus = sampled_action.name
         state.last_action = sampled_action.name
+        state.recent_actions = self._append_history(state.recent_actions, sampled_action.name)
+        state.recent_modes = self._append_history(state.recent_modes, state.mode)
+        state.last_conflict_score = decision["conflict_score"]
+        state.last_plausibility_fail_score = decision["plausibility_fail_score"]
 
         starvation = self.config["resource_rules"]["resource_defaults"]["starvation_threshold"]
         if state.budget_remaining <= starvation / 10:
@@ -158,6 +295,12 @@ class RuntimeController:
 
         style_profile = compute_style_profile(to_dict(state), scenario, self.config["output_style"]["styles"])
         sampled_action.metadata["style_profile"] = style_profile
+        render_result = self.model_gateway.render(sampled_action.name, style_profile, event.content)
+        sampled_action.metadata["rendered_output"] = render_result["text"]
+        sampled_action.metadata["provider"] = render_result["provider"]
+        sampled_action.metadata["model"] = render_result["model"]
+        state.last_render_provider = render_result["provider"]
+        state.last_render_model = render_result["model"]
 
         trace = RoundTrace(
             round_id=state.round_count,
@@ -168,9 +311,24 @@ class RuntimeController:
             top_drivers=contributions[:3],
             style_profile=style_profile,
             state_snapshot=to_dict(state),
+            pre_state_snapshot=pre_state,
+            event_payload=to_dict(event),
+            decision_context=context,
+            candidate_distribution=decision["distribution"],
+            conflict_score=decision["conflict_score"],
+            plausibility_fail_score=decision["plausibility_fail_score"],
+            resample_count=decision["resample_count"],
+            rendered_output=render_result["text"],
+            provider=render_result["provider"],
+            model=render_result["model"],
         )
 
-        health = HealthEvent(event="tick", status="ok", detail=f"budget={state.budget_remaining:.2f}")
+        trace.state_snapshot["conflict_score"] = decision["conflict_score"]
+        trace.state_snapshot["plausibility_fail_score"] = decision["plausibility_fail_score"]
+        trace.state_snapshot["last_render_provider"] = render_result["provider"]
+        trace.state_snapshot["last_render_model"] = render_result["model"]
+
+        health = HealthEvent(event="tick", status="ok", detail=f"budget={state.budget_remaining:.2f}; provider={render_result['provider']}")
 
         self._save_state(state)
         self.trace_store.write_round(trace)
@@ -181,6 +339,7 @@ class RuntimeController:
             trace=trace,
             state=state,
             health=health,
+            rendered_output=render_result["text"],
         )
 
     def apply_command(self, command: str) -> CommandResult:
@@ -237,6 +396,16 @@ class RuntimeController:
                 delta={"enabled": True},
                 ttl="until changed",
                 rollback_hint=f"alive agent disable {parts[2]}",
+            )
+        elif parts[:2] == ["debug", "weight"] and len(parts) == 4:
+            weight = float(parts[3])
+            state.agent_weights[parts[2]] = weight
+            result = CommandResult(
+                applied=True,
+                scope=parts[2],
+                delta={"weight": weight},
+                ttl="until changed",
+                rollback_hint=f"alive debug weight {parts[2]} 1.0",
             )
 
         self._save_state(state)
@@ -296,6 +465,7 @@ class RuntimeController:
             "sampled_action": trace["sampled_action"],
             "top_drivers": trace["top_drivers"],
             "style_profile": trace["style_profile"],
+            "rendered_output": trace.get("rendered_output", ""),
             "state_snapshot": {
                 "mode": trace["state_snapshot"]["mode"],
                 "safe_mode": trace["state_snapshot"]["safe_mode"],
@@ -310,6 +480,66 @@ class RuntimeController:
             "round_id": trace["round_id"],
             "sampled_action": trace["sampled_action"],
             "contributions": trace["contributions"],
+        }
+
+    def why_not(self, round_id: int, action: str) -> dict[str, Any]:
+        trace = self.trace_round(round_id)
+        candidate_distribution = trace.get("candidate_distribution", {})
+        blocked_by = []
+        if action not in candidate_distribution:
+            blocked_by.append("not_proposed")
+        if trace.get("plausibility_fail_score", 0.0) >= self.config["thresholds"]["thresholds"]["plausibility_fail"]:
+            blocked_by.append("plausibility_guard")
+        blocked_by.extend(item["agent_name"] for item in trace.get("top_drivers", [])[:2])
+        return {
+            "round_id": round_id,
+            "action": action,
+            "selected_action": trace["sampled_action"],
+            "candidate_score": candidate_distribution.get(action, 0.0),
+            "blocked_by": blocked_by,
+        }
+
+    def replay(self, round_id: int, seed: int = 0) -> dict[str, Any]:
+        trace = self.trace_round(round_id)
+        event = RoundEvent(**trace["event_payload"])
+        replay_state = self._candidate_from_state(trace["pre_state_snapshot"])
+        scenario_cfg = self.config["scenarios"]["scenarios"][trace["scenario"]]
+        context = dict(trace.get("decision_context", {}))
+        decision = self._run_decision_loop(event, replay_state, trace["scenario"], scenario_cfg, context, seed=seed)
+        ablations = []
+        for agent_name in ("DMNAgent", "HippocampusAgent", "PerspectiveModel"):
+            replay_state_ablate = self._candidate_from_state(trace["pre_state_snapshot"])
+            replay_state_ablate.agents_enabled[agent_name] = False
+            ablated = self._run_decision_loop(event, replay_state_ablate, trace["scenario"], scenario_cfg, context, seed=seed)
+            ablations.append(
+                {
+                    "agent": agent_name,
+                    "action": ablated["candidate"].name,
+                    "delta": round(
+                        ablated["distribution"].get(ablated["candidate"].name, 0.0)
+                        - trace.get("candidate_distribution", {}).get(trace["sampled_action"], 0.0),
+                        4,
+                    ),
+                }
+            )
+        return {
+            "round_id": round_id,
+            "original_action": trace["sampled_action"],
+            "replayed_action": decision["candidate"].name,
+            "candidate_distribution": decision["distribution"],
+            "ablations": ablations,
+        }
+
+    def what_changed(self, window: int = 5) -> dict[str, Any]:
+        rounds = self.trace_store.list_rounds()[-window:]
+        if not rounds:
+            return {"window": window, "action_counts": {}, "mode_counts": {}, "budget_delta": 0.0}
+        budget_delta = rounds[-1]["state_snapshot"]["budget_remaining"] - rounds[0]["state_snapshot"]["budget_remaining"]
+        return {
+            "window": window,
+            "action_counts": summarize_counts([item["sampled_action"] for item in rounds]),
+            "mode_counts": summarize_counts([item["mode"] for item in rounds]),
+            "budget_delta": round(budget_delta, 4),
         }
 
     def metrics_summary(self) -> dict[str, Any]:
@@ -342,6 +572,54 @@ class RuntimeController:
             "average_budget_remaining": avg_budget,
             "top_agents": top_agents,
         }
+
+    def metrics_timeline(self) -> dict[str, Any]:
+        rounds = self.trace_store.list_rounds()
+        return {
+            "rounds": [
+                {
+                    "round_id": item["round_id"],
+                    "sampled_action": item["sampled_action"],
+                    "mode": item["mode"],
+                    "conflict_score": item.get("conflict_score", 0.0),
+                    "plausibility_fail_score": item.get("plausibility_fail_score", 0.0),
+                    "budget_remaining": item["state_snapshot"].get("budget_remaining", 0.0),
+                }
+                for item in rounds
+            ]
+        }
+
+    def metrics_heatmap(self) -> dict[str, Any]:
+        rounds = self.trace_store.list_rounds()
+        actions = sorted({item["sampled_action"] for item in rounds} or {"respond"})
+        matrix: dict[str, dict[str, int]] = {}
+        for item in rounds:
+            for contribution in item.get("contributions", []):
+                matrix.setdefault(contribution["agent_name"], {action: 0 for action in actions})
+                matrix[contribution["agent_name"]].setdefault(contribution["action_name"], 0)
+                matrix[contribution["agent_name"]][contribution["action_name"]] += 1
+        return {"actions": actions, "matrix": matrix}
+
+    def compact_traces(self) -> dict[str, Any]:
+        return self.trace_store.compact_rounds()
+
+    def eval_longrun(self, rounds: int = 1000) -> dict[str, Any]:
+        start_round = self.load_runtime_state().round_count
+        for idx in range(rounds):
+            self.tick(
+                RoundEvent(
+                    source="simulation",
+                    content=f"synthetic round {idx} task update",
+                    target="sim-user",
+                    cue=f"topic-{idx % 7}",
+                    valence=0.05 if idx % 2 == 0 else -0.02,
+                ),
+                scenario="task" if idx % 3 == 0 else "chat",
+                mode="interactive",
+            )
+        summary = self.metrics_summary()
+        summary["generated_rounds"] = self.load_runtime_state().round_count - start_round
+        return summary
 
     def agent_list(self) -> list[dict[str, Any]]:
         state = self.load_runtime_state()
