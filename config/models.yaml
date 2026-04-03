@@ -1,0 +1,22 @@
+model_routes:
+  pfc:
+    backend: doubao
+    model: doubao-seed-2-0-pro-260215
+    timeout_ms: 60000
+    retries: 0
+    enabled: true
+  perspective:
+    backend: doubao
+    model: doubao-seed-2-0-pro-260215
+    timeout_ms: 60000
+    retries: 0
+    enabled: true
+  renderer:
+    backend: doubao
+    model: doubao-seed-2-0-pro-260215
+    timeout_ms: 60000
+    retries: 0
+    enabled: true
+perspective:
+  enabled: true
+  risk_threshold: 0.33

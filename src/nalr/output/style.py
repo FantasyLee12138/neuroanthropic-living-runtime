@@ -92,6 +92,10 @@ def build_render_plan(
     expression: ExpressionProfile,
     safety_constraints: dict[str, Any],
     scenario: str,
+    event_summary: str = "",
+    target: str | None = None,
+    relation_state: dict[str, Any] | None = None,
+    perspective: dict[str, Any] | None = None,
 ) -> RenderPlan:
     message_plan = {
         "intent": sampled_action,
@@ -105,4 +109,9 @@ def build_render_plan(
         expression=expression,
         safety_constraints=safety_constraints,
         message_plan=message_plan,
+        event_summary=event_summary,
+        scenario=scenario,
+        target=target,
+        relation_state=relation_state or {},
+        perspective=perspective or {},
     )

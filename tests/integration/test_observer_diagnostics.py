@@ -39,6 +39,8 @@ def test_observer_exposes_skill_conflict_mode_and_ablation_views(tmp_path):
     assert ablation_response.status_code == 200
     assert skill_response.json()["total_calls"] > 0
     assert conflict_response.json()["points"]
+    assert "components" in conflict_response.json()["points"][0]
+    assert "critical_conflict_streak" in conflict_response.json()["points"][0]
     assert mode_response.json()["points"]
     assert ablation_response.json()["modules"]
     assert "approx_gain" in ablation_response.json()["modules"][0]

@@ -44,6 +44,10 @@ def create_app(project_root: Path | str | None = None, config_root: Path | str |
     def memory_top(limit: int = 5) -> list[dict]:
         return controller.memory_top(limit=limit)
 
+    @app.get("/memory/recall/{cue}")
+    def memory_recall(cue: str) -> dict:
+        return controller.memory_recall(cue)
+
     @app.get("/habit/top")
     def habit_top(limit: int = 5) -> list[dict]:
         return controller.habit_top(limit=limit)

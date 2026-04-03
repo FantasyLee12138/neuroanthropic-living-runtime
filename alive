@@ -1,0 +1,28 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+
+if [ -f "$SCRIPT_DIR/.env.local" ]; then
+  set -a
+  . "$SCRIPT_DIR/.env.local"
+  set +a
+elif [ -f "$SCRIPT_DIR/.env" ]; then
+  set -a
+  . "$SCRIPT_DIR/.env"
+  set +a
+fi
+
+if [ -x "$SCRIPT_DIR/.venv/bin/python" ]; then
+  PYTHON_BIN="$SCRIPT_DIR/.venv/bin/python"
+else
+  PYTHON_BIN="${PYTHON:-python3}"
+fi
+
+if [ "${PYTHONPATH:-}" = "" ]; then
+  export PYTHONPATH="$SCRIPT_DIR/src"
+else
+  export PYTHONPATH="$SCRIPT_DIR/src:$PYTHONPATH"
+fi
+
+exec "$PYTHON_BIN" -m nalr.cli.app "$@"

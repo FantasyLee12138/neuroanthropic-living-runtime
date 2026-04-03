@@ -42,6 +42,8 @@ def test_tick_records_v056_pipeline_stages(tmp_path):
         "plausibility_guard",
         "forced_mode_switch",
         "output_gate",
+        "late_perspective",
+        "renderer",
         "writeback",
     ]
     assert result.trace.proposal_summaries

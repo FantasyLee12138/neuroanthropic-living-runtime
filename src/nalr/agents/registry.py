@@ -111,7 +111,7 @@ def build_agent_registry() -> dict[str, AgentSpec]:
             name="ConflictMonitorAgent",
             class_kind="explicit",
             wakeup_rule="after_proposal_aggregation",
-            owned_skills=["score_conflict", "trigger_control_escalation", "request_resample", "check_behavior_plausibility"],
+            owned_skills=["score_conflict", "trigger_control_escalation", "request_resample"],
             budget_class="M",
             fallback_policy="retry_once_then_degrade",
         ),

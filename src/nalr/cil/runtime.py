@@ -53,8 +53,12 @@ class CommandInterfaceLayer:
             return self.controller.relation_show(envelope.target)
         if envelope.domain == "memory" and envelope.verb == "top":
             return self.controller.memory_top()
+        if envelope.domain == "memory" and envelope.verb == "recall" and envelope.target:
+            return self.controller.memory_recall(envelope.target)
         if envelope.domain == "habit" and envelope.verb == "top":
             return self.controller.habit_top()
+        if envelope.domain == "habit" and envelope.verb == "reset" and envelope.target:
+            return self.controller.apply_command(f"habit reset {envelope.target}", envelope=envelope)
         if envelope.domain == "trace" and envelope.verb == "round" and envelope.target:
             return self.controller.trace_round(int(envelope.target))
         if envelope.domain == "trace" and envelope.verb == "why" and envelope.target:
@@ -74,6 +78,11 @@ class CommandInterfaceLayer:
             return self.controller.apply_command(f"debug weight {agent_name} {weight}", envelope=envelope)
         if envelope.domain == "nudge" and envelope.verb == "focus" and envelope.target:
             return self.controller.apply_command(f"nudge focus {envelope.target}", envelope=envelope)
+        if envelope.domain == "nudge" and envelope.verb == "relation" and len(command.split()) >= 5:
+            _, _, target, metric, delta = command.split()[:5]
+            if metric != "trust":
+                raise ValueError(f"unsupported relation nudge metric: {metric}")
+            return self.controller.apply_command(f"nudge relation {target} trust {delta}", envelope=envelope)
         if envelope.domain == "suppress" and envelope.verb == "dmn":
             ttl = command.split()[2] if len(command.split()) >= 3 else "temporary"
             return self.controller.apply_command(f"suppress dmn {ttl}", envelope=envelope)
@@ -87,6 +96,10 @@ class CommandInterfaceLayer:
             return self.controller.rewind(envelope.target)
         if envelope.domain == "budget" and envelope.verb == "show":
             return {"budget_remaining": self.controller.load_runtime_state().budget_remaining}
+        if envelope.domain == "budget" and envelope.verb == "set":
+            parts = command.split()
+            raw_value = parts[3] if len(parts) >= 4 and parts[2] == "--cap" else parts[2]
+            return self.controller.apply_command(f"budget set {raw_value}", envelope=envelope)
         if envelope.domain == "replay" and envelope.verb == "round" and envelope.target:
             parts = command.split()
             seed = int(parts[3]) if len(parts) >= 4 else None

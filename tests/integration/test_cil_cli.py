@@ -29,10 +29,14 @@ def test_cil_exposes_skill_stats_and_relation_show(tmp_path):
     cil = CommandInterfaceLayer(controller)
 
     stats = cil.execute("skill stats")
+    profile = cil.execute("skill profile generate_candidates")
     relation = cil.execute("relation show user")
 
     assert stats["total_calls"] > 0
     assert "generate_candidates" in stats["skills"]
+    assert stats["skills"]["generate_candidates"]["fallback_count"] >= 1
+    assert profile["skill_name"] == "generate_candidates"
+    assert profile["skills"]["generate_candidates"]["fallback_count"] >= 1
     assert relation["target"] == "user"
     assert relation["closeness"] >= 0.5
 
@@ -63,3 +67,39 @@ def test_cil_command_trace_records_operator_level_and_rollback(tmp_path):
     assert payload.rollback_available is True
     assert traces[-1]["operator_level"] == "ops_admin"
     assert traces[-1]["rollback_available"] is True
+
+
+def test_cil_supports_memory_recall_habit_reset_relation_nudge_budget_set_and_checkpoint_trace(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="Remember that coffee helps me focus every morning.",
+            target="user",
+            cue="coffee",
+            valence=0.25,
+        ),
+        scenario="companion",
+        mode="interactive",
+    )
+    cil = CommandInterfaceLayer(controller)
+
+    before_relation = cil.execute("relation show user")
+    recall = cil.execute("memory recall coffee")
+    reset = cil.execute("habit reset coffee")
+    nudge = cil.execute("nudge relation user trust +0.05")
+    budget = cil.execute("budget set 50000")
+    checkpoint = cil.execute("checkpoint create")
+    traces = json.loads((tmp_path / ".alive" / "traces" / "command_traces.json").read_text(encoding="utf-8"))
+
+    assert recall["cue"] == "coffee"
+    assert recall["strength"] > 0.0
+    assert recall["tier"] in {"hot", "warm", "archive"}
+    assert reset.applied is True
+    assert controller.memory_store.habit_strength("coffee") == 0.0
+    assert nudge.applied is True
+    assert controller.relation_show("user")["closeness"] > before_relation["closeness"]
+    assert budget.applied is True
+    assert controller.load_runtime_state().budget_remaining == 0.5
+    assert checkpoint.checkpoint_id.startswith("ckpt-")
+    assert any(item["command"] == "checkpoint create" for item in traces)

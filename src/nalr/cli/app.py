@@ -6,6 +6,13 @@ from pathlib import Path
 
 import typer
 
+from nalr.cli.presentation import (
+    format_agents_view,
+    format_chat_turn,
+    format_gates_view,
+    format_skills_view,
+    format_why_view,
+)
 from nalr.cil.runtime import CommandInterfaceLayer
 from nalr.runtime.controller import RuntimeController
 from nalr.schemas.models import RoundEvent, to_dict
@@ -21,6 +28,7 @@ habit_app = typer.Typer()
 mode_app = typer.Typer()
 relation_app = typer.Typer()
 trace_app = typer.Typer()
+trace_export_app = typer.Typer()
 agent_app = typer.Typer()
 skill_app = typer.Typer()
 debug_app = typer.Typer()
@@ -41,6 +49,7 @@ app.add_typer(memory_app, name="memory")
 app.add_typer(habit_app, name="habit")
 app.add_typer(mode_app, name="mode")
 app.add_typer(trace_app, name="trace")
+trace_app.add_typer(trace_export_app, name="export")
 app.add_typer(agent_app, name="agent")
 app.add_typer(skill_app, name="skill")
 app.add_typer(debug_app, name="debug")
@@ -66,6 +75,120 @@ def get_cil() -> CommandInterfaceLayer:
 
 def emit(payload: object) -> None:
     typer.echo(json.dumps(to_dict(payload), ensure_ascii=False, indent=2))
+
+
+def default_scenario() -> str:
+    return os.environ.get("NALR_SCENARIO", "chat")
+
+
+def default_mode() -> str:
+    return os.environ.get("NALR_MODE", "interactive")
+
+
+def build_chat_payload(result) -> dict[str, object]:
+    return {
+        "round_id": result.round_id,
+        "sampled_action": to_dict(result.sampled_action),
+        "rendered_expression": to_dict(result.rendered_expression),
+        "top_drivers": to_dict(result.trace.top_drivers),
+    }
+
+
+def resolve_show_sections(show: str | None) -> list[str]:
+    if not show:
+        return []
+    normalized = show.strip().lower()
+    if normalized == "all":
+        return ["why", "agents", "skills", "gates"]
+    if normalized not in {"why", "agents", "skills", "gates"}:
+        raise typer.BadParameter("show must be one of: why, agents, skills, gates, all")
+    return [normalized]
+
+
+def attach_trace_sections(controller: RuntimeController, payload: dict[str, object], sections: list[str]) -> dict[str, object]:
+    round_id = payload["round_id"]
+    if "why" in sections:
+        payload["why"] = controller.why_this(round_id)
+    if "agents" in sections:
+        payload["agents"] = controller.trace_agents(round_id)
+    if "skills" in sections:
+        payload["skills"] = controller.trace_skills(round_id)
+    if "gates" in sections:
+        payload["gates"] = controller.trace_gates(round_id)
+    return payload
+
+
+def render_section(section: str, payload: dict[str, object]) -> str:
+    if section == "why":
+        return format_why_view(payload["why"])
+    if section == "agents":
+        return format_agents_view(payload["agents"])
+    if section == "skills":
+        return format_skills_view(payload["skills"])
+    if section == "gates":
+        return format_gates_view(payload["gates"])
+    raise ValueError(f"unsupported section: {section}")
+
+
+def emit_chat_output(payload: dict[str, object], sections: list[str], *, as_json: bool) -> None:
+    if as_json:
+        emit(payload)
+        return
+    chunks = [format_chat_turn(payload)]
+    for section in sections:
+        chunks.append(render_section(section, payload))
+    typer.echo("\n\n".join(chunks))
+
+
+def emit_trace_view(
+    *,
+    round_ref: str,
+    as_json: bool,
+    fetcher,
+    formatter,
+) -> None:
+    try:
+        payload = fetcher(round_ref)
+    except FileNotFoundError:
+        typer.echo("No rounds yet. Send a message first.")
+        raise typer.Exit(code=1)
+    if as_json:
+        emit(payload)
+        return
+    typer.echo(formatter(payload))
+
+
+def emit_json_trace(round_ref: str, fetcher) -> None:
+    try:
+        emit(fetcher(round_ref))
+    except FileNotFoundError:
+        typer.echo("No rounds yet. Send a message first.")
+        raise typer.Exit(code=1)
+
+
+def run_chat_turn(
+    *,
+    controller: RuntimeController,
+    message: str,
+    target: str | None,
+    cue: str | None,
+    scenario: str,
+    mode: str,
+    valence: float,
+    energy_delta: float,
+):
+    return controller.tick(
+        RoundEvent(
+            source="user",
+            content=message,
+            target=target,
+            cue=cue,
+            valence=valence,
+            energy_delta=energy_delta,
+        ),
+        scenario=scenario,
+        mode=mode,
+    )
 
 
 @state_app.command("show")
@@ -101,9 +224,33 @@ def memory_top(limit: int = 5) -> None:
     emit(get_controller().memory_top(limit))
 
 
+@memory_app.command("recall")
+def memory_recall(cue: str) -> None:
+    emit(get_cil().execute(f"memory recall {cue}"))
+
+
+@memory_app.command("compact")
+def memory_compact() -> None:
+    emit(get_controller().compact_memory())
+
+
+@memory_app.command("sample")
+def memory_sample(
+    tier: str = typer.Option(..., "--tier"),
+    limit: int = typer.Option(5, "--limit"),
+    cue: str | None = typer.Option(None, "--cue"),
+) -> None:
+    emit(get_controller().sample_memory(tier, limit=limit, cue=cue))
+
+
 @habit_app.command("top")
 def habit_top(limit: int = 5) -> None:
     emit(get_controller().habit_top(limit))
+
+
+@habit_app.command("reset")
+def habit_reset(pattern: str) -> None:
+    emit(get_cil().execute(f"habit reset {pattern}"))
 
 
 @mode_app.command("set")
@@ -112,18 +259,68 @@ def mode_set(mode_name: str) -> None:
 
 
 @trace_app.command("round")
-def trace_round(round_id: int) -> None:
-    emit(get_cil().execute(f"trace round {round_id}"))
+def trace_round(round_ref: str) -> None:
+    emit_json_trace(round_ref, get_controller().trace_round)
 
 
 @trace_app.command("why")
-def trace_why(round_id: int) -> None:
-    emit(get_cil().execute(f"trace why {round_id}"))
+def trace_why(round_ref: str) -> None:
+    emit_json_trace(round_ref, get_controller().why_this)
 
 
 @trace_app.command("contribution")
-def trace_contribution(round_id: int) -> None:
-    emit(get_cil().execute(f"trace contribution {round_id}"))
+def trace_contribution(round_ref: str) -> None:
+    emit_json_trace(round_ref, get_controller().contribution_breakdown)
+
+
+@trace_app.command("agents")
+def trace_agents(
+    round_ref: str,
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    controller = get_controller()
+    emit_trace_view(
+        round_ref=round_ref,
+        as_json=json_output,
+        fetcher=controller.trace_agents,
+        formatter=format_agents_view,
+    )
+
+
+@trace_app.command("skills")
+def trace_skills(
+    round_ref: str,
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    controller = get_controller()
+    emit_trace_view(
+        round_ref=round_ref,
+        as_json=json_output,
+        fetcher=controller.trace_skills,
+        formatter=format_skills_view,
+    )
+
+
+@trace_app.command("gates")
+def trace_gates(
+    round_ref: str,
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    controller = get_controller()
+    emit_trace_view(
+        round_ref=round_ref,
+        as_json=json_output,
+        fetcher=controller.trace_gates,
+        formatter=format_gates_view,
+    )
+
+
+@trace_export_app.command("parquet")
+def trace_export_parquet(
+    since_round: int | None = typer.Option(None, "--since-round"),
+    overwrite: bool = typer.Option(False, "--overwrite"),
+) -> None:
+    emit(get_controller().export_trace_parquet(since_round=since_round, overwrite=overwrite))
 
 
 @agent_app.command("list")
@@ -159,6 +356,11 @@ def debug_weight(agent_name: str, weight: float) -> None:
 @nudge_app.command("focus")
 def nudge_focus(delta: float) -> None:
     emit(get_cil().execute(f"nudge focus {delta}"))
+
+
+@nudge_app.command("relation")
+def nudge_relation(target: str, metric: str, delta: float) -> None:
+    emit(get_cil().execute(f"nudge relation {target} {metric} {delta:+.2f}"))
 
 
 @replay_app.command("round")
@@ -197,6 +399,11 @@ def budget_show() -> None:
     emit(get_cil().execute("budget show"))
 
 
+@budget_app.command("set")
+def budget_set(cap: int = typer.Option(..., "--cap")) -> None:
+    emit(get_cil().execute(f"budget set --cap {cap}"))
+
+
 @explain_app.command("current")
 def explain_current() -> None:
     emit(get_cil().execute("explain current"))
@@ -210,6 +417,137 @@ def rest() -> None:
 @app.command("calm")
 def calm() -> None:
     emit(get_cil().execute("calm"))
+
+
+@app.command("chat")
+def chat(
+    message: list[str] = typer.Argument(..., help="message to send to the runtime"),
+    target: str | None = typer.Option(None, "--target"),
+    cue: str | None = typer.Option(None, "--cue"),
+    scenario: str | None = typer.Option(None, "--scenario"),
+    mode: str | None = typer.Option(None, "--mode"),
+    valence: float = typer.Option(0.0, "--valence"),
+    energy_delta: float = typer.Option(0.0, "--energy-delta"),
+    show: str | None = typer.Option(None, "--show"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    controller = get_controller()
+    effective_scenario = scenario or default_scenario()
+    effective_mode = mode or default_mode()
+    result = run_chat_turn(
+        controller=controller,
+        message=" ".join(message).strip(),
+        target=target,
+        cue=cue,
+        scenario=effective_scenario,
+        mode=effective_mode,
+        valence=valence,
+        energy_delta=energy_delta,
+    )
+    payload = build_chat_payload(result)
+    sections = resolve_show_sections(show)
+    attach_trace_sections(controller, payload, sections)
+    emit_chat_output(payload, sections, as_json=json_output)
+
+
+@app.command("repl")
+def repl(
+    target: str | None = typer.Option(None, "--target"),
+    scenario: str | None = typer.Option(None, "--scenario"),
+    mode: str | None = typer.Option(None, "--mode"),
+) -> None:
+    controller = get_controller()
+    cil = CommandInterfaceLayer(controller)
+    effective_scenario = scenario or default_scenario()
+    current_mode = mode or default_mode()
+    last_round_id: int | None = None
+
+    typer.echo("Entering NALR REPL. Type /help for commands, /exit to quit.")
+
+    while True:
+        try:
+            line = input("you> ").strip()
+        except EOFError:
+            typer.echo("")
+            break
+        if not line:
+            continue
+        if line.startswith("/"):
+            parts = line[1:].split()
+            command = parts[0].lower() if parts else ""
+            args = parts[1:]
+
+            if command in {"exit", "quit"}:
+                typer.echo("Bye.")
+                break
+            if command == "help":
+                typer.echo(
+                    "\n".join(
+                        [
+                            "Commands:",
+                            "/help",
+                            "/why",
+                            "/agents",
+                            "/skills",
+                            "/gates",
+                            "/state",
+                            "/mode <name>",
+                            "/safe on|off",
+                            "/budget",
+                            "/exit",
+                        ]
+                    )
+                )
+                continue
+            if command in {"why", "agents", "skills", "gates"}:
+                if last_round_id is None:
+                    typer.echo("No rounds yet. Send a message first.")
+                    continue
+                if command == "why":
+                    typer.echo(format_why_view(controller.why_this(last_round_id)))
+                elif command == "agents":
+                    typer.echo(format_agents_view(controller.trace_agents(last_round_id)))
+                elif command == "skills":
+                    typer.echo(format_skills_view(controller.trace_skills(last_round_id)))
+                else:
+                    typer.echo(format_gates_view(controller.trace_gates(last_round_id)))
+                continue
+            if command == "state":
+                emit(cil.execute("state show"))
+                continue
+            if command == "budget":
+                emit(cil.execute("budget show"))
+                continue
+            if command == "mode":
+                if len(args) != 1:
+                    typer.echo("Usage: /mode <name>")
+                    continue
+                current_mode = args[0]
+                emit(cil.execute(f"mode set {current_mode}"))
+                continue
+            if command == "safe":
+                if len(args) != 1 or args[0] not in {"on", "off"}:
+                    typer.echo("Usage: /safe on|off")
+                    continue
+                emit(cil.execute(f"safe {args[0]}"))
+                continue
+
+            typer.echo("Unknown command. Type /help for available commands.")
+            continue
+
+        result = run_chat_turn(
+            controller=controller,
+            message=line,
+            target=target,
+            cue=None,
+            scenario=effective_scenario,
+            mode=current_mode,
+            valence=0.0,
+            energy_delta=0.0,
+        )
+        last_round_id = result.round_id
+        typer.echo(format_chat_turn(build_chat_payload(result)))
+        typer.echo("")
 
 
 def main() -> None:
