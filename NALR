@@ -1,0 +1,28 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+TERMINAL_DIR="$SCRIPT_DIR/apps/terminal"
+
+if [ "${NALR_SKIP_ENV_AUTOLOAD:-0}" != "1" ]; then
+  if [ -f "$SCRIPT_DIR/.env.local" ]; then
+    set -a
+    . "$SCRIPT_DIR/.env.local"
+    set +a
+  elif [ -f "$SCRIPT_DIR/.env" ]; then
+    set -a
+    . "$SCRIPT_DIR/.env"
+    set +a
+  fi
+fi
+
+if [ ! -d "$TERMINAL_DIR/node_modules" ]; then
+  echo "NALR terminal dependencies are not installed. Run: npm --prefix $TERMINAL_DIR install" >&2
+  exit 1
+fi
+
+export NALR_REPO_ROOT="$SCRIPT_DIR"
+export NALR_LAUNCH_CWD="${PWD}"
+
+cd "$TERMINAL_DIR"
+exec "$TERMINAL_DIR/node_modules/.bin/tsx" src/cli.ts "$@"

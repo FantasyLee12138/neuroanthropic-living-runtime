@@ -9,9 +9,17 @@
 - 固定优先级裁决链
 - 多轮重采样与妥协模板
 - `critical conflict` 熔断与恢复
+- `mark_post_error_adjustment` repair 契约
 - trace / observer 暴露字段
 
 本控制器位于 `conflict -> thalamus -> plausibility_guard` 中的 `conflict` 阶段内部，不新增新的顶层 pipeline stage。
+
+公开 skill 合同固定为：
+
+- `score_conflict`
+- `trigger_control_escalation`
+- `request_resample`
+- `mark_post_error_adjustment`
 
 ## Proposal Signal Contract
 
@@ -219,6 +227,54 @@ conflict_score =
 - 每轮把 `conflict_hot_rounds` 和 `conflict_recovery_rounds` 各减 `1`
 - 计数减到 `0` 后清除 `last_compromise_template` 和 `last_conflict_priority`
 
+## Repair FSM And Post-error Adjustment
+
+### Entry Conditions
+
+当前 round 必须在以下任一条件成立时生成 `post_error_adjustment`：
+
+- conflict 裁决改变了原本顶部动作
+- 达到最大重采样次数后被迫落入妥协模板
+- 触发 `deadlock_fuse`
+
+### State Machine
+
+repair 状态机固定为：
+
+```text
+idle -> adjusting -> repairing -> cooling -> recovered
+```
+
+状态含义：
+
+- `idle`: 当前没有活动中的 repair 过程
+- `adjusting`: 当前 round 发生了 post-error adjustment，但尚未进入 deadlock fuse
+- `repairing`: 发生 `deadlock_fuse`，conflict controller 接管高风险动作和 safe-mode ownership
+- `cooling`: deadlock fuse 已触发，但当前 round 无新的 critical conflict，处于冷却恢复窗口
+- `recovered`: repair 过程完成，conflict 触发的活动标记和 safe-mode ownership 已清除
+
+### Repair Ledger
+
+每次 `post_error_adjustment` 都必须追加一条 ledger entry，字段固定为：
+
+- `round_id`
+- `reason`
+- `winning_priority`
+- `template`
+- `blocked_actions`
+- `top_action_before`
+- `top_action_after`
+- `safe_mode_delta`
+- `repair_stage_after`
+
+ledger 是跨轮历史，不会在恢复时清空；observer 只返回摘要和 tail。
+
+### Safe-mode Ownership
+
+- `deadlock_fuse` 触发时，`conflict_safe_mode_owner` 置为 `conflict`
+- repair 恢复到 `recovered` 时，若 owner 仍为 `conflict`，controller 自动退出 conflict-induced `safe_mode`
+- 非 conflict-owned `safe_mode` 不在 repair 恢复阶段被清除
+
 ## Trace And Observer Contract
 
 `ActionDistributionState.conflict` 必须包含以下字段：
@@ -233,12 +289,23 @@ conflict_score =
 - `critical_conflict_streak`
 - `winning_priority`
 - `circuit_breaker`
+- `repair_mode`
+- `post_error_adjustment`
+- `repair_transition`
+- `repair_state_snapshot`
+- `repair_ledger_tail`
+- `conflict_safe_mode_owned`
 
 其中：
 
 - `passes` 是每个 pass 的 `assessment + resolution + resample_requested`
 - `compromise` 包含 `triggered`、`template`、`winning_priority`、`reason`
 - `circuit_breaker` 包含 `active`、`triggered`、`hot_rounds_remaining`、`recovery_rounds_remaining`
+- `post_error_adjustment` 包含 `reason`、模板、前后顶部动作、阻断动作和 `safe_mode_delta`
+- `repair_transition` 包含 `from_stage`、`to_stage`、`reason`、`changed`
+- `repair_state_snapshot` 是当前 round 结束时的 repair FSM 快照
+- `repair_ledger_tail` 是最近几条 ledger entry，用于 observer 和 trace 回放
+- `render_plan.message_plan.repair_expression` 必须把 conflict repair 阶段继续投影到表达层，至少包含 `source`、`stage`、`visibility`、`opening_mode`、`advance_mode`、`safety_invite`、`template`、`transition_reason`
 
 `RuntimeController.conflict_timeline()` 和 observer `GET /metrics/conflicts` 必须返回：
 
@@ -250,6 +317,11 @@ conflict_score =
 - `critical_conflict`
 - `critical_conflict_streak`
 - `conflict_hot_rounds`
+- `repair_mode`
+- `repair_stage`
+- `last_post_error_adjustment`
+- `repair_ledger_summary`
+- `conflict_safe_mode_owned`
 
 ## Non-goals
 

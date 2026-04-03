@@ -40,6 +40,14 @@ ROUND_SCHEMA = {
     "rendered_expression_json": "VARCHAR",
 }
 
+ROUND_CANONICAL_SCHEMA = {
+    "session_id": "VARCHAR",
+    "recorded_at": "VARCHAR",
+    "recorded_date": "VARCHAR",
+    "round_id": "BIGINT",
+    "payload_json": "VARCHAR",
+}
+
 SKILL_SCHEMA = {
     "session_id": "VARCHAR",
     "recorded_at": "VARCHAR",
@@ -56,11 +64,22 @@ SKILL_SCHEMA = {
     "seed_ref": "BIGINT",
 }
 
+SKILL_CANONICAL_SCHEMA = {
+    "session_id": "VARCHAR",
+    "recorded_at": "VARCHAR",
+    "recorded_date": "VARCHAR",
+    "round_id": "BIGINT",
+    "skill_name": "VARCHAR",
+    "payload_json": "VARCHAR",
+}
+
 COMMAND_SCHEMA = {
     "session_id": "VARCHAR",
     "recorded_at": "VARCHAR",
     "recorded_date": "VARCHAR",
     "command": "VARCHAR",
+    "command_id": "VARCHAR",
+    "canonical": "VARCHAR",
     "applied": "BOOLEAN",
     "scope": "VARCHAR",
     "delta_json": "VARCHAR",
@@ -69,8 +88,33 @@ COMMAND_SCHEMA = {
     "rollback_hint": "VARCHAR",
     "operator_level": "VARCHAR",
     "rollback_available": "BOOLEAN",
+    "mutation_scope": "VARCHAR",
+    "parsed_args_json": "VARCHAR",
+    "flags_json": "VARCHAR",
+    "snapshot_id": "VARCHAR",
+    "rollback_json": "VARCHAR",
     "before_state_hash": "VARCHAR",
     "after_state_hash": "VARCHAR",
+}
+
+COMMAND_CANONICAL_SCHEMA = {
+    "session_id": "VARCHAR",
+    "recorded_at": "VARCHAR",
+    "recorded_date": "VARCHAR",
+    "command": "VARCHAR",
+    "payload_json": "VARCHAR",
+}
+
+REPAIR_LEDGER_SCHEMA = {
+    "session_id": "VARCHAR",
+    "recorded_at": "VARCHAR",
+    "recorded_date": "VARCHAR",
+    "round_id": "BIGINT",
+    "reason": "VARCHAR",
+    "winning_priority": "VARCHAR",
+    "template": "VARCHAR",
+    "repair_stage_after": "VARCHAR",
+    "payload_json": "VARCHAR",
 }
 
 
@@ -89,8 +133,12 @@ class TraceExporter:
     def export_parquet(self, *, since_round: int | None = None, overwrite: bool = False) -> dict:
         outputs = {
             "round": self.store.parquet_dir / "round_trace.parquet",
+            "round_canonical": self.store.parquet_dir / "round_canonical.parquet",
             "skill": self.store.parquet_dir / "skill_trace.parquet",
+            "skill_canonical": self.store.parquet_dir / "skill_canonical.parquet",
             "command": self.store.parquet_dir / "command_trace.parquet",
+            "command_canonical": self.store.parquet_dir / "command_canonical.parquet",
+            "repair_ledger": self.store.parquet_dir / "repair_ledger.parquet",
         }
         for path in outputs.values():
             if path.exists() and not overwrite:
@@ -99,19 +147,49 @@ class TraceExporter:
                 path.unlink()
 
         round_rows = self._flatten_round_rows(since_round=since_round)
+        round_canonical_rows = self._canonical_round_rows(since_round=since_round)
         skill_rows = self._flatten_skill_rows(since_round=since_round)
+        skill_canonical_rows = self._canonical_skill_rows(since_round=since_round)
         command_rows = self._flatten_command_rows()
+        command_canonical_rows = self._canonical_command_rows()
+        repair_rows = self._canonical_repair_rows()
         self._write_rows(round_rows, outputs["round"], ROUND_SCHEMA)
+        self._write_rows(round_canonical_rows, outputs["round_canonical"], ROUND_CANONICAL_SCHEMA)
         self._write_rows(skill_rows, outputs["skill"], SKILL_SCHEMA)
+        self._write_rows(skill_canonical_rows, outputs["skill_canonical"], SKILL_CANONICAL_SCHEMA)
         self._write_rows(command_rows, outputs["command"], COMMAND_SCHEMA)
+        self._write_rows(command_canonical_rows, outputs["command_canonical"], COMMAND_CANONICAL_SCHEMA)
+        self._write_rows(repair_rows, outputs["repair_ledger"], REPAIR_LEDGER_SCHEMA)
         return {
+            "mode": "rebuild",
             "parquet_dir": str(self.store.parquet_dir),
             "tables": {
                 "round_trace": {"path": str(outputs["round"]), "row_count": len(round_rows)},
+                "round_canonical": {"path": str(outputs["round_canonical"]), "row_count": len(round_canonical_rows)},
                 "skill_trace": {"path": str(outputs["skill"]), "row_count": len(skill_rows)},
+                "skill_canonical": {"path": str(outputs["skill_canonical"]), "row_count": len(skill_canonical_rows)},
                 "command_trace": {"path": str(outputs["command"]), "row_count": len(command_rows)},
+                "command_canonical": {"path": str(outputs["command_canonical"]), "row_count": len(command_canonical_rows)},
+                "repair_ledger": {"path": str(outputs["repair_ledger"]), "row_count": len(repair_rows)},
             },
         }
+
+    def _canonical_round_rows(self, *, since_round: int | None) -> list[dict]:
+        rows: list[dict] = []
+        for path in sorted(self.store.rounds_dir.glob("round_*.json")):
+            payload = ensure_recorded_fields(json.loads(path.read_text(encoding="utf-8")), recorded_at=_mtime_iso(path))
+            if since_round is not None and payload.get("round_id", 0) < since_round:
+                continue
+            rows.append(
+                {
+                    "session_id": payload["session_id"],
+                    "recorded_at": payload["recorded_at"],
+                    "recorded_date": payload["recorded_date"],
+                    "round_id": payload.get("round_id"),
+                    "payload_json": _json_blob(payload),
+                }
+            )
+        return rows
 
     def _flatten_round_rows(self, *, since_round: int | None) -> list[dict]:
         rows: list[dict] = []
@@ -157,7 +235,7 @@ class TraceExporter:
 
     def _flatten_skill_rows(self, *, since_round: int | None) -> list[dict]:
         rows = []
-        for row in self.store.list_skill_traces():
+        for row in self.store._read_jsonl(self.store.skill_jsonl_path):
             if since_round is not None and row.get("round_id", 0) < since_round:
                 continue
             rows.append(
@@ -179,15 +257,34 @@ class TraceExporter:
             )
         return rows
 
+    def _canonical_skill_rows(self, *, since_round: int | None) -> list[dict]:
+        rows = []
+        for row in self.store._read_jsonl(self.store.skill_jsonl_path):
+            if since_round is not None and row.get("round_id", 0) < since_round:
+                continue
+            rows.append(
+                {
+                    "session_id": row.get("session_id", "legacy"),
+                    "recorded_at": row.get("recorded_at", utc_now_iso()),
+                    "recorded_date": row.get("recorded_date", row.get("recorded_at", utc_now_iso())[:10]),
+                    "round_id": row.get("round_id"),
+                    "skill_name": row.get("skill_name"),
+                    "payload_json": _json_blob(row),
+                }
+            )
+        return rows
+
     def _flatten_command_rows(self) -> list[dict]:
         rows = []
-        for row in self.store.list_command_traces():
+        for row in self.store._read_jsonl(self.store.commands_jsonl_path):
             rows.append(
                 {
                     "session_id": row.get("session_id", "legacy"),
                     "recorded_at": row.get("recorded_at", utc_now_iso()),
                     "recorded_date": row.get("recorded_date", row.get("recorded_at", utc_now_iso())[:10]),
                     "command": row.get("command"),
+                    "command_id": row.get("command_id"),
+                    "canonical": row.get("canonical", row.get("command")),
                     "applied": row.get("applied", False),
                     "scope": row.get("scope"),
                     "delta_json": _json_blob(row.get("delta", {})),
@@ -196,8 +293,45 @@ class TraceExporter:
                     "rollback_hint": row.get("rollback_hint"),
                     "operator_level": row.get("operator_level"),
                     "rollback_available": row.get("rollback_available", False),
+                    "mutation_scope": row.get("mutation_scope"),
+                    "parsed_args_json": _json_blob(row.get("parsed_args", {})),
+                    "flags_json": _json_blob(row.get("flags", {})),
+                    "snapshot_id": row.get("snapshot_id"),
+                    "rollback_json": _json_blob(row.get("rollback", {})),
                     "before_state_hash": row.get("before_state_hash"),
                     "after_state_hash": row.get("after_state_hash"),
+                }
+            )
+        return rows
+
+    def _canonical_command_rows(self) -> list[dict]:
+        rows = []
+        for row in self.store._read_jsonl(self.store.commands_jsonl_path):
+            rows.append(
+                {
+                    "session_id": row.get("session_id", "legacy"),
+                    "recorded_at": row.get("recorded_at", utc_now_iso()),
+                    "recorded_date": row.get("recorded_date", row.get("recorded_at", utc_now_iso())[:10]),
+                    "command": row.get("command"),
+                    "payload_json": _json_blob(row),
+                }
+            )
+        return rows
+
+    def _canonical_repair_rows(self) -> list[dict]:
+        rows = []
+        for row in self.store._read_jsonl(self.store.repair_jsonl_path):
+            rows.append(
+                {
+                    "session_id": row.get("session_id", "legacy"),
+                    "recorded_at": row.get("recorded_at", utc_now_iso()),
+                    "recorded_date": row.get("recorded_date", row.get("recorded_at", utc_now_iso())[:10]),
+                    "round_id": row.get("round_id", 0),
+                    "reason": row.get("reason", ""),
+                    "winning_priority": row.get("winning_priority"),
+                    "template": row.get("template"),
+                    "repair_stage_after": row.get("repair_stage_after"),
+                    "payload_json": _json_blob(row),
                 }
             )
         return rows

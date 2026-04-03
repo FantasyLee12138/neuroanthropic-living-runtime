@@ -44,6 +44,9 @@ def test_trace_rows_include_session_and_recorded_fields(tmp_path):
     assert skill_rows[0]["recorded_date"] == skill_rows[0]["recorded_at"][:10]
     assert command_rows[0]["session_id"] == state.session_id
     assert command_rows[0]["recorded_date"] == command_rows[0]["recorded_at"][:10]
+    assert command_rows[0]["command_id"]
+    assert command_rows[0]["canonical"] == "safe on"
+    assert command_rows[0]["parsed_args"] == {}
 
 
 def test_cli_trace_export_parquet_writes_three_tables(tmp_path, monkeypatch):
@@ -64,7 +67,7 @@ def test_cli_trace_export_parquet_writes_three_tables(tmp_path, monkeypatch):
     monkeypatch.setenv("NALR_HOME", str(tmp_path / ".alive"))
     monkeypatch.setenv("NALR_CONFIG_DIR", str(CONFIG_ROOT))
 
-    result = RUNNER.invoke(app, ["trace", "export", "parquet"])
+    result = RUNNER.invoke(app, ["trace", "export", "parquet", "--overwrite"])
 
     assert result.exit_code == 0
 
@@ -75,6 +78,7 @@ def test_cli_trace_export_parquet_writes_three_tables(tmp_path, monkeypatch):
     command_path = parquet_dir / "command_trace.parquet"
 
     assert payload["parquet_dir"] == str(parquet_dir)
+    assert payload["mode"] == "rebuild"
     assert round_path.exists()
     assert skill_path.exists()
     assert command_path.exists()
@@ -92,6 +96,51 @@ def test_cli_trace_export_parquet_writes_three_tables(tmp_path, monkeypatch):
     assert skill_count > 0
     assert command_count == 1
     assert session_id == controller.load_runtime_state().session_id
+
+
+def test_cli_trace_export_parquet_includes_repair_ledger_table(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.body_energy = 0.08
+    state.budget_remaining = 0.04
+    controller._save_state(state)
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="I need a quick easy break, but help me plan carefully, reply to Alex, and let me drift.",
+            target="alex",
+            cue="break",
+            valence=-0.35,
+            energy_delta=-0.16,
+        ),
+        scenario="task",
+        mode="interactive",
+    )
+
+    monkeypatch.setenv("NALR_HOME", str(tmp_path / ".alive"))
+    monkeypatch.setenv("NALR_CONFIG_DIR", str(CONFIG_ROOT))
+
+    result = RUNNER.invoke(app, ["trace", "export", "parquet", "--overwrite"])
+
+    assert result.exit_code == 0
+
+    payload = json.loads(result.stdout)
+    parquet_dir = tmp_path / ".alive" / "traces" / "parquet"
+    repair_path = parquet_dir / "repair_ledger.parquet"
+
+    assert repair_path.exists()
+    assert payload["mode"] == "rebuild"
+    assert payload["tables"]["repair_ledger"]["path"] == str(repair_path)
+
+    conn = duckdb.connect()
+    try:
+        repair_count = conn.execute("select count(*) from read_parquet(?)", [str(repair_path)]).fetchone()[0]
+        reason = conn.execute("select reason from read_parquet(?) limit 1", [str(repair_path)]).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert repair_count == 1
+    assert reason == "forced_compromise"
 
 
 def test_cli_memory_compact_and_sample_use_compacted_artifacts(tmp_path, monkeypatch):

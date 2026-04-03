@@ -14,14 +14,28 @@ def _compact_delta(delta_p: dict[str, float]) -> str:
     return f"{action}={score:.2f}"
 
 
+def _storage_line(payload: dict[str, Any]) -> str | None:
+    storage = payload.get("storage")
+    if not storage:
+        return None
+    return (
+        "Storage: "
+        f"source={storage.get('read_source', storage.get('read_source_default', '-'))} "
+        f"sync={storage.get('trace_sync_state', '-')} "
+        f"ready={_compact_bool(bool(storage.get('parquet_live_ready')))}"
+    )
+
+
 def format_chat_turn(payload: dict[str, Any]) -> str:
     action_name = payload.get("sampled_action", {}).get("name", "unknown")
     reply = payload.get("rendered_expression", {}).get("text", "").strip() or "(empty)"
+    identity = payload.get("identity", {})
+    display_name = identity.get("display_name") or "当前运行体"
     return "\n".join(
         [
             f"Round {payload.get('round_id', '?')}",
             f"Action: {action_name}",
-            f"NALR: {reply}",
+            f"{display_name}: {reply}",
         ]
     )
 
@@ -31,6 +45,9 @@ def format_why_view(payload: dict[str, Any]) -> str:
         f"Why This Turn (round {payload.get('round_id', '?')})",
         f"Sampled Action: {payload.get('sampled_action', 'unknown')}",
     ]
+    storage_line = _storage_line(payload)
+    if storage_line:
+        lines.append(storage_line)
     for driver in payload.get("top_drivers", []):
         lines.append(
             f"- {driver.get('agent_name')} -> {driver.get('action_name')} "
@@ -44,6 +61,9 @@ def format_agents_view(payload: dict[str, Any]) -> str:
         f"Agent Proposals (round {payload.get('round_id', '?')})",
         f"Sampled Action: {payload.get('sampled_action', 'unknown')}",
     ]
+    storage_line = _storage_line(payload)
+    if storage_line:
+        lines.append(storage_line)
     agents = payload.get("agents", [])
     if not agents:
         lines.append("(none)")
@@ -64,6 +84,9 @@ def format_skills_view(payload: dict[str, Any]) -> str:
         f"Skill Trace (round {payload.get('round_id', '?')})",
         f"Sampled Action: {payload.get('sampled_action', 'unknown')}",
     ]
+    storage_line = _storage_line(payload)
+    if storage_line:
+        lines.append(storage_line)
     skills = payload.get("skills", [])
     if not skills:
         lines.append("(none)")
@@ -83,6 +106,9 @@ def format_gates_view(payload: dict[str, Any]) -> str:
         f"Gate Decisions (round {payload.get('round_id', '?')})",
         f"Sampled Action: {payload.get('sampled_action', 'unknown')}",
     ]
+    storage_line = _storage_line(payload)
+    if storage_line:
+        lines.append(storage_line)
     gates = payload.get("gates", [])
     if not gates:
         lines.append("(none)")

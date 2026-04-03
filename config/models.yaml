@@ -1,4 +1,10 @@
 model_routes:
+  planner:
+    backend: doubao
+    model: doubao-seed-2-0-pro-260215
+    timeout_ms: 60000
+    retries: 0
+    enabled: true
   pfc:
     backend: doubao
     model: doubao-seed-2-0-pro-260215
@@ -17,6 +23,36 @@ model_routes:
     timeout_ms: 60000
     retries: 0
     enabled: true
+  tool_policy:
+    backend: doubao
+    model: doubao-seed-2-0-pro-260215
+    timeout_ms: 60000
+    retries: 0
+    enabled: false
+  vision_observer:
+    backend: doubao
+    model: doubao-seed-2-0-pro-260215
+    timeout_ms: 60000
+    retries: 0
+    enabled: false
+  browser_observer:
+    backend: doubao
+    model: doubao-seed-2-0-pro-260215
+    timeout_ms: 60000
+    retries: 0
+    enabled: false
+  audio_observer:
+    backend: doubao
+    model: doubao-seed-2-0-pro-260215
+    timeout_ms: 60000
+    retries: 0
+    enabled: false
+  external_llm_adapter:
+    backend: doubao
+    model: doubao-seed-2-0-pro-260215
+    timeout_ms: 60000
+    retries: 0
+    enabled: false
 perspective:
   enabled: true
   risk_threshold: 0.33

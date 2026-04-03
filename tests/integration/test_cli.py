@@ -5,6 +5,8 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from nalr.cli.app import app
+from nalr.cil.runtime import CommandInterfaceLayer
+from nalr.runtime.controller import RuntimeController
 
 
 RUNNER = CliRunner()
@@ -23,6 +25,31 @@ def test_cli_state_show_and_safe_on(tmp_path, monkeypatch):
     payload = json.loads(state_result.stdout)
     assert payload["safe_mode"] is True
     assert payload["mode"] == "safe"
+
+
+def test_cil_parse_populates_command_id_for_legacy_cli_commands(tmp_path):
+    cil = CommandInterfaceLayer(RuntimeController(project_root=tmp_path, config_root=Path(__file__).resolve().parents[2] / "config"))
+
+    envelope = cil._parse("safe on")
+
+    assert envelope.command_id
+    assert envelope.domain == "safe"
+    assert envelope.verb == "on"
+    assert envelope.canonical == "safe on"
+    assert envelope.mutation_scope == "runtime"
+    assert envelope.rollback_available is True
+
+
+def test_cil_parse_normalizes_flags_and_args_for_budget_set(tmp_path):
+    cil = CommandInterfaceLayer(RuntimeController(project_root=tmp_path, config_root=Path(__file__).resolve().parents[2] / "config"))
+
+    envelope = cil._parse("budget set --cap 50000")
+
+    assert envelope.command_id
+    assert envelope.canonical == "budget set 50000"
+    assert envelope.flags == {"cap": True}
+    assert envelope.parsed_args == {"value": 50000}
+    assert envelope.mutation_scope == "resource"
 
 
 def test_cli_agent_list_and_trace_round(tmp_path, monkeypatch):
@@ -61,12 +88,23 @@ def test_cli_chat_prints_human_readable_reply_and_round_summary(tmp_path, monkey
     monkeypatch.setenv("NALR_HOME", str(tmp_path / ".alive"))
     monkeypatch.setenv("NALR_CONFIG_DIR", str(Path(__file__).resolve().parents[2] / "config"))
 
-    result = RUNNER.invoke(app, ["chat", "帮我记住晚饭想吃面，并规划今晚。"])
+    result = RUNNER.invoke(app, ["chat", "帮我记住晚饭想吃面，并规划今晚。", "--name", "阿澜"])
 
     assert result.exit_code == 0
     assert "Round 1" in result.stdout
     assert "Action:" in result.stdout
-    assert "NALR:" in result.stdout
+    assert "阿澜:" in result.stdout
+
+
+def test_cli_chat_open_question_avoids_generic_help_fallback_phrase(tmp_path, monkeypatch):
+    monkeypatch.setenv("NALR_HOME", str(tmp_path / ".alive"))
+    monkeypatch.setenv("NALR_CONFIG_DIR", str(Path(__file__).resolve().parents[2] / "config"))
+
+    result = RUNNER.invoke(app, ["chat", "你可以做什么？", "--name", "阿澜"])
+
+    assert result.exit_code == 0
+    assert "我先顺着你刚才提到的内容继续往下接" not in result.stdout
+    assert "我先帮你" not in result.stdout
 
 
 def test_cli_chat_json_and_trace_views_support_last_round(tmp_path, monkeypatch):
@@ -147,12 +185,12 @@ def test_cli_repl_supports_chat_trace_shortcuts_and_runtime_controls(tmp_path, m
 
     result = RUNNER.invoke(
         app,
-        ["repl"],
+        ["repl", "--name", "阿澜"],
         input="帮我记住晚饭想吃面\n/agents\n/skills\n/mode task\n/safe on\n/exit\n",
     )
 
     assert result.exit_code == 0
-    assert "NALR:" in result.stdout
+    assert "阿澜:" in result.stdout
     assert "Agent Proposals" in result.stdout
     assert "Skill Trace" in result.stdout
     assert "mode" in result.stdout
@@ -169,6 +207,37 @@ def test_cli_trace_agents_last_is_friendly_when_no_rounds_exist(tmp_path, monkey
     assert "No rounds yet. Send a message first." in result.stdout
 
 
+def test_cli_dream_status_trace_and_metrics(tmp_path, monkeypatch):
+    monkeypatch.setenv("NALR_HOME", str(tmp_path / ".alive"))
+    monkeypatch.setenv("NALR_CONFIG_DIR", str(Path(__file__).resolve().parents[2] / "config"))
+
+    RUNNER.invoke(
+        app,
+        [
+            "chat",
+            "Remember that tea helps me slow down before sleep.",
+            "--target",
+            "user",
+            "--cue",
+            "tea",
+            "--scenario",
+            "companion",
+        ],
+    )
+    RUNNER.invoke(app, ["chat", "Sleep reshape around tea.", "--target", "user", "--cue", "tea", "--mode", "sleep"])
+
+    status_result = RUNNER.invoke(app, ["dream", "status"])
+    trace_result = RUNNER.invoke(app, ["dream", "trace", "last"])
+    metrics_result = RUNNER.invoke(app, ["dream", "metrics"])
+
+    assert status_result.exit_code == 0
+    assert trace_result.exit_code == 0
+    assert metrics_result.exit_code == 0
+    assert '"enabled": true' in status_result.stdout
+    assert '"trigger": "sleep_full"' in trace_result.stdout
+    assert '"total_runs": 1' in metrics_result.stdout
+
+
 def test_repo_launcher_exposes_alive_help():
     repo_root = Path(__file__).resolve().parents[2]
     result = subprocess.run(
@@ -181,3 +250,62 @@ def test_repo_launcher_exposes_alive_help():
     assert result.returncode == 0
     assert "chat" in result.stdout
     assert "repl" in result.stdout
+
+
+def test_cli_identity_show_and_set_name(tmp_path, monkeypatch):
+    monkeypatch.setenv("NALR_HOME", str(tmp_path / ".alive"))
+    monkeypatch.setenv("NALR_CONFIG_DIR", str(Path(__file__).resolve().parents[2] / "config"))
+
+    set_result = RUNNER.invoke(app, ["identity", "set-name", "阿澜"])
+    show_result = RUNNER.invoke(app, ["identity", "show"])
+
+    assert set_result.exit_code == 0
+    assert show_result.exit_code == 0
+    payload = json.loads(show_result.stdout)
+    assert payload["display_name"] == "阿澜"
+    assert payload["internal_handle"].startswith("nalr-")
+
+
+def test_cli_run_start_status_explain_pause_resume_and_abort(tmp_path, monkeypatch):
+    monkeypatch.setenv("NALR_HOME", str(tmp_path / ".alive"))
+    monkeypatch.setenv("NALR_CONFIG_DIR", str(Path(__file__).resolve().parents[2] / "config"))
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "runner.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    start_result = RUNNER.invoke(app, ["run", "start", "检查 runner.py 并规划下一步"])
+    status_result = RUNNER.invoke(app, ["run", "status"])
+    explain_result = RUNNER.invoke(app, ["run", "explain"])
+    pause_result = RUNNER.invoke(app, ["run", "pause"])
+    resume_result = RUNNER.invoke(app, ["run", "resume"])
+    abort_result = RUNNER.invoke(app, ["run", "abort"])
+
+    assert start_result.exit_code == 0
+    assert status_result.exit_code == 0
+    assert explain_result.exit_code == 0
+    assert pause_result.exit_code == 0
+    assert resume_result.exit_code == 0
+    assert abort_result.exit_code == 0
+
+    start_payload = json.loads(start_result.stdout)
+    status_payload = json.loads(status_result.stdout)
+    explain_payload = json.loads(explain_result.stdout)
+    abort_payload = json.loads(abort_result.stdout)
+
+    assert start_payload["status"] == "running"
+    assert status_payload["run_id"] == start_payload["run_id"]
+    assert explain_payload["current_step"]["tool_choice"] == "repo_scan"
+    assert abort_payload["status"] == "aborted"
+
+
+def test_cli_root_dream_alias_runs_manual_dream_with_optional_cue(tmp_path, monkeypatch):
+    monkeypatch.setenv("NALR_HOME", str(tmp_path / ".alive"))
+    monkeypatch.setenv("NALR_CONFIG_DIR", str(Path(__file__).resolve().parents[2] / "config"))
+
+    result = RUNNER.invoke(app, ["Dream", "tea"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["trace"]["mode"] == "sleep"
+    assert payload["trace"]["cue"] == "tea"
+    assert payload["dream_run_id"].startswith("dream-")

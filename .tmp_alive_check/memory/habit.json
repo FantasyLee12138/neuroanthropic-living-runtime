@@ -1,0 +1,15 @@
+[
+  {
+    "pattern": "quick",
+    "strength": 0.0598,
+    "count": 1,
+    "recoverable": true,
+    "status": "active",
+    "suppressed_by": null,
+    "suppressed_at_round": null,
+    "context_slot": "user::user",
+    "last_context_recurrence": 0.3282,
+    "last_updated_round": 1,
+    "breakthrough_rounds": []
+  }
+]

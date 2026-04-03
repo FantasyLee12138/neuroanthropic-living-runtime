@@ -219,6 +219,71 @@ def test_skill_executor_persists_breaker_and_uses_fallback_during_cooldown(tmp_p
     assert breaker_result.fallback_route == "demo.fallback"
     assert breaker_result.breaker_state["open"] is True
 
+
+def test_skill_executor_resets_legacy_open_breakers_after_guard_fingerprint_changes(tmp_path):
+    spec = SkillSpec(
+        name="typed_breaker",
+        owner_module="demo",
+        input_schema={"event": RoundEvent},
+        output_schema=ProposalBundle,
+        timeout_ms=20,
+        cost_class="H",
+        failure_policy="fallback_to_rules",
+        trace_tags=["demo"],
+        skill_kind="planning",
+        output_kind="candidate_actions",
+        policy_check=True,
+        permission=SkillPermissionProfile(external_io=True),
+        fallback_route=FallbackRoute(strategy="fallback_to_rules", target="demo.fallback", cost_class="L"),
+        breaker_policy=CircuitBreakerPolicy(failure_threshold=3, cooldown_rounds=5),
+    )
+    breaker_path = tmp_path / "circuit_breakers.json"
+    breaker_path.write_text(
+        json.dumps(
+            {
+                "typed_breaker": {
+                    "failure_count": 3,
+                    "open_until_round": 10,
+                    "last_failure_round": 5,
+                    "last_failure_reason": "fallback_to_rules",
+                    "fallback_route": "demo.fallback",
+                }
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    executor = SkillExecutor(
+        {"typed_breaker": spec},
+        circuit_breaker_path=breaker_path,
+        environment_fingerprint="guard-v2",
+    )
+
+    called_primary = {"count": 0}
+    output, result = executor.run(
+        round_id=6,
+        skill_name="typed_breaker",
+        inputs={"event": {"source": "user", "content": "help me plan"}},
+        provider=lambda event: called_primary.__setitem__("count", called_primary["count"] + 1) or ProposalBundle(
+            owner="demo",
+            confidence=0.7,
+            action_preferences={"plan": 0.2},
+            delta_p={"plan": 0.2},
+            sigma_scale=0.9,
+            reason=event.content,
+        ),
+        fallback_provider=lambda event: ProposalBundle(owner="demo", action_preferences={"respond": 0.1}, delta_p={"respond": 0.1}),
+        runtime_context=SkillRuntimeContext(round_id=6, scenario="task", mode="interactive"),
+    )
+
+    persisted = json.loads(breaker_path.read_text(encoding="utf-8"))
+
+    assert called_primary["count"] == 1
+    assert isinstance(output, ProposalBundle)
+    assert result.degraded is False
+    assert persisted["__meta__"]["environment_fingerprint"] == "guard-v2"
+
     recovered, recovered_result = executor.run(
         round_id=9,
         skill_name="typed_breaker",

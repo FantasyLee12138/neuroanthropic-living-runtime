@@ -2,8 +2,9 @@ resource_defaults:
   scarce_threshold: 0.50
   starvation_threshold: 0.75
   queue_cap: 64
+  latency_sla_ms: 250
+  target_burn_ratio: 0.20
   rate_cap: "12_per_10s"
   session_cache_cap: 256
   raw_evidence_retention_days_hot: 7
   raw_evidence_retention_days_warm: 30
-

@@ -1,169 +1,220 @@
-# NeuroAnthropic Living Runtime (NALR)
+# NeuroAnthropic Living Runtime（NALR）
 
-NeuroAnthropic Living Runtime（NALR）是一个基于 [开发文档v0.56](./开发文档v0.56.md) 落地的类脑活人运行时原型。首版目标不是一次性还原全部认知复杂性，而是先把多 Agent、可控预算、可追踪 proposal、记忆/习惯层、输出表达层和观测侧车稳定串成一条可执行链路。
+NeuroAnthropic Living Runtime（NALR）是一个对齐[开发文档 v0.56](./开发文档v0.56.md)的类脑活人运行时原型。这个仓库当前追求的不是一次性“补齐所有认知理论”，而是把多 Agent、概率驱动、冲突闭环、慢变量、命令控制层、终端交互层和可观测证据链先稳定串成一条能跑、能看、能调、能降级的工程主链。
 
-## 本次更新记录（2026-04-03）
+当前入口分为两层：
 
-- 新增 `./alive` 启动脚本，支持自动加载仓库根目录 `.env.local` / `.env`，并补充 `config/models.yaml` 作为 PFC、Perspective、renderer 的模型路由配置入口。
-- 将 skill runtime 收口为 typed validator：补上 contract 解析/序列化/校验、运行时元数据约束、权限边界、熔断策略与 fallback route，并新增 provider router、Doubao backend 与 fake backend。
-- trace / memory 维护面扩展为显式路径：增加 `session_id` / `recorded_at` / `recorded_date` 元数据、`alive trace export parquet`、`alive memory compact`、`alive memory sample`，同时让 `checkpoint create` 也写 command trace。
-- CLI、observer 与表达层同步增强：新增 `trace agents|skills|gates` 视图、`memory recall` / `habit reset` / `nudge relation` / `budget set` 命令、`GET /memory/recall/{cue}` 观测接口，以及更贴近表达参数的 fallback renderer。
-- 文档与验收材料补齐：新增 `v056_acceptance_matrix.md`、ADR `0002-typed-skill-runtime-validator`、冲突控制器规格与 Parquet/记忆压缩说明；当前整仓验证快照为 `59 passed, 2 skipped`。
+- `./NALR`：普通用户入口，默认启动认知控制台式终端
+- `./alive`：开发、运维、观测、回放、维护、干预入口
 
-## Implementation Status
+## 项目定位
 
-| Phase | Status | Observable Result | Verification |
-|---|---|---|---|
-| P0. truth-first baseline | done | README, CLI surface, and tests now reflect verified behavior instead of future intent; `checkpoint create` also leaves command trace. | `.venv/bin/python -m pytest tests/unit/test_runtime_controller.py tests/integration/test_cil_cli.py -q` |
-| P1. formula kernel + guard closure | in progress | `ActionDistributionState` now records `u_base`, `u_shifted`, `p_base_stochastic`, `q_noise`, `p_mix`, `p_final`, `risk_suppressor`, and `conflict_mode`; `sigma_scale` and `utility_shift` now change the runtime distribution; `risk_suppressor` now changes `p_final`; task-time high-probability `wander` is explicitly blocked by `BehaviorPlausibilityGuard` with trace evidence. | `.venv/bin/python -m pytest tests/unit/test_formula_runtime_alignment.py tests/unit/test_agent_expansion.py tests/unit/test_conflict_controller.py -q` |
-| P2. slow state: memory / habit / resource / temperament | in progress | memory now exposes structured `recall`, uses context-slot + cue-similarity interference, and habit strength is updated through the runtime path while still remaining bounded and resettable; runtime state now has stable `temperament_state` and `resource_state` slots. | `.venv/bin/python -m pytest tests/simulation/test_memory_tiers.py tests/simulation/test_memory_and_habit.py tests/unit/test_runtime_controller.py -q` |
-| P3. stochastic + output expression | in progress | stochastic mixing now starts from `Softmax(u_shifted)` and lowers `lambda_noise` under stronger task control; fallback renderer now consumes `ExpressionProfile`, relation risk, and safety constraints instead of only action templates. | `.venv/bin/python -m pytest tests/unit/test_formula_runtime_alignment.py tests/unit/test_output_expression_layer.py tests/unit/test_runtime_controller.py -q` |
-| P4. skill runtime + trace + Parquet | in progress | typed skill runtime, JSON/JSONL trace, Parquet export, and approximate ablation are usable; round trace now preserves richer formula-state fields and command trace covers control-plane mutations including checkpoint creation. | `.venv/bin/python -m pytest tests/unit/test_skill_runtime.py tests/integration/test_trace_maintenance_cli.py tests/integration/test_observer_diagnostics.py -q` |
-| P5. CIL / CLI / observer core plane | in progress | CIL-backed commands now include `memory recall`, `habit reset`, `nudge relation <target> trust <delta>`, `budget set --cap <int>`, and observer adds `/memory/recall/{cue}`. | `.venv/bin/python -m pytest tests/integration/test_cil_cli.py tests/integration/test_cli.py tests/integration/test_observer_api.py -q` |
-| Regression baseline | done | Current branch passes the repo test suite after the above changes. | `.venv/bin/python -m pytest tests -q` |
+这个仓库遵循开发文档 v0.56 的核心思路：
 
-## Current Observable Capabilities
+- 先把心理机制离散成可执行的模块、参数、阈值和边界
+- 先保证系统可运行、可回放、可解释，再继续追求“活人感”
+- 先限制权限和影响范围，再逐步开放更高成本、更强能力的模块
+- 先按对话、陪伴、任务等场景区分运行时，再考虑进一步泛化
 
-- `./alive trace round 1` and `./alive trace why 1` now show the richer distribution state: `u_base`, `u_shifted`, `p_base_stochastic`, `q_noise`, `p_mix`, `p_final`, `risk_suppressor`, and `conflict_mode`.
-- `./alive memory recall <cue>` returns tier, strength, detail/gist mode, interference, and evidence snippets.
-- `./alive habit reset <pattern>` resets a habit to `strength = 0` while keeping it recoverable.
-- `./alive nudge relation <target> trust <delta>` writes a relation nudge through CIL and leaves command trace.
-- `./alive budget set --cap 50000` updates runtime budget in operator space while keeping internal runtime state normalized to `0..1`.
-- `./alive checkpoint create` now writes command trace in addition to checkpoint state.
-- `./alive` auto-loads `.env.local` or `.env`, so local model routing can be switched without exporting every variable by hand.
-- Fallback renderer now changes wording based on `directness_level`, `hedging_level`, `warmth_level`, `repair_tendency`, relation risk, and `conflict_hot`.
-- Observer now supports `GET /memory/recall/{cue}`, `GET /skills/stats`, `GET /metrics/conflicts`, `GET /metrics/mode-switches`, and `GET /analysis/ablation`.
-- Offline analytics export remains available through `alive trace export parquet`, producing round / skill / command Parquet tables under `.alive/traces/parquet/`.
-- Current repo verification result: `59 passed, 2 skipped`.
+因此，README 不再按“零散更新日志 + 命令堆叠”来写，而是改成和开发文档一致的阅读顺序：版本定位、模块主线、控制链路、观测能力、使用入口、验证边界。
 
-## Next Milestone
+## 当前实现主线
 
-- Finish the remaining formula-accuracy gaps: make `ConflictMonitorAgent` carry explicit post-error adjustment / repair markers, deepen slow-state formulas beyond the current bounded implementation, and replace string-split CIL routing with stricter typed command parsing.
+| 开发文档主线 | 当前仓库中的落地情况 |
+|---|---|
+| Agent 注册表 | `RuntimeController` 负责编排显性 Agent、隐性模块、守卫层和控制面；`PFCAgent` 负责候选动作，`ConflictMonitorAgent` 负责冲突闭环，`ThalamusAttentionAgent` 负责聚合与采样。 |
+| Skill 注册表 | `SkillExecutor` 已统一承接类型契约校验、`timeout_ms` / `cost_class` / `failure_policy` 约束、权限边界、`policy_check`、降级路由和熔断器。 |
+| CLI / CIL / 命令控制层 | `alive` 已切到类型化命令封套；命令执行会留下 command trace、规范化命令形态、解析参数、快照和回滚契约。`NALR` 则作为认知控制台消费终端桥接事件。 |
+| 概率行为与冲突闭环 | runtime 会记录 `u_base -> u_shifted -> p_base_stochastic -> q_noise -> p_mix -> p_final`；冲突层支持 5 个冲突分项、优先级裁决链、重采样、妥协模板、修复状态机和事后纠偏。 |
+| 慢变量与长期运行 | memory / habit / relation / resource / temperament 已接入主链；真实性、身份演化、生命性塑形、长跑投影拆分为 `IdentityRuntime`、`AuthenticityPolicy`、`VitalityEngine`、`LongRunAnalyzer`；`idle/sleep` 还能触发 dream 侧车塑形。 |
+| trace / observer / 可观测性 | round / skill / command / repair trace 已形成规范化存储；observer 默认读取 Parquet 实时读取模型，并暴露 `why`、贡献拆解、冲突指标、真实性、生命性和 dream 指标。 |
 
-## Known Gaps Against v0.56
+## 当前运行时逻辑
 
-- Conflict control is stronger than before, but it still does not expose a first-class `mark_post_error_adjustment` state or a richer multi-round repair ledger from the doc.
-- Slow-state formulas are now closer to the doc, but memory decay/interference, habit recovery, resource scarcity, and temperament drift are still bounded approximations rather than a full parameter-complete v0.56 implementation.
-- CIL is still string-routed. It now covers the documented core commands, but it does not yet use a stricter typed command schema with execution snapshots and rollback objects for every mutable operator action.
-- Observer still reads canonical JSON trace/state rather than using Parquet as the primary live read path.
-- Model-backed routes remain optional enhancements; the no-model path is the primary validated runtime path in this branch.
+交互轮主链：
 
-## v0.56 公式层实现
+```text
+state update
+-> Salience / Body / Emotion / Relationship / Resource
+-> PFC candidate generation
+-> Habit / Desire / DMN / Hippocampus / Perspective / Value
+-> ConflictMonitor
+-> Thalamus sampling
+-> BehaviorPlausibilityGuard
+-> OutputGate / Renderer
+-> trace / writeback / health check
+```
 
-- 决策核：各 agent 输出 `ProposalBundle(delta_p, confidence, sigma_scale, utility_shift, veto)`，controller 记录 `u_base -> u_shifted -> p_base_stochastic -> q_noise -> p_mix -> p_final`，并把 CI 写回状态。
-- 冲突与采样层：`ConflictMonitorAgent` 负责 5 个分项冲突分数、固定优先级裁决链、最多 3 个 pass 的重采样/妥协控制，以及 `critical_conflict` 熔断与恢复；`ThalamusAttentionAgent` 负责聚合、归一化、采样。
-- 分布级守卫层：`BehaviorPlausibilityGuard` 会扫描最终分布中的高概率违规动作，先把它们打到 `gate=0` 再重采样；`ForcedModeSwitch` 处理 mode/focus lock；`OutputGate` 做最终约束下压。
-- 慢变量层：memory 使用 gist/detail + cue-weighted decay + interference，habit 使用 bounded strengthening，relation trace 和 stable priors 都会落盘。
-- 情境随机层：在 deterministic distribution 上叠加 `xi_emo`、`xi_mood`、`lambda_noise`、`r_intensity`，并记录 `KL` guard 结果。
-- 输出表达层：`build_expression_profile()` 按 `reply_delay`、`self_disclosure`、`tone_sharpness`、`repair_tendency` 公式和 jitter 范围生成表达参数。
-- model-backed 规划层：`PFCAgent.generate_candidates` 通过 provider route 生成结构化候选动作；失败或无 `ARK_API_KEY` 时退回显式启发式 fallback planner。
-- late Perspective 层：`infer_other_state` / `simulate_other_reaction` 在 `output_gate` 之后按风险门控触发，消费最终 gated action。
-- renderer 接口层：`build_render_plan()` 现在生成自包含计划，随后由 renderer/provider 消费并产出 `RenderedExpression`。
-- typed skill runtime 层：`SkillExecutor` 统一做 typed input/output contract 校验、运行时元数据约束、权限边界检查、`policy_check`、熔断持久化和低成本 fallback 接管。
-- 控制与观测层：CIL 命令统一写 command trace；observer 与 trace/why payload 现在都能读到 `rendered_expression`、late Perspective 结果、renderer stage 证据，以及 conflict components / compromise template / `conflict_hot`。
+非交互塑形链：
 
-## v0.56 对齐范围
+```text
+idle / sleep
+-> VitalityEngine
+-> DreamOrchestrator
+-> memory / habit / relation / identity shaping
+-> authenticity / vitality / long-run evidence
+-> why / observer / dream trace
+```
 
-- Phase 1：运行时骨架、CLI MVP、trace、safe mode
-- Phase 2：可控记忆层与 gist/detail 召回
-- Phase 3：习惯强度与 hot cache 思路
-- Phase 4：关系层、Perspective、输出风格层
-- Phase 5：DMN、长跑 smoke、observer 可视化入口
+这个结构和开发文档中的“显性提案者 -> 冲突闭环 -> 守卫层 -> 输出层 -> 观测层”保持一致；新增的 dream、真实性、生命性链路也被放在慢变量和长期运行逻辑中，而不是散落在终端功能之后。
 
-## 架构概览
+## 近期已落地改动
 
-- `src/nalr/runtime`：单轮调度、模式切换、checkpoint、safe mode
-- `docs/specs/conflict-controller-v056.md`：完整冲突控制器的分项分数、优先级链、妥协模板与熔断恢复规范
-- `src/nalr/agents`：Body、Resource、PFC、Hippocampus、Habit、Relationship、DMN、Perspective proposals
-- `src/nalr/providers`：模型 route、Doubao/Ark backend、测试 fake backend
-- `src/nalr/memory`：事件写入、记忆强度、习惯强度、关系状态
-- `src/nalr/trace`：canonical trace 存储与 Parquet 导出
-- `src/nalr/output`：表达参数计算、`RenderPlan` 组装、renderer fallback
-- `src/nalr/cli`：`alive` CLI
-- `services/observer`：只读 observer API 与 dashboard 占位
+### 2026-04-04
 
-## 关键文档
+- 身份与披露链路从静态 `query_kind / disclosure_detail` 升级为概率化意图层：runtime 会先形成 `query_intent posterior`，再条件化生成 `disclosure_intent posterior`，并把两者写入分布、`render_plan`、`why` 和 observer 指标。
+- 情境随机层开始统一消费 `QuantumEntropyPool`；随机扰动和动作采样会记录 `entropy_ref`，外部 QRNG 失败时显式降级为确定性兜底，而不是静默退回伪随机。
+- 真实性 / 生命性主链从 `RuntimeController` 内部逻辑拆分为 `IdentityRuntime`、`AuthenticityPolicy`、`VitalityEngine`、`LongRunAnalyzer` 四个运行时边界；controller 继续保留外部 API，但内部职责收敛为编排层。
+- `RoundTrace`、`why` 和 observer 时间线现在可以直接暴露 `authenticity`、`identity_evolution`、`vitality_snapshot`、`long_run_projection` 等证据面；`AuthenticityRecord` 也新增 `candidate_penalties` 与 `sampling_penalty_applied`。
+- 新增 dream 侧车链路：`idle` 与 `sleep` 模式可触发 `DreamOrchestrator`，生成 `dream_run_id`、`dream_trace_ref`、`dream_guard_summary`、`dream_effect_summary`；`alive dream ...` 与 observer `/dream/*` 已可直接查看。
+- `NALR` 已升级为 v2 认知控制台：主区显示 transcript、工具时间线与审批提示，侧栏显示 `core_goal`、`current_intent`、`vital_signs`、`identity`、`authenticity`，底部状态线显示权限、工作区与审批计数。
+- 终端桥接事件面扩展为 `run_status`、`step_update`、`tool_call`、`tool_result`、`approval_request`、`sidebar_snapshot`、`assistant_final`，终端与 observer 现在可以共享同一条任务证据链。
+- `NALR` slash 面补齐为 `/help /status /why /steps /tools /state /dream [cue] /pause /resume /abort /clear /compact /mode [value] /permissions [value] /model /exit`，并支持按 cwd 维度记录输入历史、`Ctrl+C` 中止、`Ctrl+D` 退出、`Ctrl+L` 清屏、`\ + Enter` 多行草稿。
+- 本轮补验已重新跑通：`tests/unit/test_dream_runtime.py`、`tests/integration/test_dream_bridge_stdio.py`、`tests/longrun/test_authenticity_acceptance.py`、`tests/unit/test_terminal_bridge.py`、`tests/integration/test_nalr_terminal.py`，共 `24 passed`；同时 `npm --prefix apps/terminal test` 与 `npm --prefix apps/terminal run build` 是当前终端侧的标准验证集。
 
-- `v056_acceptance_matrix.md`：按 spec item 对照代码、测试和 trace 证据的保守验收矩阵。
-- `docs/decisions/0002-typed-skill-runtime-validator.md`：typed skill runtime validator 的设计决策、约束与后果。
-- `docs/specs/conflict-controller-v056.md`：冲突控制器的完整规格对照文档。
-- `docs/specs/parquet-trace-memory-compaction.md`：Parquet 导出与记忆压缩维护路径说明。
-- `config/models.yaml`：PFC / Perspective / renderer 的模型路由默认配置。
+### 2026-04-03
+
+- 新增 `./alive` 启动脚本，支持自动加载仓库根目录 `.env.local` / `.env`，`config/models.yaml` 成为 PFC、Perspective、renderer 的模型路由默认入口。
+- skill runtime 已收口为类型化校验器：补齐 contract 解析/序列化/校验、运行时元数据约束、权限边界、熔断策略、降级路由与 provider 路由。
+- trace / memory 维护路径扩展为显式命令：`alive trace export parquet`、`alive memory compact`、`alive memory sample`，并让 `checkpoint create` 也写入 command trace。
+- CLI、observer 和表达层同步增强：新增 `trace agents|skills|gates` 视图、`memory recall` / `habit reset` / `nudge relation` / `budget set` 命令、`GET /memory/recall/{cue}` 观测接口，以及更贴近表达参数的兜底渲染器。
+
+## 当前可直接观测的能力
+
+- `alive trace round 1`、`alive trace why 1` 可以直接看到 `u_base`、`u_shifted`、`p_base_stochastic`、`q_noise`、`p_mix`、`p_final`、`risk_suppressor`、`conflict_mode`。
+- `render_plan.identity_context` 会暴露 `query_intent`、`query_intent_posterior`、`disclosure_intent`、`disclosure_intent_posterior`、`disclosure_clipped`。
+- `stochastic_state` 会写出 `entropy_ref`，用于标识本轮使用的是哪一段量子熵或哪次降级。
+- `alive trace why <round>`、observer `/why/{round}` 和 `/metrics/conflicts` 会显式给出 `repair_mode`、`post_error_adjustment`、`repair_state_snapshot`、`repair_ledger_tail`、`conflict_safe_mode_owned`。
+- `alive memory recall <cue>` 会返回记忆层级、强度、gist/detail 模式、干扰信息和证据片段。
+- `alive habit reset <pattern>` 可以把习惯重置到 `strength = 0`，同时保留可恢复语义。
+- `alive budget set --cap 50000` 会通过 CIL 更新预算，并保持 runtime 内部状态归一到 `0..1`。
+- `alive dream status`、`alive dream trace last`、`alive dream proposals last`、`alive dream metrics` 可以查看非交互塑形与 dream proposal 证据。
+- `alive trace round|why|contribution` 与 observer `/trace|/why|/contributions` 默认优先从 Parquet 规范化实时读模型读取，并显式返回 `storage.read_source` / `trace_sync_state`。
+- observer 已支持 `/metrics/authenticity`、`/metrics/vitality`、`/dream/status`、`/dream/runs`、`/dream/metrics`、`/skills/stats`、`/metrics/conflicts`、`/metrics/mode-switches`、`/analysis/ablation`。
 
 ## 目录说明
 
 ```text
-config/                  规格参数与 scenario preset
-docs/                    架构说明与设计决策
-src/nalr/                Python 运行时代码
-services/observer/       只读 sidecar
-tests/                   unit/integration/simulation/longrun
+config/                  参数、阈值、场景预设、dream 配置
+docs/                    架构说明、规格文档、设计决策
+apps/terminal/           NALR 终端控制台前端
+services/observer/       observer 只读侧车
+src/nalr/                Python 运行时、CLI、trace、dream、终端桥接
+tests/                   单测、集成、仿真、长跑验收
 .alive/                  默认本地运行态目录
-开发文档v0.56.md          上游规格文档
+开发文档v0.56.md          当前对齐的上游规格文档
 ```
 
-运行态 trace / memory 产物补充：
+运行态产物的关键路径：
 
 ```text
 .alive/
   traces/
     rounds/
     skills/
-    round_traces.jsonl
-    command_traces.json
-    command_traces.jsonl
     parquet/
       round_trace.parquet
       skill_trace.parquet
       command_trace.parquet
+      repair_trace.parquet
   memory/
     raw/
-      episodic_events.jsonl
     episodic_hot/
     episodic_warm/
     episodic_archive/
+  dream/
+    dream_runs.jsonl
+    runs/
 ```
 
-## Quickstart
+## 快速开始
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
+npm --prefix apps/terminal install
 .venv/bin/python -m pytest tests -q
 ```
 
-针对 typed runtime validator 的最小验证集：
-
-```bash
-.venv/bin/python -m pytest tests/unit/test_registry_contracts.py tests/unit/test_skill_runtime.py tests/unit/test_runtime_controller.py tests/unit/test_runtime_pipeline.py tests/integration/test_cil_cli.py tests/simulation/test_memory_tiers.py -q
-```
-
-启用 live Doubao / Ark 路由时额外设置：
+如果你使用 live Doubao / Ark 路由，还需要：
 
 ```bash
 export ARK_API_KEY=your-ark-key
 ```
 
-模型路由默认写在 `config/models.yaml`；如果使用仓库根目录的 `.env.local` 或 `.env`，`./alive` 会在启动时自动加载。
+`./alive` 会自动加载仓库根目录下的 `.env.local` 或 `.env`；模型路由默认配置在 `config/models.yaml`。
 
-运行 CLI：
+## 使用入口
+
+### 普通用户入口：`NALR`
+
+启动交互终端：
 
 ```bash
+./NALR
+./NALR "总结这个仓库结构"
+./NALR Dream tea
+```
+
+当前可用 slash 命令：
+
+```text
+/help
+/status
+/why
+/steps
+/tools
+/state
+/dream [cue]
+/pause
+/resume
+/abort
+/clear
+/compact
+/mode [value]
+/permissions [value]
+/model
+/exit
+```
+
+交互补充：
+
+```text
+- 宽终端默认双栏，窄终端自动退化为上下布局
+- Ctrl+C：中止当前任务
+- Ctrl+D：退出终端
+- Ctrl+L：清空当前可见 transcript
+- Up / Down：按当前 cwd 回溯输入历史
+- \ + Enter：继续输入多行草稿
+- y / n：审批当前待确认动作
+```
+
+### 开发 / 运维入口：`alive`
+
+常用命令示例：
+
+```bash
+./alive chat "我今天有点乱，帮我理一下待办"
+./alive chat "记住我晚饭想吃面" --cue 面 --show agents
 ./alive state show
-./alive chat "帮我规划今晚，并记住我晚饭想吃面"
-./alive repl
+./alive identity show
 ./alive focus show
-./alive trace round 1
+./alive trace why last
 ./alive trace agents last
 ./alive trace skills last
 ./alive trace gates last
-./alive trace export parquet --overwrite
-./alive memory compact
 ./alive memory recall 面
 ./alive memory sample --tier hot --limit 3
 ./alive habit reset coffee
 ./alive nudge relation user trust +0.05
 ./alive budget set --cap 50000
+./alive checkpoint create
+./alive trace export parquet --overwrite
+./alive dream status
+./alive dream run --mode sleep --cue tea
+./alive dream trace last
+./alive dream proposals last
+./alive dream metrics
 ./alive safe on
 ```
 
@@ -175,118 +226,80 @@ alive chat "帮我规划今晚"
 alive repl
 ```
 
-运行 observer：
+### observer 入口
+
+启动方式：
 
 ```bash
 .venv/bin/python -m uvicorn services.observer.api.app:app --reload
 ```
 
-如果使用自定义路径：
-
-```bash
-export NALR_HOME=.alive
-export NALR_CONFIG_DIR=config
-export NALR_SCENARIO=chat
-export NALR_MODE=interactive
-export ARK_API_KEY=your-ark-key
-```
-
-## CLI 示例
-
-终端对话：
-
-```bash
-alive chat "我今天有点乱，帮我理一下待办"
-alive chat "记住我晚饭想吃面" --cue 面 --show agents
-alive chat "刚才你记住了什么？" --json
-alive memory recall 面
-alive habit reset coffee
-alive nudge relation user trust +0.05
-alive budget set --cap 50000
-alive repl
-```
-
-在 `alive repl` 中可用：
-
-```text
-/help
-/why
-/agents
-/skills
-/gates
-/state
-/mode task
-/safe on
-/budget
-/exit
-```
-
-思考过程查看：
-
-```bash
-alive trace round 1
-alive trace why last
-alive trace contribution last
-alive trace agents last
-alive trace skills last
-alive trace gates last
-```
-
-说明：这里的“思考过程”指 runtime 已落盘的结构化 trace 证据，包括 `top_drivers`、`proposal_summaries`、`gate_decisions`、`skill_traces`，不是自由文本 chain-of-thought。
-
-```bash
-alive state show
-alive body show
-alive mood show
-alive focus show
-alive memory top
-alive habit top
-alive mode set task
-alive trace round 1
-alive trace why 1
-alive trace contribution 1
-alive trace export parquet --overwrite
-alive agent list
-alive agent disable DMNAgent
-alive checkpoint create
-alive checkpoint rewind ckpt-0000
-alive memory compact
-alive memory sample --tier warm --limit 3
-alive safe on
-alive budget show
-```
-
-observer 诊断入口：
+常用接口：
 
 ```text
 GET /state
+GET /identity
+GET /runs/current
+GET /runs/{run_id}/steps
+GET /runs/{run_id}/tools
 GET /trace/{round_id}
 GET /why/{round_id}
 GET /contributions/{round_id}
+GET /memory/recall/{cue}
 GET /metrics/summary
+GET /metrics/authenticity
+GET /metrics/vitality
+GET /dream/status
+GET /dream/runs
+GET /dream/runs/{round_ref}
+GET /dream/metrics
+GET /skills/stats
+GET /metrics/conflicts
+GET /metrics/mode-switches
+GET /analysis/ablation
 GET /dashboard
 ```
 
-## 阶段路线图
+## 验证口径
 
-1. 把当前基于规则的 runtime 扩展成更细的 proposal/veto 分层。
-2. 将记忆热层扩展为 hot/warm/archive 压缩与 replay。
-3. 将 observer 从只读 JSON API 扩展到 why-this、贡献度和长跑指标面板。
-4. 为现有 Doubao route 补充更强的 typed schema、更多 backend 和更稳的长跑校准。
+当前 README 采用“聚焦验证 + 有界长跑验收”的表述，不把重型 soak 冒充成已重新验完。
 
-## 运行截图占位
+推荐验证集：
 
-- CLI screenshot: `docs/architecture/cli-screenshot-placeholder.md`
-- Observer screenshot: `docs/architecture/observer-screenshot-placeholder.md`
+```bash
+.venv/bin/python -m pytest -q tests/unit/test_runtime_controller.py tests/unit/test_terminal_bridge.py tests/unit/test_dream_runtime.py tests/integration/test_observer_api.py tests/integration/test_terminal_bridge_stdio.py tests/integration/test_nalr_terminal.py tests/integration/test_dream_bridge_stdio.py tests/longrun/test_authenticity_acceptance.py
+npm --prefix apps/terminal test
+npm --prefix apps/terminal run build
+```
 
-## 贡献说明
+类型化运行时 / trace / CIL 的最小验证集：
 
-- 先阅读 `开发文档v0.56.md`
-- 修改规则或阈值时优先更新 `config/`
-- 新增行为前先补测试，再补实现
-- 所有状态变更都应保留 trace 证据
+```bash
+.venv/bin/python -m pytest -q tests/unit/test_registry_contracts.py tests/unit/test_skill_runtime.py tests/unit/test_runtime_controller.py tests/integration/test_cil_cli.py tests/integration/test_cli.py tests/integration/test_trace_maintenance_cli.py
+```
 
-## GitHub
+重型 soak 仍单列为后续验收项：
 
-- Repository slug: `FantasyLee12138/neuroanthropic-living-runtime`
-- Project title: `NeuroAnthropic Living Runtime (NALR)`
+```bash
+.venv/bin/python -m pytest -q tests/longrun/test_longrun_smoke.py
+```
+
+## 当前边界
+
+- 类型化 CIL 当前重点覆盖已经接入的可变操作类命令，而不是开发文档中全部潜在命令面。
+- Parquet 实时读取当前主覆盖 round / skill / command / repair；run / step / tool 级 trace 仍保留现有实现。
+- `NALR` 的终端壳、审批状态和 bridge 协议已经到位，但真正的可变更 coding tools 还没有全部接入。
+- 多行输入当前稳定支持 `\ + Enter`；`Shift+Enter` / `Option+Enter` 仍受当前 Ink 输入栈限制。
+- 模型增强路径仍属于可选能力；缺失 `ARK_API_KEY` 时，当前验证口径默认以无模型路径为主。
+- dream 侧车已经接入 `idle/sleep` 塑形、trace 和 observer，但仍属于慢变量与长期运行链路的一部分，不是独立的对话主调度器。
+- `tests/longrun/test_longrun_smoke.py` 仍被视为单独 soak gate；当前分支的声明是“聚焦验证 + 有界长跑验收已收口”，不是“全仓长跑已重新跑完”。
+
+## 关键文档
+
+- [开发文档 v0.56](./开发文档v0.56.md)：当前对齐的总规格文档。
+- [架构总览](./docs/architecture/overview.md)：运行时边界、skill 调用链和 observer 读取模型。
+- [v0.56 验收矩阵](./v056_acceptance_matrix.md)：按规格项对照代码、测试和 trace 证据的保守验收表。
+- [冲突控制器规格](./docs/specs/conflict-controller-v056.md)：冲突分项、优先级链、重采样、妥协模板和 repair FSM。
+- [Parquet / 记忆压缩说明](./docs/specs/parquet-trace-memory-compaction.md)：trace 导出和记忆压缩维护路径。
+- [typed skill runtime 设计决策](./docs/decisions/0002-typed-skill-runtime-validator.md)：类型化校验器、权限边界和熔断器设计。
+- [梦境侧车集成方案](./oneiroi_agent_codex_plan.md)：dream 侧车的目标、接口、预算和 proposal 设计。

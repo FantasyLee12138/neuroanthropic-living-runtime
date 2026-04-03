@@ -7,17 +7,60 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
 from nalr.runtime.controller import RuntimeController
+from nalr.terminal_bridge.session import TerminalSessionStore
 
 
 def create_app(project_root: Path | str | None = None, config_root: Path | str | None = None) -> FastAPI:
     project_root_path = Path(project_root) if project_root else Path.cwd()
     effective_config_root = Path(config_root) if config_root else Path(os.environ.get("NALR_CONFIG_DIR", project_root_path / "config"))
     controller = RuntimeController(project_root=project_root_path, config_root=effective_config_root)
+    terminal_sessions = TerminalSessionStore(controller.runtime_dir)
     app = FastAPI(title="NALR Observer", version="0.1.0")
 
     @app.get("/state")
     def state() -> dict:
         return controller.state_payload()
+
+    @app.get("/identity")
+    def identity() -> dict:
+        return controller.identity_payload()
+
+    @app.get("/runs/current")
+    def current_run() -> dict:
+        try:
+            return controller.run_status()
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/runs/{run_id}/steps")
+    def run_steps(run_id: str) -> dict:
+        try:
+            return controller.run_steps(run_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/runs/{run_id}/tools")
+    def run_tools(run_id: str) -> dict:
+        try:
+            return controller.run_tools(run_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/sessions/current")
+    def current_terminal_session() -> dict:
+        try:
+            payload = terminal_sessions.read_current().__dict__
+            payload["runtime_session_id"] = controller.load_runtime_state().session_id
+            return payload
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/sessions/{session_id}")
+    def terminal_session_detail(session_id: str) -> dict:
+        try:
+            return terminal_sessions.read(session_id).__dict__
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/trace/{round_id}")
     def trace(round_id: int) -> dict:
@@ -55,6 +98,33 @@ def create_app(project_root: Path | str | None = None, config_root: Path | str |
     @app.get("/metrics/summary")
     def metrics_summary() -> dict:
         return controller.metrics_summary()
+
+    @app.get("/metrics/authenticity")
+    def authenticity_metrics() -> dict:
+        return controller.authenticity_timeline()
+
+    @app.get("/metrics/vitality")
+    def vitality_metrics() -> dict:
+        return controller.vitality_timeline()
+
+    @app.get("/dream/status")
+    def dream_status() -> dict:
+        return controller.dream_status()
+
+    @app.get("/dream/runs")
+    def dream_runs() -> dict:
+        return controller.dream_runs()
+
+    @app.get("/dream/runs/{round_ref}")
+    def dream_trace(round_ref: str) -> dict:
+        try:
+            return controller.dream_trace(round_ref)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/dream/metrics")
+    def dream_metrics() -> dict:
+        return controller.dream_metrics()
 
     @app.get("/skills/stats")
     def skill_stats() -> dict:

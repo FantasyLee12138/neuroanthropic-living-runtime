@@ -1,0 +1,22 @@
+dream:
+  enabled: true
+  rpc_timeout_seconds: 5
+  budgets:
+    idle_light_tokens: 400
+    sleep_full_tokens: 1200
+  allowed_types:
+    idle_light:
+      - memory_consolidation
+      - emotion_adjustments
+      - habit_adjustments
+    sleep_full:
+      - memory_consolidation
+      - emotion_adjustments
+      - habit_adjustments
+      - dream_memory_write
+      - relationship_adjustments
+      - limited_identity_drift
+  proposal_limits:
+    relationship_delta_per_run: 0.03
+    identity_drift_credit_per_run: 0.2
+    mood_target_bias: 0.55

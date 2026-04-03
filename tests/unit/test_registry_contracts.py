@@ -42,6 +42,7 @@ def test_agent_registry_exposes_v056_contracts():
         "score_conflict",
         "trigger_control_escalation",
         "request_resample",
+        "mark_post_error_adjustment",
     ]
 
     plausibility_spec = registry["BehaviorPlausibilityGuard"]
@@ -75,6 +76,13 @@ def test_skill_registry_exposes_typed_skill_specs():
     assert async_spec.sync_mode == "async"
     assert async_spec.skill_kind == "ops"
     assert async_spec.permission.scope == "trace_append"
+
+    repair_spec = registry["mark_post_error_adjustment"]
+    assert repair_spec.owner_module == "ConflictMonitorAgent"
+    assert repair_spec.skill_kind == "guarding"
+    assert repair_spec.output_kind == "flag"
+    assert serialize_contract(repair_spec.input_schema)["state"] == "RuntimeState"
+    assert serialize_contract(repair_spec.output_schema)["repair_mode"] == "optional[str]"
 
 
 def test_skill_spec_rejects_invalid_runtime_metadata():

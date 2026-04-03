@@ -2,7 +2,10 @@
 
 ## Overview
 
-NALR 继续以 JSON / JSONL 作为 runtime 的 canonical write path。
+NALR 将 trace 收口为双层语义：
+
+- JSON / JSONL：append-only replay / audit / debug artifacts
+- Parquet：round / skill / command / repair 的默认 live read model
 
 - round trace：`.alive/traces/rounds/round_<id>.json`
 - round stream：`.alive/traces/round_traces.jsonl`
@@ -10,7 +13,9 @@ NALR 继续以 JSON / JSONL 作为 runtime 的 canonical write path。
 - command stream：`.alive/traces/command_traces.jsonl`
 - memory raw evidence：`.alive/memory/raw/episodic_events.jsonl`
 
-Parquet export 和 memory compaction 都是显式 maintenance 路径，不进入 `tick()` 或 `apply_command()` 的热写路径。
+runtime 在 `tick()` / `apply_command()` 结束时会同步刷新 canonical Parquet live read tables；`alive trace export parquet` 继续保留，但角色改为全量 rebuild / 历史 backfill。
+
+JSON 写成功但 Parquet 同步失败时，runtime 不阻断本轮，而是把 trace storage 标记为 `degraded`；公共读取端仅在该状态下回退 JSON，并暴露 `read_source` / `trace_sync_state` / `degraded_reason`。
 
 ## Canonical Trace Metadata
 
@@ -35,7 +40,7 @@ Parquet export 和 memory compaction 都是显式 maintenance 路径，不进入
 - `.alive/traces/parquet/skill_trace.parquet`
 - `.alive/traces/parquet/command_trace.parquet`
 
-导出命令：
+rebuild / backfill 命令：
 
 ```bash
 alive trace export parquet
@@ -45,7 +50,7 @@ alive trace export parquet --overwrite
 
 ### `round_trace.parquet`
 
-这是 analytics-oriented 表，不承担原样回放。
+这是 analytics-oriented flatten 表，不承担原样回放；完整 payload live read 默认走 `round_canonical.parquet`。
 
 一行对应一个：
 
@@ -187,7 +192,6 @@ alive memory sample --tier archive --limit 2
 
 本期不包含：
 
-- Parquet-backed observer read path
 - trace hot / warm / archive lifecycle
 - 后台异步 exporter / compactor
 - scheduler 驱动的自动 flush

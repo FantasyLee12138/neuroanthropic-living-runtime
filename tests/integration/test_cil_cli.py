@@ -65,8 +65,67 @@ def test_cil_command_trace_records_operator_level_and_rollback(tmp_path):
 
     assert payload.operator_level == "ops_admin"
     assert payload.rollback_available is True
+    assert payload.command_id
+    assert payload.canonical == "safe on"
+    assert payload.parsed_args == {}
     assert traces[-1]["operator_level"] == "ops_admin"
     assert traces[-1]["rollback_available"] is True
+    assert traces[-1]["command_id"] == payload.command_id
+    assert traces[-1]["canonical"] == "safe on"
+    assert traces[-1]["parsed_args"] == {}
+
+
+def test_cil_mutation_records_snapshot_and_can_restore_it(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    cil = CommandInterfaceLayer(controller)
+
+    payload = cil.execute("safe on")
+    snapshot_id = payload.snapshot_id
+    rollback = payload.rollback
+
+    assert snapshot_id
+    assert rollback["strategy"] == "domain_inverse"
+    assert rollback["snapshot_id"] == snapshot_id
+    assert rollback["command"] == "safe off"
+
+    restored = cil.execute(rollback["command"])
+    state = controller.load_runtime_state()
+    traces = json.loads((tmp_path / ".alive" / "traces" / "command_traces.json").read_text(encoding="utf-8"))
+
+    assert restored.applied is True
+    assert restored.scope == "runtime"
+    assert state.safe_mode is False
+    assert traces[-2]["snapshot_id"] == snapshot_id
+    assert traces[-1]["command"] == rollback["command"]
+
+
+def test_cil_snapshot_restore_remains_available_for_snapshot_rollback_commands(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="Remember that tea helps me slow down.",
+            target="user",
+            cue="tea",
+            valence=0.1,
+        ),
+        scenario="companion",
+        mode="interactive",
+    )
+    cil = CommandInterfaceLayer(controller)
+    before = controller.memory_store.habit_strength("tea")
+    payload = cil.execute("habit reset tea")
+    rollback = payload.rollback
+    restored = cil.execute(rollback["command"])
+    after = controller.memory_store.habit_strength("tea")
+    traces = json.loads((tmp_path / ".alive" / "traces" / "command_traces.json").read_text(encoding="utf-8"))
+
+    assert restored.scope == "snapshot"
+    assert rollback["strategy"] == "snapshot_restore"
+    assert before > 0.0
+    assert after == before
+    assert traces[-2]["rollback"]["strategy"] == "snapshot_restore"
+    assert traces[-1]["command"] == rollback["command"]
 
 
 def test_cil_supports_memory_recall_habit_reset_relation_nudge_budget_set_and_checkpoint_trace(tmp_path):
@@ -101,5 +160,43 @@ def test_cil_supports_memory_recall_habit_reset_relation_nudge_budget_set_and_ch
     assert controller.relation_show("user")["closeness"] > before_relation["closeness"]
     assert budget.applied is True
     assert controller.load_runtime_state().budget_remaining == 0.5
-    assert checkpoint.checkpoint_id.startswith("ckpt-")
+    assert checkpoint.applied is True
+    assert checkpoint.delta["checkpoint_id"].startswith("ckpt-")
     assert any(item["command"] == "checkpoint create" for item in traces)
+
+
+def test_cil_supports_identity_show_and_set_name(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    cil = CommandInterfaceLayer(controller)
+
+    payload = cil.execute("identity set-name 阿澜")
+    identity = cil.execute("identity show")
+    traces = json.loads((tmp_path / ".alive" / "traces" / "command_traces.json").read_text(encoding="utf-8"))
+
+    assert payload.applied is True
+    assert payload.scope == "identity"
+    assert payload.operator_level == "soft_intervene"
+    assert identity["display_name"] == "阿澜"
+    assert identity["internal_handle"].startswith("nalr-")
+    assert traces[-1]["command"] == "identity set-name 阿澜"
+
+
+def test_cil_supports_run_lifecycle_commands(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "agent.py").write_text("VALUE = 1\n", encoding="utf-8")
+    cil = CommandInterfaceLayer(controller)
+
+    started = cil.execute("run start 检查 agent.py")
+    status = cil.execute("run status")
+    explained = cil.execute("run explain")
+    paused = cil.execute("run pause")
+    resumed = cil.execute("run resume")
+    aborted = cil.execute("run abort")
+
+    assert started["status"] == "running"
+    assert status["run_id"] == started["run_id"]
+    assert explained["current_step"]["tool_choice"] == "repo_scan"
+    assert paused["status"] == "paused"
+    assert resumed["status"] == "running"
+    assert aborted["status"] == "aborted"

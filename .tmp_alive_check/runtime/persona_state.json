@@ -1,0 +1,158 @@
+{
+  "session_id": "04d558f60d314851a2eaa4d8fe0f045e",
+  "mode": "safe",
+  "safe_mode": true,
+  "round_count": 1,
+  "body_energy": 0.22,
+  "mood": 0.546,
+  "affect_residue": 0.0235,
+  "focus": "respond",
+  "focus_lock_count": 1,
+  "focus_nudge": 0.0,
+  "budget_remaining": 0.0506,
+  "last_action": "respond",
+  "last_checkpoint_id": null,
+  "action_ci": {
+    "clarify": 0.289750990250176,
+    "connect": 0.289750990250176,
+    "plan": 0.289750990250176,
+    "recall": 0.289750990250176,
+    "respond": 0.289750990250176,
+    "rest": 0.289750990250176,
+    "short_reply": 0.289750990250176,
+    "wander": 0.289750990250176
+  },
+  "mode_history": [
+    "interactive"
+  ],
+  "agent_weight_overrides": {},
+  "agents_enabled": {
+    "BodyStateAgent": true,
+    "ResourceAgent": true,
+    "PFCAgent": true,
+    "ThalamusAttentionAgent": true,
+    "HippocampusAgent": true,
+    "HabitAgent": true,
+    "RelationshipAgent": true,
+    "DMNAgent": true,
+    "PerspectiveModel": true,
+    "OutputStyleLayer": true
+  },
+  "critical_conflict_streak": 1,
+  "conflict_hot_rounds": 0,
+  "conflict_recovery_rounds": 0,
+  "last_compromise_template": null,
+  "last_conflict_priority": null,
+  "temperament_state": {
+    "baseline": {
+      "attachment_need": 0.55,
+      "boundary_softness": 0.4,
+      "sensitivity": 0.52,
+      "patience": 0.58,
+      "extraversion": 0.48,
+      "cognitive_bandwidth": 0.62,
+      "desire_priority": 0.55
+    },
+    "drift": {
+      "attachment_need": 0.0,
+      "boundary_softness": 0.0,
+      "sensitivity": 0.0,
+      "patience": 0.0,
+      "extraversion": 0.0,
+      "cognitive_bandwidth": 0.0,
+      "desire_priority": 0.0
+    },
+    "current": {
+      "attachment_need": 0.55,
+      "boundary_softness": 0.4,
+      "sensitivity": 0.52,
+      "patience": 0.58,
+      "extraversion": 0.48,
+      "cognitive_bandwidth": 0.62,
+      "desire_priority": 0.55
+    },
+    "correction_window": {},
+    "freeze_until_round": {},
+    "last_correction_events": []
+  },
+  "resource_state": {
+    "burn_rate_ratio": 1.0,
+    "low_balance_ratio": 0.951,
+    "queue_pressure": 0.0,
+    "latency_pressure": 0.0,
+    "scarcity_index": 0.6853,
+    "resource_mode": "scarce",
+    "body_hunger_bias": 0.4769,
+    "effort_avoidance_bias": 0.3584,
+    "deliberation_compress": 0.6573,
+    "rumination_bias": 0.2899,
+    "action_shrink_scale": 0.7259,
+    "queue_depth": 0,
+    "average_latency_ms": 0.0
+  },
+  "repair_mode": "post_error_adjustment",
+  "repair_state": {
+    "stage": "adjusting",
+    "active": true,
+    "last_reason": "forced_compromise",
+    "last_transition_round": 1,
+    "cooldown_rounds_remaining": 0,
+    "last_template": "body_first",
+    "last_winning_priority": "body_safety"
+  },
+  "repair_ledger": [
+    {
+      "round_id": 1,
+      "reason": "forced_compromise",
+      "winning_priority": "body_safety",
+      "template": "body_first",
+      "blocked_actions": [
+        "connect",
+        "plan",
+        "wander"
+      ],
+      "top_action_before": "respond",
+      "top_action_after": "rest",
+      "safe_mode_delta": "unchanged",
+      "repair_stage_after": "adjusting"
+    }
+  ],
+  "conflict_safe_mode_owner": null,
+  "last_post_error_adjustment": {
+    "triggered": true,
+    "reason": "forced_compromise",
+    "winning_priority": "body_safety",
+    "template": "body_first",
+    "top_action_before": "respond",
+    "top_action_after": "rest",
+    "blocked_actions": [
+      "connect",
+      "plan",
+      "wander"
+    ],
+    "safe_mode_delta": "unchanged"
+  },
+  "session_metadata": {},
+  "identity_state": {
+    "internal_handle": "nalr-04d558f6",
+    "display_name": null,
+    "aliases": [],
+    "name_source": null,
+    "provider_disclosure_mode": "adaptive",
+    "evidence_signature": "",
+    "evidence_anchors": [],
+    "drift_credit": 0.0,
+    "last_name_change_round": 0
+  },
+  "active_run_id": null,
+  "run_status": "idle",
+  "run_mode": null,
+  "current_goal": null,
+  "current_step_id": null,
+  "pending_steps": [],
+  "completed_steps": [],
+  "last_tool_result": {},
+  "stop_reason": {},
+  "dirty_worktree_detected": false,
+  "commit_permission_required": true
+}

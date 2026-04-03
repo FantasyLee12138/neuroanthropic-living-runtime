@@ -1,6 +1,47 @@
 from nalr.output.renderer import fallback_render_text
 from nalr.output.style import build_expression_profile
-from nalr.schemas.models import ExpressionProfile, RenderPlan, StochasticState
+from nalr.schemas.models import ExpressionProfile, IdentityContext, RenderPlan, StochasticState
+
+
+def _expression(*, directness: float = 0.34, hedging: float = 0.58, warmth: float = 0.50, repair: float = 0.72) -> ExpressionProfile:
+    return ExpressionProfile(
+        reply_delay=0.36,
+        latency_style=0.48,
+        sentence_fragmentation=0.14,
+        hedging_level=hedging,
+        warmth_level=warmth,
+        directness_level=directness,
+        self_disclosure=0.12,
+        tone_sharpness=0.18,
+        repair_tendency=repair,
+        timing_jitter=0.0,
+        fragmentation_jitter=0.0,
+    )
+
+
+def _repair_plan(*, stage: str, safety_invite: bool, risk: float = 0.72) -> RenderPlan:
+    return RenderPlan(
+        action="respond",
+        expression=_expression(),
+        safety_constraints={"conflict_hot": stage == "repairing", "repair_stage": stage},
+        message_plan={
+            "repair_expression": {
+                "source": "conflict" if stage else None,
+                "stage": stage,
+                "visibility": "implicit",
+                "opening_mode": "soft_resume" if stage == "cooling" else "buffered",
+                "advance_mode": "resume" if stage == "cooling" else "limited",
+                "safety_invite": safety_invite,
+                "template": "body_first",
+                "transition_reason": "forced_compromise",
+            }
+        },
+        event_summary="帮我直接回复 Alex",
+        scenario="chat",
+        target="Alex",
+        relation_state={"relationship_risk": risk},
+        perspective={"reaction_hypothesis": {"risk": risk}},
+    )
 
 
 def test_expression_profile_maps_intensity_to_delay_disclosure_and_repair():
@@ -49,19 +90,7 @@ def test_expression_profile_maps_intensity_to_delay_disclosure_and_repair():
 def test_fallback_renderer_consumes_expression_profile_and_safety_constraints():
     restrained = RenderPlan(
         action="respond",
-        expression=ExpressionProfile(
-            reply_delay=0.18,
-            latency_style=0.26,
-            sentence_fragmentation=0.08,
-            hedging_level=0.12,
-            warmth_level=0.68,
-            directness_level=0.82,
-            self_disclosure=0.18,
-            tone_sharpness=0.22,
-            repair_tendency=0.18,
-            timing_jitter=0.0,
-            fragmentation_jitter=0.0,
-        ),
+        expression=_expression(directness=0.82, hedging=0.12, warmth=0.68, repair=0.18),
         safety_constraints={"conflict_hot": False},
         event_summary="帮我直接回复 Alex",
         scenario="task",
@@ -71,19 +100,7 @@ def test_fallback_renderer_consumes_expression_profile_and_safety_constraints():
     )
     careful = RenderPlan(
         action="respond",
-        expression=ExpressionProfile(
-            reply_delay=0.44,
-            latency_style=0.60,
-            sentence_fragmentation=0.20,
-            hedging_level=0.62,
-            warmth_level=0.46,
-            directness_level=0.34,
-            self_disclosure=0.10,
-            tone_sharpness=0.18,
-            repair_tendency=0.74,
-            timing_jitter=0.0,
-            fragmentation_jitter=0.0,
-        ),
+        expression=_expression(directness=0.34, hedging=0.62, warmth=0.46, repair=0.74),
         safety_constraints={"conflict_hot": True},
         event_summary="帮我直接回复 Alex",
         scenario="chat",
@@ -98,3 +115,72 @@ def test_fallback_renderer_consumes_expression_profile_and_safety_constraints():
     assert restrained_text != careful_text
     assert "先说重点" in restrained_text
     assert "如果你愿意" in careful_text
+
+
+def test_fallback_renderer_uses_stage_aware_repair_expression_policy():
+    adjusting = fallback_render_text(_repair_plan(stage="adjusting", safety_invite=False))
+    repairing = fallback_render_text(_repair_plan(stage="repairing", safety_invite=True))
+    cooling = fallback_render_text(_repair_plan(stage="cooling", safety_invite=False))
+    recovered = fallback_render_text(_repair_plan(stage="recovered", safety_invite=False, risk=0.25))
+
+    assert "打断我" not in adjusting
+    assert "收一下" in adjusting
+    assert "打断我" in repairing
+    assert "稳一点" in repairing
+    assert "继续" in cooling
+    assert "打断我" not in cooling
+    assert "收一下" not in recovered
+    assert "稳一点" not in recovered
+    assert "打断我" not in recovered
+
+
+def test_fallback_renderer_compresses_short_reply_without_starvation_style():
+    plan = RenderPlan(
+        action="short_reply",
+        expression=_expression(directness=0.70, hedging=0.20, warmth=0.52, repair=0.30),
+        safety_constraints={"conflict_hot": False},
+        message_plan={"slow_variables": {"resource_scarcity": 0.68}},
+        event_summary="帮我直接回复 Alex",
+        scenario="task",
+        target="Alex",
+        relation_state={"relationship_risk": 0.20},
+        perspective={"reaction_hypothesis": {"risk": 0.18}},
+    )
+
+    text = fallback_render_text(plan)
+
+    assert "短" in text or "直接" in text
+    assert "收一点" not in text
+
+
+def test_self_identity_reply_keeps_basic_fallback_without_runtime_class_label():
+    plan = RenderPlan(
+        action="respond",
+        expression=_expression(),
+        event_summary="你好，你是谁？你有名字吗？",
+        scenario="chat",
+        target="user",
+        identity_context=IdentityContext(query_kind="self_identity", display_label="当前运行体"),
+    )
+
+    text = fallback_render_text(plan)
+
+    assert text == "我是当前运行体。"
+    assert "runtime_instance" not in text
+
+
+def test_self_identity_reply_uses_basic_named_fallback():
+    plan = RenderPlan(
+        action="respond",
+        expression=_expression(),
+        event_summary="你好，你是谁？你有名字吗？",
+        scenario="chat",
+        target="user",
+        identity_context=IdentityContext(query_kind="self_identity", display_label="阿澜"),
+    )
+
+    text = fallback_render_text(plan)
+
+    assert text == "我是阿澜。"
+    assert "runtime_instance" not in text
+    assert "豆包" not in text

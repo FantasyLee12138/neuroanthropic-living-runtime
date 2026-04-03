@@ -27,6 +27,8 @@ memory_app = typer.Typer()
 habit_app = typer.Typer()
 mode_app = typer.Typer()
 relation_app = typer.Typer()
+identity_app = typer.Typer()
+run_app = typer.Typer()
 trace_app = typer.Typer()
 trace_export_app = typer.Typer()
 agent_app = typer.Typer()
@@ -39,11 +41,14 @@ checkpoint_app = typer.Typer()
 safe_app = typer.Typer()
 budget_app = typer.Typer()
 explain_app = typer.Typer()
+dream_app = typer.Typer()
 
 app.add_typer(state_app, name="state")
 app.add_typer(body_app, name="body")
 app.add_typer(mood_app, name="mood")
 app.add_typer(focus_app, name="focus")
+app.add_typer(identity_app, name="identity")
+app.add_typer(run_app, name="run")
 app.add_typer(relation_app, name="relation")
 app.add_typer(memory_app, name="memory")
 app.add_typer(habit_app, name="habit")
@@ -60,6 +65,7 @@ app.add_typer(checkpoint_app, name="checkpoint")
 app.add_typer(safe_app, name="safe")
 app.add_typer(budget_app, name="budget")
 app.add_typer(explain_app, name="explain")
+app.add_typer(dream_app, name="dream")
 
 
 def get_controller() -> RuntimeController:
@@ -91,6 +97,7 @@ def build_chat_payload(result) -> dict[str, object]:
         "sampled_action": to_dict(result.sampled_action),
         "rendered_expression": to_dict(result.rendered_expression),
         "top_drivers": to_dict(result.trace.top_drivers),
+        "identity": to_dict(result.state.identity_state),
     }
 
 
@@ -176,7 +183,10 @@ def run_chat_turn(
     mode: str,
     valence: float,
     energy_delta: float,
+    name: str | None = None,
 ):
+    if name:
+        controller.seed_identity_name(name, source_hint="user_seed")
     return controller.tick(
         RoundEvent(
             source="user",
@@ -212,6 +222,46 @@ def focus_show() -> None:
     if controller.load_runtime_state().round_count == 0:
         controller.tick(RoundEvent(source="system", content="focus probe"), scenario=os.environ.get("NALR_SCENARIO", "chat"), mode=os.environ.get("NALR_MODE", "interactive"))
     emit(get_cil().execute("focus show"))
+
+
+@identity_app.command("show")
+def identity_show() -> None:
+    emit(get_cil().execute("identity show"))
+
+
+@identity_app.command("set-name")
+def identity_set_name(name: str) -> None:
+    emit(get_cil().execute(f"identity set-name {name}"))
+
+
+@run_app.command("start")
+def run_start(goal: list[str] = typer.Argument(..., help="goal for the autonomous run")) -> None:
+    emit(get_cil().execute(f"run start {' '.join(goal).strip()}"))
+
+
+@run_app.command("status")
+def run_status() -> None:
+    emit(get_cil().execute("run status"))
+
+
+@run_app.command("pause")
+def run_pause() -> None:
+    emit(get_cil().execute("run pause"))
+
+
+@run_app.command("resume")
+def run_resume() -> None:
+    emit(get_cil().execute("run resume"))
+
+
+@run_app.command("abort")
+def run_abort() -> None:
+    emit(get_cil().execute("run abort"))
+
+
+@run_app.command("explain")
+def run_explain() -> None:
+    emit(get_cil().execute("run explain"))
 
 
 @relation_app.command("show")
@@ -318,7 +368,7 @@ def trace_gates(
 @trace_export_app.command("parquet")
 def trace_export_parquet(
     since_round: int | None = typer.Option(None, "--since-round"),
-    overwrite: bool = typer.Option(False, "--overwrite"),
+    overwrite: bool = typer.Option(True, "--overwrite/--no-overwrite"),
 ) -> None:
     emit(get_controller().export_trace_parquet(since_round=since_round, overwrite=overwrite))
 
@@ -409,6 +459,57 @@ def explain_current() -> None:
     emit(get_cil().execute("explain current"))
 
 
+@dream_app.command("status")
+def dream_status() -> None:
+    emit(get_controller().dream_status())
+
+
+@dream_app.command("trace")
+def dream_trace(round_ref: str = typer.Argument("last")) -> None:
+    try:
+        emit(get_controller().dream_trace(round_ref))
+    except FileNotFoundError:
+        typer.echo("No dream runs yet.")
+        raise typer.Exit(code=1)
+
+
+@dream_app.command("proposals")
+def dream_proposals(run_ref: str = typer.Argument("last")) -> None:
+    try:
+        emit(get_controller().dream_proposals(run_ref))
+    except FileNotFoundError:
+        typer.echo("No dream runs yet.")
+        raise typer.Exit(code=1)
+
+
+@dream_app.command("metrics")
+def dream_metrics() -> None:
+    emit(get_controller().dream_metrics())
+
+
+@dream_app.command("run")
+def dream_run(
+    mode: str = typer.Option("sleep", "--mode"),
+    cue: str | None = typer.Option(None, "--cue"),
+) -> None:
+    emit(get_controller().run_dream(mode=mode, cue=cue))
+
+
+@dream_app.command("on")
+def dream_on() -> None:
+    emit(get_controller().set_dream_enabled(True))
+
+
+@dream_app.command("off")
+def dream_off() -> None:
+    emit(get_controller().set_dream_enabled(False))
+
+
+@app.command("Dream")
+def dream_alias(cue: str | None = typer.Argument(None)) -> None:
+    emit(get_controller().run_dream(mode="sleep", cue=cue))
+
+
 @app.command("rest")
 def rest() -> None:
     emit(get_cil().execute("rest"))
@@ -424,6 +525,7 @@ def chat(
     message: list[str] = typer.Argument(..., help="message to send to the runtime"),
     target: str | None = typer.Option(None, "--target"),
     cue: str | None = typer.Option(None, "--cue"),
+    name: str | None = typer.Option(None, "--name"),
     scenario: str | None = typer.Option(None, "--scenario"),
     mode: str | None = typer.Option(None, "--mode"),
     valence: float = typer.Option(0.0, "--valence"),
@@ -443,6 +545,7 @@ def chat(
         mode=effective_mode,
         valence=valence,
         energy_delta=energy_delta,
+        name=name,
     )
     payload = build_chat_payload(result)
     sections = resolve_show_sections(show)
@@ -453,6 +556,7 @@ def chat(
 @app.command("repl")
 def repl(
     target: str | None = typer.Option(None, "--target"),
+    name: str | None = typer.Option(None, "--name"),
     scenario: str | None = typer.Option(None, "--scenario"),
     mode: str | None = typer.Option(None, "--mode"),
 ) -> None:
@@ -461,6 +565,8 @@ def repl(
     effective_scenario = scenario or default_scenario()
     current_mode = mode or default_mode()
     last_round_id: int | None = None
+    if name:
+        controller.seed_identity_name(name, source_hint="user_seed")
 
     typer.echo("Entering NALR REPL. Type /help for commands, /exit to quit.")
 
@@ -486,6 +592,12 @@ def repl(
                         [
                             "Commands:",
                             "/help",
+                            "/run <goal>",
+                            "/status",
+                            "/pause",
+                            "/resume",
+                            "/abort",
+                            "/checkpoint",
                             "/why",
                             "/agents",
                             "/skills",
@@ -498,6 +610,27 @@ def repl(
                         ]
                     )
                 )
+                continue
+            if command == "run":
+                if not args:
+                    typer.echo("Usage: /run <goal>")
+                    continue
+                emit(cil.execute(f"run start {' '.join(args)}"))
+                continue
+            if command == "status":
+                emit(cil.execute("run status"))
+                continue
+            if command == "pause":
+                emit(cil.execute("run pause"))
+                continue
+            if command == "resume":
+                emit(cil.execute("run resume"))
+                continue
+            if command == "abort":
+                emit(cil.execute("run abort"))
+                continue
+            if command == "checkpoint":
+                emit(cil.execute("checkpoint create"))
                 continue
             if command in {"why", "agents", "skills", "gates"}:
                 if last_round_id is None:
@@ -544,6 +677,7 @@ def repl(
             mode=current_mode,
             valence=0.0,
             energy_delta=0.0,
+            name=None,
         )
         last_round_id = result.round_id
         typer.echo(format_chat_turn(build_chat_payload(result)))

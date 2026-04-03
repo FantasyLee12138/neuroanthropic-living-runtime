@@ -29,27 +29,79 @@ class PolicyViolation(Exception):
 
 
 class SkillExecutor:
-    def __init__(self, registry: dict[str, SkillSpec], circuit_breaker_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        registry: dict[str, SkillSpec],
+        circuit_breaker_path: Path | None = None,
+        environment_fingerprint: str | None = None,
+    ) -> None:
         self.registry = registry
         self.circuit_breaker_path = Path(circuit_breaker_path) if circuit_breaker_path else None
+        self.environment_fingerprint = environment_fingerprint
         self._breaker_cache: dict[str, CircuitBreakerState] = {}
+
+    def _write_text_atomic(self, path: Path, content: str) -> None:
+        tmp_path = path.with_name(f"{path.name}.tmp")
+        tmp_path.write_text(content, encoding="utf-8")
+        tmp_path.replace(path)
 
     def _load_breakers(self) -> dict[str, CircuitBreakerState]:
         if self.circuit_breaker_path is None:
             return self._breaker_cache
         if not self.circuit_breaker_path.exists():
-            self.circuit_breaker_path.write_text("{}", encoding="utf-8")
-        payload = json.loads(self.circuit_breaker_path.read_text(encoding="utf-8") or "{}")
-        if isinstance(payload, list):
+            self._save_breakers()
+            return self._breaker_cache
+
+        raw_text = self.circuit_breaker_path.read_text(encoding="utf-8").strip()
+        if not raw_text:
+            self._breaker_cache = {}
+            self._save_breakers()
+            return self._breaker_cache
+
+        try:
+            payload = json.loads(raw_text)
+        except json.JSONDecodeError:
+            self._breaker_cache = {}
+            self._save_breakers()
+            return self._breaker_cache
+
+        meta: dict[str, Any] = {}
+        if isinstance(payload, dict) and isinstance(payload.get("breakers"), dict):
+            meta = payload.get("__meta__", {}) if isinstance(payload.get("__meta__"), dict) else {}
+            payload = payload["breakers"]
+        elif isinstance(payload, list) or not isinstance(payload, dict):
             payload = {}
-        self._breaker_cache = {name: CircuitBreakerState(**state) for name, state in payload.items()}
+
+        stored_fingerprint = meta.get("environment_fingerprint")
+        if self.environment_fingerprint is not None and stored_fingerprint != self.environment_fingerprint:
+            self._breaker_cache = {}
+            self._save_breakers()
+            return self._breaker_cache
+
+        self._breaker_cache = {
+            name: CircuitBreakerState(**state)
+            for name, state in payload.items()
+            if isinstance(state, dict)
+        }
         return self._breaker_cache
 
     def _save_breakers(self) -> None:
         if self.circuit_breaker_path is None:
             return
         payload = {name: to_dict(state) for name, state in self._breaker_cache.items()}
-        self.circuit_breaker_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        if self.environment_fingerprint is None:
+            serialized = payload
+        else:
+            serialized = {
+                "__meta__": {
+                    "environment_fingerprint": self.environment_fingerprint,
+                },
+                "breakers": payload,
+            }
+        self._write_text_atomic(
+            self.circuit_breaker_path,
+            json.dumps(serialized, ensure_ascii=False, indent=2),
+        )
 
     def _breaker_for(self, skill_name: str) -> CircuitBreakerState:
         return self._load_breakers().setdefault(skill_name, CircuitBreakerState())

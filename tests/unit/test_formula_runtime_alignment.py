@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from nalr.runtime.controller import RuntimeController
-from nalr.schemas.models import ActionDistributionState, ProposalBundle, RoundEvent
+from nalr.schemas.models import ActionDistributionState, ProposalBundle, RoundEvent, RuntimeState
 
 
 CONFIG_ROOT = Path(__file__).resolve().parents[2] / "config"
@@ -32,8 +32,12 @@ def test_tick_records_formula_distribution_state_and_richer_proposal_fields(tmp_
     assert distribution["ci"]
     assert distribution["conflict"]["components"]
     assert distribution["conflict"]["passes"]
-    assert abs(sum(distribution["p_final"].values()) - 1.0) < 1e-6
+    assert distribution["query_intent"]["posterior"]
+    assert distribution["disclosure_intent"]["posterior"]
+    assert abs(sum(distribution["p_final"].values()) - 1.0) <= 1e-5
     assert all(0.01 <= value <= 0.85 for value in distribution["p_raw"].values())
+    assert result.trace.stochastic_state["entropy_ref"]["source"]
+    assert "batch_id" in result.trace.stochastic_state["entropy_ref"]
 
     proposal = next(item for item in result.trace.proposal_summaries if item["stage"] == "pfc")
     assert "delta_p" in proposal
@@ -180,3 +184,70 @@ def test_task_profile_reduces_stochastic_noise_when_control_strength_is_higher(t
     )
 
     assert task_stochastic.lambda_noise < chat_stochastic.lambda_noise
+
+
+def test_tick_records_resource_biases_and_temperament_drift_state(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.budget_remaining = 0.18
+    controller._save_state(state)
+
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="Please help me plan carefully even though I am drained and low on budget.",
+            target="user",
+            cue="budget",
+            valence=-0.35,
+            energy_delta=-0.12,
+        ),
+        scenario="task",
+        mode="interactive",
+    )
+
+    updated = controller.load_runtime_state()
+    resource_state = updated.resource_state
+    temperament_state = updated.temperament_state
+
+    assert resource_state["scarcity_index"] > 0.0
+    assert resource_state["body_hunger_bias"] > 0.10
+    assert resource_state["effort_avoidance_bias"] > 0.05
+    assert resource_state["deliberation_compress"] < 1.0
+    assert resource_state["action_shrink_scale"] < 1.0
+    assert "baseline" in temperament_state
+    assert "drift" in temperament_state
+    assert "current" in temperament_state
+    assert all(0.0 <= value <= 1.0 for value in temperament_state["current"].values())
+
+
+def test_runtime_state_wraps_legacy_flat_temperament_state():
+    state = RuntimeState(temperament_state={"warmth_bias": 0.5, "directness_bias": 0.55})
+
+    assert state.temperament_state["baseline"] == {"warmth_bias": 0.5, "directness_bias": 0.55}
+    assert state.temperament_state["drift"] == {"warmth_bias": 0.0, "directness_bias": 0.0}
+    assert state.temperament_state["current"] == {"warmth_bias": 0.5, "directness_bias": 0.55}
+
+
+def test_tick_supports_internal_short_reply_action_when_resources_are_tight(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.budget_remaining = 0.05
+    state.body_energy = 0.22
+    controller._save_state(state)
+
+    result = controller.tick(
+        RoundEvent(
+            source="user",
+            content="Give me the quickest possible answer while you are low on budget.",
+            target="user",
+            cue="quick",
+            valence=-0.05,
+        ),
+        scenario="task",
+        mode="interactive",
+    )
+
+    assert "short_reply" in result.trace.distribution_state["p_base"]
+    assert result.trace.distribution_state["p_final"]["short_reply"] >= 0.0
+    assert result.sampled_action.name == "respond"
+    assert result.trace.render_plan["action"] == "respond"

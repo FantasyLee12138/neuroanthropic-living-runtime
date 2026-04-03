@@ -1,0 +1,35 @@
+identity:
+  class_label: runtime_instance
+  unnamed_label: 当前运行体
+  provider_disclosure_mode: adaptive
+  provider_blocklist:
+    - 豆包
+    - doubao
+    - ark
+    - chatgpt
+    - gpt
+    - openai
+    - 字节
+  initial_thresholds:
+    top_stable_prior: 0.18
+    second_stable_prior: 0.12
+    top_habit: 0.22
+    top_relation: 0.65
+  drift:
+    momentum: 0.82
+    base_decay: 0.25
+    trigger_score: 0.6
+    trigger_credit: 1.4
+  display_name_pool:
+    - 阿澜
+    - 岚序
+    - 予安
+    - 小栖
+    - 霁禾
+    - 南汐
+    - 朝屿
+    - 青岑
+    - 予宁
+    - 星遥
+    - 林序
+    - 雨禾

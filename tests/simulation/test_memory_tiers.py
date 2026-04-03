@@ -40,8 +40,8 @@ def test_memory_store_applies_decay_interference_and_habit_cap(tmp_path):
     store.ingest_event(
         RoundEvent(
             source="user",
-            content="Coding blocks are also part of my routine.",
-            cue="coding",
+            content="A nearby coffer note is also part of my routine.",
+            cue="coffer",
             valence=0.1,
         )
     )
@@ -59,6 +59,6 @@ def test_memory_store_applies_decay_interference_and_habit_cap(tmp_path):
     habits = {item["pattern"]: item for item in store._read_list(store.habit_path)}
 
     assert hot_memories["coffee"]["interference"] > 0.0
-    assert hot_memories["coding"]["detail_strength"] < 0.18
+    assert hot_memories["coffer"]["detail_strength"] < 0.18
     assert store.recall_strength("coffee") <= hot_memories["coffee"]["detail_strength"]
     assert habits["coffee"]["strength"] <= 0.92

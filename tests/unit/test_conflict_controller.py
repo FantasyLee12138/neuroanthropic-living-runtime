@@ -2,7 +2,7 @@ from pathlib import Path
 
 from nalr.agents.modules import ConflictMonitorAgent
 from nalr.runtime.controller import RuntimeController
-from nalr.schemas.models import ActionDistributionState, ProposalBundle, RoundEvent
+from nalr.schemas.models import ActionDistributionState, ConflictRepairState, ProposalBundle, RoundEvent
 
 
 CONFIG_ROOT = Path(__file__).resolve().parents[2] / "config"
@@ -211,6 +211,84 @@ def test_request_resample_uses_v056_thresholds_and_compromise_gate():
     assert exhausted["force_compromise"] is True
 
 
+def test_mark_post_error_adjustment_returns_shift_adjustment_contract():
+    agent = ConflictMonitorAgent()
+
+    result = agent.mark_post_error_adjustment(
+        state={
+            "repair_state": ConflictRepairState(stage="idle"),
+            "repair_ledger": [],
+            "conflict_recovery_rounds": 0,
+        },
+        round_id=7,
+        resolution={"winning_priority": "task_goal"},
+        compromise={"triggered": False, "template": None},
+        deadlock_fuse_triggered=False,
+        top_action_before="wander",
+        top_action_after="plan",
+        blocked_actions=["wander"],
+        safe_mode_before=False,
+    )
+
+    assert result["repair_mode"] == "post_error_adjustment"
+    assert result["post_error_adjustment"]["triggered"] is True
+    assert result["post_error_adjustment"]["reason"] == "top_action_shift"
+    assert result["repair_transition"]["to_stage"] == "adjusting"
+    assert result["repair_ledger_append"]["repair_stage_after"] == "adjusting"
+
+
+def test_mark_post_error_adjustment_returns_forced_compromise_contract():
+    agent = ConflictMonitorAgent()
+
+    result = agent.mark_post_error_adjustment(
+        state={
+            "repair_state": ConflictRepairState(stage="idle"),
+            "repair_ledger": [],
+            "conflict_recovery_rounds": 0,
+        },
+        round_id=8,
+        resolution={"winning_priority": "body_safety", "applied_template": "body_first"},
+        compromise={"triggered": True, "template": "body_first"},
+        deadlock_fuse_triggered=False,
+        top_action_before="plan",
+        top_action_after="rest",
+        blocked_actions=["plan", "connect"],
+        safe_mode_before=False,
+    )
+
+    assert result["repair_mode"] == "post_error_adjustment"
+    assert result["post_error_adjustment"]["reason"] == "forced_compromise"
+    assert result["repair_transition"]["to_stage"] == "adjusting"
+    assert result["repair_ledger_append"]["template"] == "body_first"
+
+
+def test_mark_post_error_adjustment_returns_deadlock_fuse_contract():
+    agent = ConflictMonitorAgent()
+
+    result = agent.mark_post_error_adjustment(
+        state={
+            "repair_state": ConflictRepairState(stage="adjusting"),
+            "repair_ledger": [{"round_id": 1, "reason": "forced_compromise"}],
+            "conflict_recovery_rounds": 5,
+        },
+        round_id=9,
+        resolution={"winning_priority": "body_safety", "applied_template": "body_first"},
+        compromise={"triggered": True, "template": "body_first"},
+        deadlock_fuse_triggered=True,
+        top_action_before="plan",
+        top_action_after="rest",
+        blocked_actions=["plan", "connect", "wander"],
+        safe_mode_before=False,
+    )
+
+    assert result["repair_mode"] == "deadlock_fuse"
+    assert result["post_error_adjustment"]["reason"] == "deadlock_fuse"
+    assert result["repair_transition"]["to_stage"] == "repairing"
+    assert result["conflict_safe_mode_owner"] == "conflict"
+    assert result["safe_mode_patch"] is True
+    assert result["repair_cooldown_rounds_patch"] >= 2
+
+
 def test_runtime_sets_conflict_hot_after_three_critical_rounds_and_recovers(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     _prime_conflict_state(controller)
@@ -234,6 +312,10 @@ def test_runtime_sets_conflict_hot_after_three_critical_rounds_and_recovers(tmp_
     assert hot_state.critical_conflict_streak == 3
     assert hot_state.conflict_hot_rounds == 5
     assert hot_conflict["circuit_breaker"]["triggered"] is True
+    assert hot_conflict["repair_state_snapshot"]["stage"] == "repairing"
+    assert hot_state.repair_state.stage == "repairing"
+    assert hot_state.conflict_safe_mode_owner == "conflict"
+    assert hot_state.repair_ledger
     assert result.trace.render_plan["safety_constraints"]["conflict_hot"] is True
 
     calm_event = RoundEvent(
@@ -251,4 +333,140 @@ def test_runtime_sets_conflict_hot_after_three_critical_rounds_and_recovers(tmp_
     recovered_state = controller.load_runtime_state()
     assert recovered_state.conflict_hot_rounds == 0
     assert recovered_state.critical_conflict_streak == 0
-    assert recovered_state.last_compromise_template is None
+    assert recovered_state.safe_mode is False
+    assert recovered_state.repair_mode is None
+    assert recovered_state.conflict_safe_mode_owner is None
+    assert recovered_state.repair_state.stage == "recovered"
+
+
+def test_deadlock_fuse_triggers_safe_mode_and_repair_mode(tmp_path):
+    """§8.5: 3 consecutive critical conflicts trigger deadlock fuse -> safe_mode + repair_mode."""
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    _prime_conflict_state(controller, body_energy=0.06, budget_remaining=0.03, mood=0.15)
+
+    critical_event = RoundEvent(
+        source="user",
+        content="I need a quick easy break, but help me plan carefully, reply to Alex, and let me drift.",
+        target="alex",
+        cue="break",
+        valence=-0.45,
+        energy_delta=-0.20,
+    )
+
+    for _ in range(3):
+        result = controller.tick(critical_event, scenario="task", mode="interactive")
+
+    fuse_state = controller.load_runtime_state()
+    fuse_conflict = result.trace.distribution_state["conflict"]
+
+    assert fuse_conflict["deadlock_fuse_triggered"] is True
+    assert fuse_state.safe_mode is True
+    assert fuse_state.repair_mode == "deadlock_fuse"
+    assert fuse_state.conflict_safe_mode_owner == "conflict"
+    assert fuse_conflict["repair_transition"]["to_stage"] == "repairing"
+    assert fuse_conflict["repair_state_snapshot"]["stage"] == "repairing"
+    assert fuse_conflict["repair_ledger_tail"]
+
+    blocked = fuse_conflict["circuit_breaker"]["blocked_actions"]
+    for action in ("connect", "plan", "wander"):
+        assert action in blocked, f"{action} should be blocked by deadlock fuse"
+
+
+def test_forced_compromise_records_post_error_adjustment_and_ledger_entry(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    _prime_conflict_state(controller)
+
+    result = controller.tick(
+        RoundEvent(
+            source="user",
+            content="I need a quick easy break, but help me plan carefully, reply to Alex, and let me drift.",
+            target="alex",
+            cue="break",
+            valence=-0.35,
+            energy_delta=-0.16,
+        ),
+        scenario="task",
+        mode="interactive",
+    )
+
+    state = controller.load_runtime_state()
+    conflict = result.trace.distribution_state["conflict"]
+    adjustment = conflict["post_error_adjustment"]
+
+    assert conflict["compromise"]["triggered"] is True
+    assert adjustment["triggered"] is True
+    assert adjustment["reason"] == "forced_compromise"
+    assert adjustment["top_action_before"] != adjustment["top_action_after"]
+    assert conflict["repair_transition"]["to_stage"] == "adjusting"
+    assert conflict["repair_state_snapshot"]["stage"] == "adjusting"
+    assert state.repair_state.stage == "adjusting"
+    assert state.last_post_error_adjustment.reason == "forced_compromise"
+    assert len(state.repair_ledger) == 1
+
+
+def test_forced_compromise_appends_repair_trace_entry(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    _prime_conflict_state(controller)
+
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="I need a quick easy break, but help me plan carefully, reply to Alex, and let me drift.",
+            target="alex",
+            cue="break",
+            valence=-0.35,
+            energy_delta=-0.16,
+        ),
+        scenario="task",
+        mode="interactive",
+    )
+
+    repair_entries = controller.trace_store.list_repair_entries()
+
+    assert len(repair_entries) == 1
+    assert repair_entries[0]["round_id"] == 1
+    assert repair_entries[0]["reason"] == "forced_compromise"
+    assert repair_entries[0]["top_action_before"] != repair_entries[0]["top_action_after"]
+    assert repair_entries[0]["session_id"] == controller.load_runtime_state().session_id
+
+
+def test_conflict_recovery_does_not_clear_non_conflict_safe_mode(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    _prime_conflict_state(controller)
+
+    critical_event = RoundEvent(
+        source="user",
+        content="I need a quick easy break, but help me plan carefully, reply to Alex, and let me drift.",
+        target="alex",
+        cue="break",
+        valence=-0.45,
+        energy_delta=-0.20,
+    )
+    for _ in range(3):
+        controller.tick(critical_event, scenario="task", mode="interactive")
+
+    state = controller.load_runtime_state()
+    state.conflict_hot_rounds = 1
+    state.conflict_recovery_rounds = 1
+    state.safe_mode = True
+    state.conflict_safe_mode_owner = None
+    state.repair_state.stage = "cooling"
+    controller._save_state(state)
+
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="Please answer directly with one clear next step.",
+            target="user",
+            cue="step",
+            valence=0.05,
+            energy_delta=0.08,
+        ),
+        scenario="task",
+        mode="interactive",
+    )
+
+    recovered = controller.load_runtime_state()
+    assert recovered.conflict_hot_rounds == 0
+    assert recovered.safe_mode is True
+    assert recovered.conflict_safe_mode_owner is None
