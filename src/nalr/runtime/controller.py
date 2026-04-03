@@ -253,6 +253,30 @@ class RuntimeController:
         self._save_state(state)
         return CheckpointRef(checkpoint_id=checkpoint_id, path=path)
 
+    def rewind(self, checkpoint_id: str) -> CommandResult:
+        checkpoint_path = self.checkpoint_dir / f"{checkpoint_id}.json"
+        if not checkpoint_path.exists():
+            return CommandResult(
+                applied=False,
+                scope="checkpoint",
+                delta={"checkpoint_id": checkpoint_id, "restored": False},
+                risk_note="checkpoint not found",
+            )
+
+        before_state = self.load_runtime_state()
+        before_hash = self._state_hash(before_state)
+        shutil.copyfile(checkpoint_path, self.state_path)
+        restored_state = self.load_runtime_state()
+        after_hash = self._state_hash(restored_state)
+        result = CommandResult(
+            applied=True,
+            scope="checkpoint",
+            delta={"checkpoint_id": checkpoint_id, "restored": True, "safe_mode": restored_state.safe_mode, "mode": restored_state.mode},
+            rollback_hint="create a fresh checkpoint before further changes",
+        )
+        self.trace_store.append_command(f"checkpoint rewind {checkpoint_id}", result, before_hash, after_hash)
+        return result
+
     def memory_top(self, limit: int = 5) -> list[dict]:
         return self.memory_store.memory_top(limit=limit)
 
@@ -264,6 +288,60 @@ class RuntimeController:
 
     def trace_round(self, round_id: int) -> dict[str, Any]:
         return self.trace_store.read_round(round_id)
+
+    def why_this(self, round_id: int) -> dict[str, Any]:
+        trace = self.trace_round(round_id)
+        return {
+            "round_id": trace["round_id"],
+            "sampled_action": trace["sampled_action"],
+            "top_drivers": trace["top_drivers"],
+            "style_profile": trace["style_profile"],
+            "state_snapshot": {
+                "mode": trace["state_snapshot"]["mode"],
+                "safe_mode": trace["state_snapshot"]["safe_mode"],
+                "focus": trace["state_snapshot"]["focus"],
+                "budget_remaining": trace["state_snapshot"]["budget_remaining"],
+            },
+        }
+
+    def contribution_breakdown(self, round_id: int) -> dict[str, Any]:
+        trace = self.trace_round(round_id)
+        return {
+            "round_id": trace["round_id"],
+            "sampled_action": trace["sampled_action"],
+            "contributions": trace["contributions"],
+        }
+
+    def metrics_summary(self) -> dict[str, Any]:
+        rounds = self.trace_store.list_rounds()
+        sampled_actions: dict[str, int] = {}
+        modes: dict[str, int] = {}
+        driver_counts: dict[str, int] = {}
+        budget_values: list[float] = []
+        safe_mode_rounds = 0
+
+        for trace in rounds:
+            sampled_actions[trace["sampled_action"]] = sampled_actions.get(trace["sampled_action"], 0) + 1
+            modes[trace["mode"]] = modes.get(trace["mode"], 0) + 1
+            budget_values.append(trace["state_snapshot"]["budget_remaining"])
+            if trace["state_snapshot"]["safe_mode"]:
+                safe_mode_rounds += 1
+            for driver in trace["top_drivers"]:
+                driver_counts[driver["agent_name"]] = driver_counts.get(driver["agent_name"], 0) + 1
+
+        top_agents = [
+            {"agent_name": name, "count": count}
+            for name, count in sorted(driver_counts.items(), key=lambda item: item[1], reverse=True)[:5]
+        ]
+        avg_budget = round(sum(budget_values) / len(budget_values), 4) if budget_values else 0.0
+        return {
+            "total_rounds": len(rounds),
+            "sampled_actions": sampled_actions,
+            "mode_counts": modes,
+            "safe_mode_rounds": safe_mode_rounds,
+            "average_budget_remaining": avg_budget,
+            "top_agents": top_agents,
+        }
 
     def agent_list(self) -> list[dict[str, Any]]:
         state = self.load_runtime_state()

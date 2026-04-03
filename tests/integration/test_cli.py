@@ -37,3 +37,20 @@ def test_cli_agent_list_and_trace_round(tmp_path, monkeypatch):
     assert trace_result.exit_code == 0
     assert '"round_id": 1' in trace_result.stdout
 
+
+def test_cli_checkpoint_rewind_and_trace_why(tmp_path, monkeypatch):
+    monkeypatch.setenv("NALR_HOME", str(tmp_path / ".alive"))
+    monkeypatch.setenv("NALR_CONFIG_DIR", str(Path(__file__).resolve().parents[2] / "config"))
+
+    RUNNER.invoke(app, ["safe", "on"])
+    checkpoint_result = RUNNER.invoke(app, ["checkpoint", "create"])
+    RUNNER.invoke(app, ["safe", "off"])
+    rewind_result = RUNNER.invoke(app, ["checkpoint", "rewind", "ckpt-0000"])
+    RUNNER.invoke(app, ["focus", "show"])
+    why_result = RUNNER.invoke(app, ["trace", "why", "1"])
+
+    assert checkpoint_result.exit_code == 0
+    assert rewind_result.exit_code == 0
+    assert '"safe_mode": true' in rewind_result.stdout
+    assert why_result.exit_code == 0
+    assert '"top_drivers"' in why_result.stdout

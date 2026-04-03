@@ -52,7 +52,7 @@ python3 -m venv .venv
 运行 observer：
 
 ```bash
-.venv/bin/python -m uvicorn services.observer.api.app:create_app --factory --reload
+.venv/bin/python -m uvicorn services.observer.api.app:app --reload
 ```
 
 如果使用自定义路径：
@@ -75,11 +75,25 @@ alive memory top
 alive habit top
 alive mode set task
 alive trace round 1
+alive trace why 1
+alive trace contribution 1
 alive agent list
 alive agent disable DMNAgent
 alive checkpoint create
+alive checkpoint rewind ckpt-0000
 alive safe on
 alive budget show
+```
+
+observer 诊断入口：
+
+```text
+GET /state
+GET /trace/{round_id}
+GET /why/{round_id}
+GET /contributions/{round_id}
+GET /metrics/summary
+GET /dashboard
 ```
 
 ## 阶段路线图

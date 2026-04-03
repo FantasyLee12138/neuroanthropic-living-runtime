@@ -40,3 +40,36 @@ def test_command_safe_mode_and_checkpoint_emit_command_trace(tmp_path):
     assert checkpoint.checkpoint_id.startswith("ckpt-")
     assert controller.load_runtime_state().safe_mode is True
 
+
+def test_rewind_restores_checkpointed_runtime_state(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    controller.apply_command("safe on")
+    checkpoint = controller.checkpoint()
+    controller.apply_command("safe off")
+    controller.apply_command("mode set idle")
+
+    rewind_result = controller.rewind(checkpoint.checkpoint_id)
+    state = controller.load_runtime_state()
+
+    assert rewind_result.applied is True
+    assert rewind_result.scope == "checkpoint"
+    assert state.safe_mode is True
+    assert state.mode == "safe"
+
+
+def test_why_this_and_metrics_summary_surface_trace_evidence(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(source="user", content="Help me plan lunch and remember noodles.", target="user", cue="noodles"),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    why_payload = controller.why_this(1)
+    metrics = controller.metrics_summary()
+
+    assert why_payload["round_id"] == 1
+    assert why_payload["top_drivers"]
+    assert metrics["total_rounds"] == 1
+    assert metrics["sampled_actions"]

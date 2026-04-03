@@ -7,7 +7,7 @@ from typing import Any
 
 def to_dict(value: Any) -> Any:
     if hasattr(value, "__dataclass_fields__"):
-        return asdict(value)
+        return to_dict(asdict(value))
     if isinstance(value, list):
         return [to_dict(item) for item in value]
     if isinstance(value, dict):
@@ -122,4 +122,3 @@ class SkillSpec:
     cost_class: str
     failure_policy: str
     trace_tags: list[str]
-

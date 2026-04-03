@@ -92,6 +92,16 @@ def trace_round(round_id: int) -> None:
     emit(get_controller().trace_round(round_id))
 
 
+@trace_app.command("why")
+def trace_why(round_id: int) -> None:
+    emit(get_controller().why_this(round_id))
+
+
+@trace_app.command("contribution")
+def trace_contribution(round_id: int) -> None:
+    emit(get_controller().contribution_breakdown(round_id))
+
+
 @agent_app.command("list")
 def agent_list() -> None:
     emit(get_controller().agent_list())
@@ -110,6 +120,11 @@ def agent_enable(agent_name: str) -> None:
 @checkpoint_app.command("create")
 def checkpoint_create() -> None:
     emit(get_controller().checkpoint())
+
+
+@checkpoint_app.command("rewind")
+def checkpoint_rewind(checkpoint_id: str) -> None:
+    emit(get_controller().rewind(checkpoint_id))
 
 
 @safe_app.command("on")
@@ -133,4 +148,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
