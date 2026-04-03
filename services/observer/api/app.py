@@ -52,6 +52,26 @@ def create_app(project_root: Path | str | None = None, config_root: Path | str |
     def metrics_summary() -> dict:
         return controller.metrics_summary()
 
+    @app.get("/skills/stats")
+    def skill_stats() -> dict:
+        return controller.skill_stats()
+
+    @app.get("/skills/profile/{skill_name}")
+    def skill_profile(skill_name: str) -> dict:
+        return controller.skill_profile(skill_name)
+
+    @app.get("/metrics/conflicts")
+    def conflict_timeline() -> dict:
+        return controller.conflict_timeline()
+
+    @app.get("/metrics/mode-switches")
+    def mode_switch_timeline() -> dict:
+        return controller.mode_switch_timeline()
+
+    @app.get("/analysis/ablation")
+    def ablation_summary() -> dict:
+        return controller.ablation_summary()
+
     dashboard_path = project_root_path / "services" / "observer" / "dashboard" / "index.html"
     if not dashboard_path.exists():
         dashboard_path = Path(__file__).resolve().parents[1] / "dashboard" / "index.html"

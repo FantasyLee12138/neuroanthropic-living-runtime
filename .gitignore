@@ -8,3 +8,4 @@ build/
 *.egg-info/
 .alive/*
 !.alive/.gitkeep
+接入模型（初版doubao).md

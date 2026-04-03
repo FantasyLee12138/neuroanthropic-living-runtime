@@ -10,7 +10,7 @@ CONFIG_ROOT = Path(__file__).resolve().parents[2] / "config"
 def test_longrun_smoke_keeps_traces_and_runtime_alive(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
 
-    for idx in range(200):
+    for idx in range(1000):
         controller.tick(
             RoundEvent(
                 source="user",
@@ -23,5 +23,5 @@ def test_longrun_smoke_keeps_traces_and_runtime_alive(tmp_path):
         )
 
     state = controller.load_runtime_state()
-    assert state.round_count == 200
+    assert state.round_count == 1000
     assert state.safe_mode is False
