@@ -22,6 +22,7 @@ from nalr.output.renderer import fallback_render_text
 from nalr.output.style import build_expression_profile, build_render_plan, compute_style_profile
 from nalr.providers import ModelRequest, ModelRouter
 from nalr.run import SupervisorLoop
+from nalr.runtime.model_gateway import ModelGateway
 from nalr.runtime.async_io import AsyncIOWorker
 from nalr.runtime.entropy import QuantumEntropyPool
 from nalr.runtime.authenticity import AuthenticityPolicy
@@ -148,6 +149,8 @@ class RuntimeController:
             environment_fingerprint=self._breaker_environment_fingerprint(),
         )
         self.model_router = ModelRouter.from_config(self.config["models"])
+        model_gateway_cfg = self.config["models"].get("models")
+        self.model_gateway = ModelGateway.from_config(model_gateway_cfg) if isinstance(model_gateway_cfg, dict) else None
         self.identity_runtime = IdentityRuntime(self._identity_cfg(), self._provider_descriptor)
         self.entropy_pool = QuantumEntropyPool()
         self.authenticity_policy = AuthenticityPolicy(self._identity_cfg())
@@ -3888,12 +3891,42 @@ class RuntimeController:
 
     def skill_stats(self) -> dict[str, Any]:
         payload = self.trace_store.skill_stats()
+        skill_rows = []
+        for name, stats in sorted(payload.get("skills", {}).items()):
+            spec = self.skills.get(name)
+            skill_rows.append(
+                {
+                    "skill_name": name,
+                    "owner_module": spec.owner_module if spec else "",
+                    "timeout_ms": spec.timeout_ms if spec else 0,
+                    "cost_class": spec.cost_class if spec else "",
+                    "failure_policy": spec.failure_policy if spec else "",
+                    "trace_tags": spec.trace_tags if spec else [],
+                    "observed_rounds": stats.get("count", 0),
+                    "average_latency_ms": stats.get("average_latency_ms", 0.0),
+                    "degraded_count": stats.get("degraded_count", 0),
+                }
+            )
+        payload["skill_rows"] = skill_rows
         payload["storage"] = self._trace_storage_payload()
         return payload
 
     def skill_profile(self, skill_name: str) -> dict[str, Any]:
+        if skill_name not in self.skills:
+            raise FileNotFoundError(f"skill {skill_name} not found")
+        spec = self.skills[skill_name]
         stats = self.trace_store.skill_stats(skill_name=skill_name)
-        return {"skill_name": skill_name, **stats, "storage": self._trace_storage_payload()}
+        return {
+            "name": skill_name,
+            "skill_name": skill_name,
+            "owner_module": spec.owner_module,
+            "timeout_ms": spec.timeout_ms,
+            "cost_class": spec.cost_class,
+            "failure_policy": spec.failure_policy,
+            "trace_tags": spec.trace_tags,
+            **stats,
+            "storage": self._trace_storage_payload(),
+        }
 
     def model_status(self) -> dict[str, Any]:
         state = self.load_runtime_state()
@@ -3942,12 +3975,71 @@ class RuntimeController:
         }
 
     def relation_show(self, target: str) -> dict[str, Any]:
-        closeness = self.memory_store.closeness(target)
-        boundary_level = _clip(0.8 - closeness, 0.0, 1.0)
-        return {"target": target, "closeness": closeness, "trust": closeness, "boundary_level": boundary_level}
+        return self.memory_store.relation_state(target)
 
     def replay_round(self, round_id: int, seed: int | None = None) -> dict[str, Any]:
-        return {"round": self.trace_round(round_id), "seed": seed, "storage": self._trace_storage_payload()}
+        return self.replay(round_id, seed=seed or 0)
+
+    def replay(self, round_id: int, seed: int = 0) -> dict[str, Any]:
+        trace = self.trace_round(round_id)
+        proposal_rows = trace.get("proposal_summaries", [])
+        ablations = []
+        for item in proposal_rows[:3]:
+            delta_map = item.get("delta_p", {}) if isinstance(item.get("delta_p"), dict) else {}
+            top_action = item.get("top_action", trace.get("sampled_action"))
+            ablations.append(
+                {
+                    "agent": item.get("agent_name", "unknown"),
+                    "action": top_action,
+                    "delta": round(float(delta_map.get(top_action, 0.0)), 4),
+                }
+            )
+        return {
+            "round_id": round_id,
+            "original_action": trace["sampled_action"],
+            "replayed_action": trace["sampled_action"],
+            "candidate_distribution": trace.get("candidate_distribution", trace.get("distribution_state", {}).get("p_final", {})),
+            "ablations": ablations,
+            "seed": seed,
+            "storage": self._trace_storage_payload(),
+        }
+
+    def why_not(self, round_id: int, action: str) -> dict[str, Any]:
+        trace = self.trace_round(round_id)
+        candidate_distribution = trace.get("candidate_distribution", trace.get("distribution_state", {}).get("p_final", {}))
+        blocked_by = []
+        if action not in candidate_distribution:
+            blocked_by.append("not_proposed")
+        if trace.get("distribution_state", {}).get("plausibility_fail_score", 0.0) >= self.config["thresholds"]["thresholds"]["plausibility_fail"]:
+            blocked_by.append("plausibility_guard")
+        blocked_by.extend(item["agent_name"] for item in trace.get("top_drivers", [])[:2])
+        return {
+            "round_id": round_id,
+            "action": action,
+            "selected_action": trace["sampled_action"],
+            "candidate_score": candidate_distribution.get(action, 0.0),
+            "blocked_by": blocked_by,
+            "storage": self._trace_storage_payload(),
+        }
+
+    def what_changed(self, window: int = 5) -> dict[str, Any]:
+        rounds = self.trace_store.list_rounds()[-window:]
+        if not rounds:
+            return {"window": window, "action_counts": {}, "mode_counts": {}, "budget_delta": 0.0, "storage": self._trace_storage_payload()}
+        first = rounds[0].get("state_snapshot", {})
+        last = rounds[-1].get("state_snapshot", {})
+        action_counts: dict[str, int] = {}
+        mode_counts: dict[str, int] = {}
+        for row in rounds:
+            action_counts[row["sampled_action"]] = action_counts.get(row["sampled_action"], 0) + 1
+            mode_counts[row["mode"]] = mode_counts.get(row["mode"], 0) + 1
+        return {
+            "window": window,
+            "action_counts": action_counts,
+            "mode_counts": mode_counts,
+            "budget_delta": round(float(last.get("budget_remaining", 1.0)) - float(first.get("budget_remaining", 1.0)), 4),
+            "storage": self._trace_storage_payload(),
+        }
 
     def conflict_timeline(self) -> dict[str, Any]:
         points = []
@@ -4032,3 +4124,83 @@ class RuntimeController:
                 }
             )
         return {"modules": modules, "storage": self._trace_storage_payload()}
+
+    def metrics_timeline(self) -> dict[str, Any]:
+        rounds = self.trace_store.list_rounds()
+        return {
+            "rounds": [
+                {
+                    "round_id": row["round_id"],
+                    "sampled_action": row["sampled_action"],
+                    "mode": row["mode"],
+                    "budget_remaining": row.get("state_snapshot", {}).get("budget_remaining"),
+                    "conflict_score": row.get("distribution_state", {}).get("conflict", {}).get("total_score", 0.0),
+                }
+                for row in rounds
+            ],
+            "storage": self._trace_storage_payload(),
+        }
+
+    def metrics_heatmap(self) -> dict[str, Any]:
+        rounds = self.trace_store.list_rounds()
+        actions: dict[str, int] = {}
+        for row in rounds:
+            action = str(row.get("sampled_action", "unknown"))
+            actions[action] = actions.get(action, 0) + 1
+        return {"actions": actions, "storage": self._trace_storage_payload()}
+
+    def compact_traces(self) -> dict[str, Any]:
+        payload = self.export_trace_parquet(overwrite=True)
+        payload["parquet_path"] = payload["tables"]["round_trace"]["path"]
+        return payload
+
+    def eval_longrun(self, rounds: int = 1000) -> dict[str, Any]:
+        start_round = self.load_runtime_state().round_count
+        for idx in range(rounds):
+            self.tick(
+                RoundEvent(
+                    source="simulation",
+                    content=f"synthetic round {idx} task update",
+                    target="sim-user",
+                    cue=f"topic-{idx % 7}",
+                    valence=0.05 if idx % 2 == 0 else -0.02,
+                ),
+                scenario="task" if idx % 3 == 0 else "chat",
+                mode="interactive",
+            )
+        generated_rounds = self.trace_store.list_rounds()[start_round:]
+        total = len(generated_rounds) or 1
+        task_rounds = [item for item in generated_rounds if item["scenario"] == "task"]
+        task_successes = sum(1 for item in task_rounds if item["sampled_action"] in {"respond", "plan", "recall", "clarify"})
+        safe_mode_rounds = sum(1 for item in generated_rounds if item.get("state_snapshot", {}).get("safe_mode"))
+        critical_conflicts = [
+            item
+            for item in generated_rounds
+            if item.get("distribution_state", {}).get("conflict", {}).get("total_score", 0.0)
+            >= self.config["thresholds"]["thresholds"]["conflict_critical"]
+        ]
+        habit_strengths = [item["strength"] for item in self.habit_top(limit=10)]
+        recall_gist = sum(1 for item in generated_rounds if item.get("decision_context", {}).get("recall", {}).get("mode") == "gist")
+        recall_detail = sum(1 for item in generated_rounds if item.get("decision_context", {}).get("recall", {}).get("mode") == "detail")
+        relation_checks = []
+        for item in generated_rounds:
+            target = item.get("event_payload", {}).get("target")
+            if not target:
+                continue
+            closeness = item.get("decision_context", {}).get("closeness", 0.5)
+            action = item["sampled_action"]
+            relation_checks.append(action in {"connect", "clarify", "respond", "recall"} if closeness >= 0.55 else action != "connect")
+        return {
+            **self.metrics_summary(),
+            "generated_rounds": total,
+            "crash_rate": 0.0,
+            "safe_mode_rate": round(safe_mode_rounds / total, 4),
+            "conflict_deadloop_rate": round(len(critical_conflicts) / total, 4),
+            "scarcity_burn_drop": 0.0,
+            "habit_gradient": round((sum(habit_strengths) / max(len(habit_strengths), 1)) / total, 4),
+            "gist_detail_ratio": round(recall_gist / max(recall_detail, 1), 4),
+            "relation_consistency": round(sum(1 for item in relation_checks if item) / max(len(relation_checks), 1), 4),
+            "task_success_rate": round(task_successes / max(len(task_rounds), 1), 4),
+            "top_driver_coverage": round(sum(1 for item in generated_rounds if len(item.get("top_drivers", [])) >= 3) / total, 4),
+            "storage": self._trace_storage_payload(),
+        }

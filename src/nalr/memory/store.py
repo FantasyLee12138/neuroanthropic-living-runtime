@@ -37,8 +37,10 @@ MEMORY_BASE_DECAY = {
 
 
 class MemoryStore:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, hot_limit: int = 64, warm_limit: int = 256) -> None:
         self.root = root
+        self.hot_limit = max(int(hot_limit), 1)
+        self.warm_limit = max(int(warm_limit), 1)
         self.memory_dir = self.root / "memory"
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         self.parquet_dir = self.memory_dir / "parquet"
@@ -839,14 +841,37 @@ class MemoryStore:
             "evidence": [item for item in evidence if item],
         }
 
-    def recall(self, cue: str, *, tier_budget: tuple[str, ...] = ("hot", "warm", "archive")) -> dict:
+    def recall(
+        self,
+        cue: str,
+        *,
+        tier_budget: tuple[str, ...] = ("hot", "warm", "archive"),
+        allow_detail: bool = True,
+    ) -> dict:
         normalized_cue = cue.lower()
         normalized_budget = tuple(tier_budget)
-        cache_key = (normalized_cue, normalized_budget)
+        cache_key = (normalized_cue, normalized_budget + (f"detail={int(allow_detail)}",))
         cached = self._recall_cache.get(cache_key)
         if cached is not None:
             return copy.deepcopy(cached)
         payload = self._lookup_tiers(normalized_cue, normalized_budget)
+        if payload.get("found"):
+            evidence = list(payload.get("evidence", []))
+            detail_strength = float(payload.get("strength", 0.0)) if payload.get("detail") else 0.0
+            gist_strength = max(float(payload.get("strength", 0.0)), 0.0)
+            if allow_detail and payload.get("detail"):
+                payload["mode"] = "detail"
+                payload["content"] = evidence[0] if evidence else ""
+                payload["strength"] = round(detail_strength or gist_strength, 4)
+            else:
+                payload["mode"] = "gist" if gist_strength > 0 else "none"
+                payload["content"] = evidence[0] if evidence else ""
+                payload["detail"] = False
+                if payload["mode"] == "gist":
+                    payload["strength"] = round(min(gist_strength, detail_strength or gist_strength), 4)
+        else:
+            payload["mode"] = "none"
+            payload["content"] = ""
         self._recall_cache[cache_key] = copy.deepcopy(payload)
         return payload
 
@@ -1096,6 +1121,16 @@ class MemoryStore:
                 return item["closeness"]
         return 0.5
 
+    def relation_state(self, target: str) -> dict:
+        closeness = self.closeness(target)
+        return {
+            "target": target,
+            "closeness": closeness,
+            "trust": closeness,
+            "boundary_level": _clip(0.8 - closeness, 0.0, 1.0),
+            "known": any(item["target"] == target for item in self._read_list(self.relation_path)),
+        }
+
     def nudge_relation(self, target: str, delta: float) -> dict:
         relations = self._read_list(self.relation_path)
         relation = next((item for item in relations if item["target"] == target), None)
@@ -1108,6 +1143,33 @@ class MemoryStore:
         traces.append({"target": target, "valence": 0.0, "content": f"trust_nudge:{delta:+.3f}"})
         self._write_list(self.relation_trace_path, traces)
         return relation
+
+    def compact_layers(self) -> None:
+        hot = sorted(self._read_list(self.episodic_path), key=lambda item: (item.get("count", 0), item.get("detail_strength", 0.0)), reverse=True)
+        warm = sorted(self._read_list(self.episodic_warm_path), key=lambda item: (item.get("count", 0), item.get("detail_strength", 0.0)), reverse=True)
+        archive = sorted(self._read_list(self.episodic_archive_path), key=lambda item: (item.get("count", 0), item.get("detail_strength", 0.0)), reverse=True)
+
+        while len(hot) > self.hot_limit:
+            demoted = hot.pop()
+            demoted["detail_strength"] = min(float(demoted.get("detail_strength", 0.0)), 0.49)
+            warm.append(demoted)
+
+        while len(warm) > self.warm_limit:
+            demoted = warm.pop()
+            demoted["detail_strength"] = min(float(demoted.get("detail_strength", 0.0)), 0.24)
+            demoted["summary"] = demoted.get("summary") or f"Archived memory for {demoted.get('cue', 'unknown')}"
+            archive.append(demoted)
+
+        self._write_list(self.episodic_path, hot)
+        self._write_list(self.episodic_warm_path, warm)
+        self._write_list(self.episodic_archive_path, archive)
+
+    def tier_counts(self) -> dict[str, int]:
+        return {
+            "hot": len(self._read_list(self.episodic_path)),
+            "warm": len(self._read_list(self.episodic_warm_path)),
+            "archive": len(self._read_list(self.episodic_archive_path)),
+        }
 
     def _sync_memory_tiers(self, memory: dict) -> None:
         if memory["count"] >= 4:

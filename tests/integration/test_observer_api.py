@@ -176,3 +176,35 @@ def test_observer_exposes_dream_status_runs_and_metrics(tmp_path):
     assert runs_response.json()["runs"]
     assert trace_response.json()["trigger"] == "sleep_full"
     assert metrics_response.json()["total_runs"] == 1
+
+
+def test_observer_exposes_extended_diagnostics_endpoints(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(source="user", content="hello runtime and remember noodles", target="user", cue="noodles"),
+        scenario="task",
+        mode="interactive",
+    )
+    controller.flush_pending_io(raise_on_error=True)
+
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+
+    timeline_response = client.get("/metrics/timeline")
+    heatmap_response = client.get("/metrics/heatmap")
+    replay_response = client.get("/replay/1?seed=5")
+    why_not_response = client.get("/why-not/1/rest")
+    entropy_response = client.get("/metrics/entropy")
+    skill_profile_response = client.get("/skills/profile/generate_candidates")
+
+    assert timeline_response.status_code == 200
+    assert heatmap_response.status_code == 200
+    assert replay_response.status_code == 200
+    assert why_not_response.status_code == 200
+    assert entropy_response.status_code == 200
+    assert skill_profile_response.status_code == 200
+    assert timeline_response.json()["rounds"]
+    assert heatmap_response.json()["actions"]
+    assert replay_response.json()["round_id"] == 1
+    assert why_not_response.json()["round_id"] == 1
+    assert "provider_class" in entropy_response.json()
+    assert skill_profile_response.json()["name"] == "generate_candidates"

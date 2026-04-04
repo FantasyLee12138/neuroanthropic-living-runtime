@@ -904,3 +904,48 @@ def test_start_run_prefers_planner_route_when_configured(tmp_path):
     controller.start_run("检查 worker.py 并规划下一步")
 
     assert seen_route["name"] == "planner"
+
+
+def test_replay_why_not_and_what_changed_return_counterfactuals(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    controller.tick(
+        RoundEvent(source="user", content="Help me plan dinner and remember pasta.", target="friend", cue="pasta"),
+        scenario="task",
+        mode="interactive",
+    )
+    controller.tick(
+        RoundEvent(source="user", content="Remember pasta again but be careful.", target="friend", cue="pasta"),
+        scenario="companion",
+        mode="interactive",
+    )
+
+    replay_payload = controller.replay(1, seed=7)
+    why_not_payload = controller.why_not(2, "rest")
+    changed_payload = controller.what_changed(window=2)
+
+    assert replay_payload["round_id"] == 1
+    assert "original_action" in replay_payload
+    assert "ablations" in replay_payload
+    assert why_not_payload["round_id"] == 2
+    assert why_not_payload["action"] == "rest"
+    assert why_not_payload["blocked_by"]
+    assert changed_payload["window"] == 2
+    assert changed_payload["action_counts"]
+
+
+def test_compact_traces_and_eval_longrun_surface_diagnostics(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(source="user", content="Help me remember tea and plan a reply.", target="friend", cue="tea"),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    compacted = controller.compact_traces()
+    summary = controller.eval_longrun(rounds=5)
+
+    assert compacted["parquet_path"].endswith("round_trace.parquet")
+    assert summary["generated_rounds"] == 5
+    assert "crash_rate" in summary
+    assert "task_success_rate" in summary

@@ -8,6 +8,18 @@ agents:
   PFCAgent:
     enabled: true
     weight: 1.0
+  ValueAgent:
+    enabled: true
+    weight: 0.9
+  ConflictMonitorAgent:
+    enabled: true
+    weight: 0.9
+  BehaviorPlausibilityGuard:
+    enabled: true
+    weight: 1.0
+  ForcedModeSwitch:
+    enabled: true
+    weight: 0.8
   ThalamusAttentionAgent:
     enabled: true
     weight: 1.0
@@ -29,4 +41,3 @@ agents:
   OutputStyleLayer:
     enabled: true
     weight: 0.6
-

@@ -132,7 +132,14 @@ def create_app(project_root: Path | str | None = None, config_root: Path | str |
 
     @app.get("/skills/profile/{skill_name}")
     async def skill_profile(skill_name: str) -> dict:
-        return controller.skill_profile(skill_name)
+        try:
+            return controller.skill_profile(skill_name)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/metrics/entropy")
+    async def entropy_metrics() -> dict:
+        return controller.entropy_metrics()
 
     @app.get("/metrics/conflicts")
     async def conflict_timeline() -> dict:
@@ -145,6 +152,28 @@ def create_app(project_root: Path | str | None = None, config_root: Path | str |
     @app.get("/analysis/ablation")
     async def ablation_summary() -> dict:
         return controller.ablation_summary()
+
+    @app.get("/metrics/timeline")
+    async def metrics_timeline() -> dict:
+        return controller.metrics_timeline()
+
+    @app.get("/metrics/heatmap")
+    async def metrics_heatmap() -> dict:
+        return controller.metrics_heatmap()
+
+    @app.get("/replay/{round_id}")
+    async def replay(round_id: int, seed: int = 0) -> dict:
+        try:
+            return controller.replay(round_id, seed=seed)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/why-not/{round_id}/{action}")
+    async def why_not(round_id: int, action: str) -> dict:
+        try:
+            return controller.why_not(round_id, action)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     dashboard_path = project_root_path / "services" / "observer" / "dashboard" / "index.html"
     if not dashboard_path.exists():

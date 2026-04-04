@@ -56,3 +56,11 @@ model_routes:
 perspective:
   enabled: true
   risk_threshold: 0.33
+models:
+  provider: doubao_ark
+  base_url: https://ark.cn-beijing.volces.com/api/v3
+  primary_model: doubao-seed-2-0-pro-260215
+  fast_model: doubao-seed-2-0-pro-260215
+  timeout_seconds: 20
+  retries: 1
+  max_output_tokens: 512

@@ -40,6 +40,7 @@ COMMAND_SPECS: dict[tuple[str, str], CommandSpec] = {
     ("trace", "round"): CommandSpec("trace", "round", "read_only"),
     ("trace", "why"): CommandSpec("trace", "why", "read_only"),
     ("trace", "contribution"): CommandSpec("trace", "contribution", "read_only"),
+    ("trace", "compact"): CommandSpec("trace", "compact", "debug_control"),
     ("agent", "list"): CommandSpec("agent", "list", "read_only"),
     ("agent", "disable"): CommandSpec("agent", "disable", "debug_control", mutable=True, mutation_scope="agent", rollback_available=True),
     ("agent", "enable"): CommandSpec("agent", "enable", "debug_control", mutable=True, mutation_scope="agent", rollback_available=True),
@@ -57,6 +58,10 @@ COMMAND_SPECS: dict[tuple[str, str], CommandSpec] = {
     ("budget", "show"): CommandSpec("budget", "show", "read_only"),
     ("budget", "set"): CommandSpec("budget", "set", "ops_admin", mutable=True, mutation_scope="resource", rollback_available=True),
     ("replay", "round"): CommandSpec("replay", "round", "debug_control"),
+    ("why", "this"): CommandSpec("why", "this", "debug_control"),
+    ("why", "not"): CommandSpec("why", "not", "debug_control"),
+    ("what", "changed"): CommandSpec("what", "changed", "debug_control"),
+    ("eval", "longrun"): CommandSpec("eval", "longrun", "debug_control"),
     ("snapshot", "restore"): CommandSpec("snapshot", "restore", "ops_admin", mutable=True, mutation_scope="snapshot", rollback_available=True),
     ("dream", "status"): CommandSpec("dream", "status", "read_only"),
     ("dream", "trace"): CommandSpec("dream", "trace", "read_only"),
@@ -151,6 +156,19 @@ class CommandInterfaceLayer:
                 target = parts[2]
             if len(parts) >= 4:
                 parsed_args["seed"] = int(parts[3])
+        elif key == ("why", "this"):
+            if len(parts) >= 3:
+                target = parts[2]
+        elif key == ("why", "not"):
+            if len(parts) >= 3:
+                parsed_args["action"] = parts[2]
+                target = parts[3] if len(parts) >= 4 else None
+        elif key == ("what", "changed") and len(parts) >= 3:
+            parsed_args["window"] = int(parts[2])
+            target = parts[2]
+        elif key == ("eval", "longrun") and len(parts) >= 3:
+            parsed_args["rounds"] = int(parts[2])
+            target = parts[2]
         elif key == ("snapshot", "restore") and len(parts) >= 3:
             target = parts[2]
         elif key == ("suppress", "dmn"):
@@ -211,6 +229,8 @@ class CommandInterfaceLayer:
             return self.controller.why_this(int(envelope.target))
         if key == ("trace", "contribution") and envelope.target:
             return self.controller.contribution_breakdown(int(envelope.target))
+        if key == ("trace", "compact"):
+            return self.controller.compact_traces()
         if key == ("agent", "list"):
             return self.controller.agent_list()
         if key == ("skill", "stats"):
@@ -250,6 +270,16 @@ class CommandInterfaceLayer:
             return self.controller.explain_run()
         if key == ("replay", "round") and envelope.target:
             return self.controller.replay_round(int(envelope.target), seed=envelope.parsed_args.get("seed"))
+        if key == ("why", "this"):
+            round_id = int(envelope.target) if envelope.target else self.controller.load_runtime_state().round_count
+            return self.controller.why_this(round_id)
+        if key == ("why", "not"):
+            round_id = int(envelope.target) if envelope.target else self.controller.load_runtime_state().round_count
+            return self.controller.why_not(round_id, str(envelope.parsed_args["action"]))
+        if key == ("what", "changed"):
+            return self.controller.what_changed(int(envelope.parsed_args.get("window", 5)))
+        if key == ("eval", "longrun"):
+            return self.controller.eval_longrun(int(envelope.parsed_args.get("rounds", 1000)))
 
         spec = COMMAND_SPECS.get(key)
         if spec is not None and spec.mutable:

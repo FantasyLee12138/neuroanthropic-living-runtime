@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Annotated
 
 import typer
 
@@ -42,6 +43,9 @@ safe_app = typer.Typer()
 budget_app = typer.Typer()
 explain_app = typer.Typer()
 dream_app = typer.Typer()
+why_app = typer.Typer()
+what_app = typer.Typer()
+eval_app = typer.Typer()
 
 app.add_typer(state_app, name="state")
 app.add_typer(body_app, name="body")
@@ -66,6 +70,9 @@ app.add_typer(safe_app, name="safe")
 app.add_typer(budget_app, name="budget")
 app.add_typer(explain_app, name="explain")
 app.add_typer(dream_app, name="dream")
+app.add_typer(why_app, name="why")
+app.add_typer(what_app, name="what")
+app.add_typer(eval_app, name="eval")
 
 
 def get_controller() -> RuntimeController:
@@ -373,6 +380,11 @@ def trace_export_parquet(
     emit(get_controller().export_trace_parquet(since_round=since_round, overwrite=overwrite))
 
 
+@trace_app.command("compact")
+def trace_compact() -> None:
+    emit(get_cil().execute("trace compact"))
+
+
 @agent_app.command("list")
 def agent_list() -> None:
     emit(get_cil().execute("agent list"))
@@ -417,6 +429,28 @@ def nudge_relation(target: str, metric: str, delta: float) -> None:
 def replay_round(round_id: int, seed: int | None = None) -> None:
     suffix = f" {seed}" if seed is not None else ""
     emit(get_cil().execute(f"replay round {round_id}{suffix}"))
+
+
+@why_app.command("this")
+def why_this(round_id: Annotated[int, typer.Argument()] = 0) -> None:
+    suffix = f" {round_id}" if round_id else ""
+    emit(get_cil().execute(f"why this{suffix}"))
+
+
+@why_app.command("not")
+def why_not(action: Annotated[str, typer.Argument()], round_id: Annotated[int, typer.Argument()] = 0) -> None:
+    suffix = f" {round_id}" if round_id else ""
+    emit(get_cil().execute(f"why not {action}{suffix}"))
+
+
+@what_app.command("changed")
+def what_changed(window: int = 5) -> None:
+    emit(get_cil().execute(f"what changed {window}"))
+
+
+@eval_app.command("longrun")
+def eval_longrun(rounds: int = 1000) -> None:
+    emit(get_cil().execute(f"eval longrun {rounds}"))
 
 
 @suppress_app.command("dmn")

@@ -309,3 +309,39 @@ def test_cli_root_dream_alias_runs_manual_dream_with_optional_cue(tmp_path, monk
     assert payload["trace"]["mode"] == "sleep"
     assert payload["trace"]["cue"] == "tea"
     assert payload["dream_run_id"].startswith("dream-")
+
+
+def test_cli_supports_trace_compact_and_counterfactual_commands(tmp_path, monkeypatch):
+    monkeypatch.setenv("NALR_HOME", str(tmp_path / ".alive"))
+    monkeypatch.setenv("NALR_CONFIG_DIR", str(Path(__file__).resolve().parents[2] / "config"))
+
+    RUNNER.invoke(
+        app,
+        [
+            "chat",
+            "Help me plan dinner and remember pasta.",
+            "--target",
+            "friend",
+            "--cue",
+            "pasta",
+            "--scenario",
+            "task",
+        ],
+    )
+
+    compact_result = RUNNER.invoke(app, ["trace", "compact"])
+    why_this_result = RUNNER.invoke(app, ["why", "this", "1"])
+    why_not_result = RUNNER.invoke(app, ["why", "not", "rest", "1"])
+    changed_result = RUNNER.invoke(app, ["what", "changed", "1"])
+    longrun_result = RUNNER.invoke(app, ["eval", "longrun", "3"])
+
+    assert compact_result.exit_code == 0
+    assert '"parquet_path"' in compact_result.stdout
+    assert why_this_result.exit_code == 0
+    assert '"round_id": 1' in why_this_result.stdout
+    assert why_not_result.exit_code == 0
+    assert '"action": "rest"' in why_not_result.stdout
+    assert changed_result.exit_code == 0
+    assert '"window": 1' in changed_result.stdout
+    assert longrun_result.exit_code == 0
+    assert '"generated_rounds": 3' in longrun_result.stdout
