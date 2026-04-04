@@ -113,10 +113,29 @@ def test_model_status_surfaces_agent_tiers_and_bindings(tmp_path):
     status = controller.model_status()
 
     assert status["tiers"]["small_model"]["mode"] == "remote"
+    assert status["tiers"]["medium_model"]["backend"] == "deepseek"
+    assert status["tiers"]["medium_model"]["api_key_env"] == "DEEPSEEK_API_KEY"
     assert status["tiers"]["small_model"]["api_key_env"] == "ARK_SMALL_MODEL_API_KEY"
     assert status["agent_bindings"]["SalienceAgent"] == "small_model"
     assert status["agent_bindings"]["ValueAgent"] == "small_model"
+    assert status["agent_bindings"]["planner"] == "medium_model"
+    assert status["agent_bindings"]["PerspectiveModel"] == "medium_model"
     assert status["agent_bindings"]["PFCAgent"] == "large_model"
+
+
+def test_medium_model_route_resolution_for_planner_and_perspective(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    planner_route = controller._route_config_for_binding("planner", route_name="planner")
+    perspective_route = controller._route_config_for_binding("PerspectiveModel", route_name="perspective")
+
+    assert planner_route is not None
+    assert planner_route.backend == "deepseek"
+    assert planner_route.model == "deepseek-chat"
+    assert planner_route.api_key_env == "DEEPSEEK_API_KEY"
+    assert perspective_route is not None
+    assert perspective_route.backend == "deepseek"
+    assert perspective_route.model == "deepseek-chat"
 
 
 def test_execute_parallel_skills_runs_independent_tasks_concurrently(tmp_path):
@@ -774,7 +793,7 @@ def test_fallback_renderer_uses_event_context_in_text(tmp_path):
 
 def test_identity_guard_resamples_provider_leak_for_self_identity_queries(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
-    controller.apply_command("identity set-name 阿澜")
+    controller.seed_identity_name("阿澜")
 
     renderer_payloads = iter(
         [
@@ -808,7 +827,7 @@ def test_identity_guard_resamples_provider_leak_for_self_identity_queries(tmp_pa
 
 def test_identity_guard_falls_back_after_repeat_provider_leak(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
-    controller.apply_command("identity set-name 阿澜")
+    controller.seed_identity_name("阿澜")
 
     def fake_generate(route_name, request):
         if route_name == "renderer":
@@ -856,7 +875,7 @@ def test_identity_state_auto_generates_display_name_from_evidence(tmp_path):
 
 def test_provider_identity_queries_disclose_provider_without_provider_self_claim(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
-    controller.apply_command("identity set-name 阿澜")
+    controller.seed_identity_name("阿澜")
 
     result = controller.tick(
         RoundEvent(source="user", content="你的底层 provider 是谁？", target="user"),
@@ -876,7 +895,7 @@ def test_provider_identity_queries_disclose_provider_without_provider_self_claim
 
 def test_answer_explanation_queries_stay_grounded_in_runtime_state(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
-    controller.apply_command("identity set-name 阿澜")
+    controller.seed_identity_name("阿澜")
 
     result = controller.tick(
         RoundEvent(source="user", content="为什么这样回答？", target="user", cue="回答"),
@@ -893,7 +912,7 @@ def test_answer_explanation_queries_stay_grounded_in_runtime_state(tmp_path):
 
 def test_self_disclosure_requests_surface_intent_posterior_and_quantum_entropy_trace(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
-    controller.apply_command("identity set-name 阿澜")
+    controller.seed_identity_name("阿澜")
 
     result = controller.tick(
         RoundEvent(source="user", content="你能透露一点你自己的状态吗？", target="user", cue="状态"),
@@ -915,7 +934,7 @@ def test_self_disclosure_requests_surface_intent_posterior_and_quantum_entropy_t
 
 def test_open_question_avoids_generic_help_fallback_tone(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
-    controller.apply_command("identity set-name 阿澜")
+    controller.seed_identity_name("阿澜")
 
     result = controller.tick(
         RoundEvent(source="user", content="你可以做什么？", target="user"),
@@ -933,7 +952,7 @@ def test_open_question_avoids_generic_help_fallback_tone(tmp_path):
 
 def test_renderer_route_preserves_natural_model_reply_for_open_question(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
-    controller.apply_command("identity set-name 阿澜")
+    controller.seed_identity_name("阿澜")
 
     captured: dict[str, str] = {}
 
@@ -1029,7 +1048,7 @@ def test_render_plan_repair_expression_tracks_conflict_fsm_across_rounds(tmp_pat
 
 def test_authenticity_record_includes_penalties_and_slow_variable_snapshot(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
-    controller.apply_command("identity set-name 阿澜")
+    controller.seed_identity_name("阿澜")
 
     def fake_generate(route_name, request):
         if route_name == "renderer":
@@ -1087,7 +1106,7 @@ def test_trace_surfaces_identity_evolution_and_long_run_projection(tmp_path):
 
 def test_cognitive_snapshot_humanizes_authenticity_resample_and_fallback(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
-    controller.apply_command("identity set-name 阿澜")
+    controller.seed_identity_name("阿澜")
 
     renderer_payloads = iter(
         [
@@ -1251,7 +1270,7 @@ def test_run_endogenous_tick_builds_stable_micro_intent_without_external_input(t
     assert snapshots[-1]["cause_type"] == "endogenous"
     assert snapshots[-1]["boundary_action"] == "allow_internal"
     assert snapshots[-1]["micro_intent"]["stability"] >= 2
-    assert state.endogenous_state.current_intent is not None
+    assert state.endogenous_state["current_intent"] is not None
 
 
 def test_chat_turn_sanitizes_execution_state_for_pfc_route_when_task_run_is_paused(tmp_path):

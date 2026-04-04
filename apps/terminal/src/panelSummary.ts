@@ -143,8 +143,9 @@ function formatModelSection(modelStatus: Record<string, unknown> | undefined): s
   }
   const tiers = (modelStatus.tiers as Record<string, Record<string, unknown>> | undefined) ?? {};
   const bindings = (modelStatus.agent_bindings as Record<string, string> | undefined) ?? {};
+  const tierNames = Object.keys(tiers);
   const tierRows = ["模型分层"];
-  for (const tierName of ["state_machine", "small_model", "large_model"]) {
+  for (const tierName of tierNames) {
     const tier = tiers[tierName] ?? {};
     const mode = String(tier.mode ?? "unknown");
     if (mode === "local") {

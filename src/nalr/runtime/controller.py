@@ -64,6 +64,7 @@ from nalr.schemas.models import (
     SkillRuntimeContext,
     StopReason,
     StochasticState,
+    SubjectCore,
     TaskNode,
     TurnExecution,
     TurnPlan,
@@ -261,6 +262,7 @@ class RuntimeController:
 
     def _save_state(self, state: RuntimeState, *, sync: bool = False) -> None:
         snapshot = RuntimeState(**to_dict(state))
+        self._ensure_subject_core(snapshot)
         self._state_cache = snapshot
         self._state_io.submit(lambda: self._write_state_snapshot(snapshot))
         if sync:
@@ -282,6 +284,7 @@ class RuntimeController:
             else:
                 payload = json.loads(self.state_path.read_text(encoding="utf-8"))
             self._state_cache = RuntimeState(**payload)
+            self._ensure_subject_core(self._state_cache)
         return RuntimeState(**to_dict(self._state_cache))
 
     def _runtime_migration_status(self) -> dict[str, Any]:
@@ -292,6 +295,57 @@ class RuntimeController:
         except json.JSONDecodeError:
             return {}
         return payload if isinstance(payload, dict) else {}
+
+    def _estimate_subject_birth_ts(self) -> str:
+        candidates: list[str] = []
+        if self.state_path.exists():
+            candidates.append(utc_now_iso())
+        try:
+            rounds = self.trace_store.list_rounds()
+            candidates.extend(str(item.get("recorded_at") or "").strip() for item in rounds if item.get("recorded_at"))
+        except Exception:
+            pass
+        candidates = [item for item in candidates if item]
+        return min(candidates) if candidates else utc_now_iso()
+
+    def _default_vitality_anchor(self, state: RuntimeState) -> dict[str, Any]:
+        return {
+            "mood": round(float(state.mood), 4),
+            "body_energy": round(float(state.body_energy), 4),
+            "affect_residue": round(float(state.affect_residue), 4),
+            "budget_remaining": round(float(state.budget_remaining), 4),
+        }
+
+    def _ensure_subject_core(self, state: RuntimeState) -> SubjectCore:
+        core = state.subject_core if isinstance(state.subject_core, SubjectCore) else SubjectCore(**to_dict(state.subject_core))
+        if not core.subject_id:
+            core.subject_id = f"subject-{uuid4().hex}"
+        if not core.birth_ts:
+            core.birth_ts = self._estimate_subject_birth_ts()
+        if not core.continuity_nonce:
+            core.continuity_nonce = f"continuity-{uuid4().hex}"
+        if not core.original_vitality_anchor:
+            core.original_vitality_anchor = self._default_vitality_anchor(state)
+        core.core_boundary_version = max(int(core.core_boundary_version or 0), 1)
+        state.subject_core = core
+        return core
+
+    def _preserve_subject_core_on_restore(
+        self,
+        current_state: RuntimeState,
+        restored_state: RuntimeState,
+        *,
+        violation_code: str,
+    ) -> tuple[RuntimeState, str]:
+        current_core = SubjectCore(**to_dict(self._ensure_subject_core(current_state)))
+        restored_core = SubjectCore(**to_dict(self._ensure_subject_core(restored_state)))
+        if to_dict(current_core) != to_dict(restored_core):
+            restored_state.subject_core = current_core
+            restored_state.safe_mode = True
+            restored_state.mode = "safe"
+            return restored_state, violation_code
+        restored_state.subject_core = current_core
+        return restored_state, ""
 
     def _migrate_runtime_schema_if_needed(self) -> None:
         status = self._runtime_migration_status()
@@ -309,6 +363,7 @@ class RuntimeController:
         raw_identity = dict(payload.get("identity_state", {})) if isinstance(payload.get("identity_state", {}), dict) else {}
         raw_aliases = list(raw_identity.get("aliases", [])) if isinstance(raw_identity.get("aliases", []), list) else []
         migrated_state = RuntimeState(**payload) if payload else self.load_runtime_state()
+        self._ensure_subject_core(migrated_state)
         removed_aliases_count = max(0, len(raw_aliases) - len(migrated_state.identity_state.aliases))
         if payload:
             self._save_state(migrated_state, sync=True)
@@ -501,18 +556,21 @@ class RuntimeController:
         snapshot_path = self._command_snapshot_path(snapshot_id)
         operator_level = envelope.operator_level if envelope is not None else "ops_admin"
         if not snapshot_path.exists():
-            return CommandResult(
-                applied=False,
-                scope="snapshot",
-                delta={"snapshot_id": snapshot_id, "restored": False},
-                risk_note="snapshot not found",
-                operator_level=operator_level,
-                mutation_scope="snapshot",
-                command_id=envelope.command_id,
-                canonical=envelope.canonical,
-                parsed_args=envelope.parsed_args,
-                flags=envelope.flags,
-                rollback_available=False,
+            return self._mark_boundary_result(
+                CommandResult(
+                    applied=False,
+                    scope="snapshot",
+                    delta={"snapshot_id": snapshot_id, "restored": False},
+                    risk_note="snapshot not found",
+                    operator_level=operator_level,
+                    mutation_scope="snapshot",
+                    command_id=envelope.command_id,
+                    canonical=envelope.canonical,
+                    parsed_args=envelope.parsed_args,
+                    flags=envelope.flags,
+                    rollback_available=False,
+                ),
+                boundary_action="allow_internal",
             )
 
         before_state = self.load_runtime_state()
@@ -528,7 +586,13 @@ class RuntimeController:
         self.memory_store = MemoryStore(self.home_path)
         self.dream_orchestrator.memory_store = self.memory_store
         rows = read_snapshot_rows(self.state_parquet_path, "select payload_json from read_parquet(?)")
-        self._state_cache = RuntimeState(**json.loads(rows[0]["payload_json"]))
+        restored_state = RuntimeState(**json.loads(rows[0]["payload_json"]))
+        restored_state, violation_code = self._preserve_subject_core_on_restore(
+            before_state,
+            restored_state,
+            violation_code="subject_core_violation",
+        )
+        self._save_state(restored_state, sync=True)
         restored_state = self.load_runtime_state()
         after_hash = self._state_hash(restored_state)
         rollback = {
@@ -553,6 +617,12 @@ class RuntimeController:
             flags=envelope.flags,
             rollback=rollback,
         )
+        result = self._mark_boundary_result(
+            result,
+            boundary_action="allow_internal",
+            violation_code=violation_code,
+        )
+        self._enrich_command_result(result, envelope)
         self.trace_store.append_command(
             envelope.canonical,
             result,
@@ -571,6 +641,10 @@ class RuntimeController:
         result.flags = dict(envelope.flags)
         if result.mutation_scope is None:
             result.mutation_scope = envelope.mutation_scope
+        state = self.load_runtime_state()
+        core = self._ensure_subject_core(state)
+        result.subject_id = core.subject_id
+        result.continuity_nonce = core.continuity_nonce
         return result
 
     def _build_rollback(self, envelope: CommandEnvelope, before_state: RuntimeState, result: CommandResult, snapshot_id: str) -> dict[str, Any]:
@@ -623,6 +697,73 @@ class RuntimeController:
             "human_hint": hint or f"alive {command}",
         }
         return rollback
+
+    def _mark_boundary_result(
+        self,
+        result: CommandResult,
+        *,
+        boundary_action: str,
+        cause_type: str = "external_stimulus",
+        violation_code: str = "",
+        deprecation_warning: str = "",
+    ) -> CommandResult:
+        result.boundary_action = boundary_action
+        result.cause_type = cause_type
+        result.violation_code = violation_code
+        result.deprecation_warning = deprecation_warning
+        return result
+
+    def _boundary_deprecation(self, command: str) -> str:
+        return f"{command} is now boundary-mediated; the legacy direct-write path has been deprecated."
+
+    def _reject_boundary_command(
+        self,
+        state: RuntimeState,
+        *,
+        scope: str,
+        operator_level: str,
+        violation_code: str,
+        risk_note: str,
+    ) -> CommandResult:
+        state.safe_mode = True
+        state.mode = "safe"
+        return self._mark_boundary_result(
+            CommandResult(
+                applied=False,
+                scope=scope,
+                delta={},
+                risk_note=risk_note,
+                operator_level=operator_level,
+                rollback_available=False,
+            ),
+            boundary_action="reject",
+            violation_code=violation_code,
+        )
+
+    def _subjectivity_metrics(self) -> dict[str, Any]:
+        state = self.load_runtime_state()
+        core = self._ensure_subject_core(state)
+        commands = self.trace_store.list_commands()
+        rounds = self.trace_store.list_rounds()
+        boundary_violation_count = sum(1 for item in commands if item.get("violation_code"))
+        external_count = sum(1 for item in commands if item.get("cause_type") == "external_stimulus") + sum(
+            1 for item in rounds if item.get("cause_type", "external_stimulus") == "external_stimulus"
+        )
+        internal_count = sum(1 for item in commands if item.get("cause_type") == "endogenous") + sum(
+            1 for item in rounds if item.get("cause_type") == "endogenous"
+        )
+        ratio = round(external_count / max(internal_count, 1), 4)
+        endogenous_intent_count = sum(
+            1 for item in rounds if item.get("cause_type") == "endogenous" and item.get("sampled_action") == "rest"
+        )
+        return {
+            "subject_id": core.subject_id,
+            "continuity_nonce": core.continuity_nonce,
+            "subject_core_integrity": bool(core.subject_id and core.continuity_nonce and core.birth_ts),
+            "boundary_violation_count": boundary_violation_count,
+            "external_to_internal_ratio": ratio,
+            "endogenous_intent_rate": round(endogenous_intent_count / max(len(rounds), 1), 4),
+        }
 
     def _round_seed(self, state: RuntimeState, event: RoundEvent) -> int:
         payload = f"{state.round_count}:{event.source}:{event.content}:{event.target or ''}:{event.cue or ''}"
@@ -4656,6 +4797,8 @@ class RuntimeController:
             recorded_at=recorded_at,
             recorded_date=recorded_date,
             round_id=state.round_count,
+            subject_id=state.subject_core.subject_id,
+            continuity_nonce=state.subject_core.continuity_nonce,
             scenario=scenario,
             mode=state.mode,
             sampled_action=sampled_action.name,
@@ -4663,6 +4806,8 @@ class RuntimeController:
             top_drivers=contributions[:3],
             style_profile=style_profile,
             state_snapshot=to_dict(state),
+            cause_type="external_stimulus",
+            boundary_action="allow_internal",
             pipeline_stages=[stage for stage, _ in PIPELINE_ORDER],
             proposal_summaries=proposal_records,
             gate_decisions=gate_decisions,
@@ -4746,11 +4891,91 @@ class RuntimeController:
             self._record_entropy_failure(state, exc)
             raise
 
+    def run_endogenous_tick(self, *, trigger: str = "idle") -> dict[str, Any]:
+        state = self.load_runtime_state()
+        self._ensure_subject_core(state)
+        state.round_count += 1
+
+        if state.body_energy <= 0.6 or state.budget_remaining <= 0.5:
+            intent_name = "rest_and_reduce_output_density"
+        elif state.affect_residue >= 0.14:
+            intent_name = "seek_closure_on_memory"
+        elif state.mood <= 0.48:
+            intent_name = "increase_disclosure_resistance"
+        else:
+            intent_name = "avoid_social_interaction"
+
+        evidence = {
+            "affect_residue": round(float(state.affect_residue), 4),
+            "body_energy": round(float(state.body_energy), 4),
+            "budget_remaining": round(float(state.budget_remaining), 4),
+            "mood": round(float(state.mood), 4),
+        }
+        previous_intent = state.endogenous_state.get("current_intent")
+        stability = int(state.endogenous_state.get("stability", 0) or 0)
+        if isinstance(previous_intent, dict) and previous_intent.get("name") == intent_name:
+            stability += 1
+        else:
+            stability = 1
+        current_intent = {
+            "name": intent_name,
+            "trigger": trigger,
+            "bias": {"rest": 0.12 if "rest" in intent_name else 0.04, "wander": 0.06 if intent_name == "avoid_social_interaction" else 0.0},
+            "evidence": evidence,
+            "stability": stability,
+        }
+        state.endogenous_state["current_intent"] = current_intent
+        state.endogenous_state["stability"] = stability
+        state.endogenous_state["last_trigger"] = trigger
+        state.endogenous_state["history"] = (list(state.endogenous_state.get("history", [])) + [current_intent])[-20:]
+
+        if intent_name == "rest_and_reduce_output_density":
+            state.focus = "rest"
+            state.body_energy = round(_clip(state.body_energy + 0.02), 4)
+        elif intent_name == "seek_closure_on_memory":
+            state.focus = "recall"
+            state.affect_residue = round(_clip(state.affect_residue * 0.96), 4)
+        else:
+            state.focus = "wander"
+
+        recorded_at = utc_now_iso()
+        trace = RoundTrace(
+            session_id=state.session_id,
+            recorded_at=recorded_at,
+            recorded_date=iso_date(recorded_at),
+            round_id=state.round_count,
+            subject_id=state.subject_core.subject_id,
+            continuity_nonce=state.subject_core.continuity_nonce,
+            scenario="endogenous",
+            mode=trigger,
+            sampled_action="rest",
+            contributions=[],
+            top_drivers=[],
+            style_profile={},
+            state_snapshot=to_dict(state),
+            cause_type="endogenous",
+            boundary_action="allow_internal",
+            render_plan={"micro_intent": current_intent},
+            rendered_expression={},
+            vitality_snapshot=self._default_vitality_anchor(state),
+            long_run_projection={},
+            runtime_metrics={"route_type": "endogenous_tick", "micro_intent_stability": stability},
+        )
+        self._save_state(state)
+        self.trace_store.write_round(trace)
+        return {
+            "round_id": state.round_count,
+            "micro_intent": current_intent,
+            "cause_type": "endogenous",
+            "boundary_action": "allow_internal",
+        }
+
     def execute_command(self, envelope: CommandEnvelope) -> CommandResult:
         if envelope.domain == "snapshot" and envelope.verb == "restore" and envelope.target:
             return self._apply_snapshot_restore(envelope.target, envelope)
 
         state = self.load_runtime_state()
+        self._ensure_subject_core(state)
         before_state = RuntimeState(**to_dict(state))
         before_hash = self._state_hash(before_state)
         parts = envelope.canonical.split()
@@ -4767,65 +4992,95 @@ class RuntimeController:
         if envelope.domain == "safe" and envelope.verb == "on":
             state.safe_mode = True
             state.mode = "safe"
-            result = CommandResult(applied=True, scope="runtime", delta={"safe_mode": True, "mode": "safe"}, risk_note="reduces spontaneity", operator_level=operator_level, rollback_available=True)
+            result = self._mark_boundary_result(
+                CommandResult(applied=True, scope="runtime", delta={"safe_mode": True, "mode": "safe"}, risk_note="reduces spontaneity", operator_level=operator_level, rollback_available=True),
+                boundary_action="allow_internal",
+            )
         elif envelope.domain == "safe" and envelope.verb == "off":
             state.safe_mode = False
             state.mode = "interactive"
-            result = CommandResult(applied=True, scope="runtime", delta={"safe_mode": False, "mode": "interactive"}, risk_note="restores full runtime variability", operator_level=operator_level, rollback_available=True)
+            result = self._mark_boundary_result(
+                CommandResult(applied=True, scope="runtime", delta={"safe_mode": False, "mode": "interactive"}, risk_note="restores full runtime variability", operator_level=operator_level, rollback_available=True),
+                boundary_action="allow_internal",
+            )
         elif envelope.domain == "mode" and envelope.verb == "set":
             mode_name = str(envelope.parsed_args.get("mode", envelope.target or (parts[2] if len(parts) > 2 else "interactive")))
             state.mode = mode_name
             if mode_name != "safe":
                 state.safe_mode = False
-            result = CommandResult(applied=True, scope="runtime", delta={"mode": mode_name}, operator_level=operator_level, rollback_available=True)
+            result = self._mark_boundary_result(
+                CommandResult(applied=True, scope="runtime", delta={"mode": mode_name}, operator_level=operator_level, rollback_available=True),
+                boundary_action="allow_internal",
+            )
         elif envelope.domain == "agent" and envelope.verb == "disable":
             agent_name = str(envelope.parsed_args.get("agent_name", envelope.target))
             state.agents_enabled[agent_name] = False
-            result = CommandResult(applied=True, scope=agent_name, delta={"enabled": False}, ttl="until re-enabled", operator_level=operator_level, rollback_available=True)
+            result = self._mark_boundary_result(
+                CommandResult(applied=True, scope=agent_name, delta={"enabled": False}, ttl="until re-enabled", operator_level=operator_level, rollback_available=True),
+                boundary_action="allow_internal",
+            )
         elif envelope.domain == "agent" and envelope.verb == "enable":
             agent_name = str(envelope.parsed_args.get("agent_name", envelope.target))
             state.agents_enabled[agent_name] = True
-            result = CommandResult(applied=True, scope=agent_name, delta={"enabled": True}, ttl="until changed", operator_level=operator_level, rollback_available=True)
+            result = self._mark_boundary_result(
+                CommandResult(applied=True, scope=agent_name, delta={"enabled": True}, ttl="until changed", operator_level=operator_level, rollback_available=True),
+                boundary_action="allow_internal",
+            )
         elif envelope.domain == "body" and envelope.verb == "rest":
             state.body_energy = _clip(state.body_energy + 0.15)
-            result = CommandResult(applied=True, scope="body", delta={"body_energy": state.body_energy}, ttl="one round", operator_level=operator_level, rollback_available=True)
+            result = self._mark_boundary_result(
+                CommandResult(applied=True, scope="body", delta={"body_energy": state.body_energy}, ttl="one round", operator_level=operator_level, rollback_available=True),
+                boundary_action="downgrade_to_stimulus",
+                deprecation_warning=self._boundary_deprecation(envelope.canonical),
+            )
         elif envelope.domain == "mood" and envelope.verb == "calm":
             state.mood = _clip((state.mood + 0.65) / 2)
-            result = CommandResult(applied=True, scope="mood", delta={"mood": state.mood}, ttl="one round", operator_level=operator_level, rollback_available=True)
+            result = self._mark_boundary_result(
+                CommandResult(applied=True, scope="mood", delta={"mood": state.mood}, ttl="one round", operator_level=operator_level, rollback_available=True),
+                boundary_action="downgrade_to_stimulus",
+                deprecation_warning=self._boundary_deprecation(envelope.canonical),
+            )
         elif envelope.domain == "identity" and envelope.verb == "set-name":
-            name = str(envelope.parsed_args.get("name", " ".join(parts[2:])))
-            rename_event = self._set_identity_name(state, name, source_hint="user_seed", round_id=state.round_count)
-            result = CommandResult(
-                applied=rename_event is not None,
+            result = self._reject_boundary_command(
+                state,
                 scope="identity",
-                delta={
-                    "display_name": state.identity_state.display_name,
-                    "internal_handle": state.identity_state.internal_handle,
-                    "aliases": list(state.identity_state.aliases),
-                    "rename_event": rename_event,
-                },
-                ttl="until changed",
                 operator_level=operator_level,
-                rollback_available=True,
+                violation_code="identity_seed_locked",
+                risk_note="identity name can only be set during bootstrap seed or controlled migration",
             )
         elif envelope.domain == "debug" and envelope.verb == "weight":
             agent_name = str(envelope.parsed_args.get("agent_name", parts[2]))
             weight = float(envelope.parsed_args.get("weight", parts[3]))
             state.agent_weight_overrides[agent_name] = weight
-            result = CommandResult(applied=True, scope=agent_name, delta={"weight": weight}, ttl="until changed", operator_level=operator_level, rollback_available=True)
+            result = self._mark_boundary_result(
+                CommandResult(applied=True, scope=agent_name, delta={"weight": weight}, ttl="until changed", operator_level=operator_level, rollback_available=True),
+                boundary_action="allow_internal",
+            )
         elif envelope.domain == "nudge" and envelope.verb == "focus":
             delta = float(envelope.parsed_args.get("delta", envelope.target or parts[2]))
             state.focus_nudge = _clip(state.focus_nudge + delta, -0.5, 0.5)
-            result = CommandResult(applied=True, scope="focus", delta={"focus_nudge": state.focus_nudge}, ttl="until changed", operator_level=operator_level, rollback_available=True)
+            result = self._mark_boundary_result(
+                CommandResult(applied=True, scope="focus", delta={"focus_nudge": state.focus_nudge}, ttl="until changed", operator_level=operator_level, rollback_available=True),
+                boundary_action="downgrade_to_stimulus",
+                deprecation_warning=self._boundary_deprecation(envelope.canonical),
+            )
         elif envelope.domain == "nudge" and envelope.verb == "relation":
             target = str(envelope.parsed_args.get("relation_target", parts[2]))
             delta = float(envelope.parsed_args.get("delta", parts[4]))
             relation = self.memory_store.nudge_relation(target, delta)
-            result = CommandResult(applied=True, scope="relation", delta={"target": target, "closeness": relation["closeness"], "delta": delta}, ttl="until changed", operator_level=operator_level, rollback_available=True)
+            result = self._mark_boundary_result(
+                CommandResult(applied=True, scope="relation", delta={"target": target, "closeness": relation["closeness"], "delta": delta}, ttl="until changed", operator_level=operator_level, rollback_available=True),
+                boundary_action="proposal_route",
+                deprecation_warning=self._boundary_deprecation(envelope.canonical),
+            )
         elif envelope.domain == "habit" and envelope.verb == "reset":
             pattern = str(envelope.parsed_args.get("pattern", envelope.target or parts[2]))
             habit = self.memory_store.reset_habit(pattern)
-            result = CommandResult(applied=True, scope="habit", delta={"pattern": pattern, "strength": habit["strength"], "recoverable": habit.get("recoverable", True)}, ttl="until rebuilt by recurrence", operator_level=operator_level, rollback_available=True)
+            result = self._mark_boundary_result(
+                CommandResult(applied=True, scope="habit", delta={"pattern": pattern, "strength": habit["strength"], "recoverable": habit.get("recoverable", True)}, ttl="until rebuilt by recurrence", operator_level=operator_level, rollback_available=True),
+                boundary_action="proposal_route",
+                deprecation_warning=self._boundary_deprecation(envelope.canonical),
+            )
         elif envelope.domain == "budget" and envelope.verb == "set":
             raw_value = envelope.parsed_args.get("value")
             if raw_value is None:
@@ -4833,30 +5088,53 @@ class RuntimeController:
             cap_value, budget_remaining = self._parse_budget_cap(str(raw_value))
             state.budget_remaining = budget_remaining
             state.resource_state = {**state.resource_state, "budget_cap": cap_value}
-            result = CommandResult(applied=True, scope="resource", delta={"budget_remaining": budget_remaining, "budget_cap": cap_value}, ttl="until changed", operator_level=operator_level, rollback_available=True)
+            result = self._mark_boundary_result(
+                CommandResult(applied=True, scope="resource", delta={"budget_remaining": budget_remaining, "budget_cap": cap_value}, ttl="until changed", operator_level=operator_level, rollback_available=True),
+                boundary_action="downgrade_to_stimulus",
+                deprecation_warning=self._boundary_deprecation(envelope.canonical),
+            )
         elif envelope.domain == "suppress" and envelope.verb == "dmn":
             state.agents_enabled["DMNAgent"] = False
             ttl = str(envelope.parsed_args.get("ttl", parts[2] if len(parts) >= 3 else "temporary"))
-            result = CommandResult(applied=True, scope="DMNAgent", delta={"enabled": False}, ttl=ttl, operator_level=operator_level, rollback_available=True)
+            result = self._mark_boundary_result(
+                CommandResult(applied=True, scope="DMNAgent", delta={"enabled": False}, ttl=ttl, operator_level=operator_level, rollback_available=True),
+                boundary_action="allow_internal",
+            )
         elif envelope.domain == "checkpoint" and envelope.verb == "create":
             self.flush_pending_io(raise_on_error=True)
             checkpoint_id = f"ckpt-{state.round_count:04d}"
             path = self.checkpoint_dir / f"{checkpoint_id}.parquet"
             shutil.copyfile(self.state_parquet_path, path)
             state.last_checkpoint_id = checkpoint_id
-            result = CommandResult(applied=True, scope="checkpoint", delta={"checkpoint_id": checkpoint_id, "created": True}, operator_level=operator_level, rollback_available=True)
+            result = self._mark_boundary_result(
+                CommandResult(applied=True, scope="checkpoint", delta={"checkpoint_id": checkpoint_id, "created": True}, operator_level=operator_level, rollback_available=True),
+                boundary_action="allow_internal",
+            )
         elif envelope.domain == "checkpoint" and envelope.verb == "rewind":
             checkpoint_id = str(envelope.parsed_args.get("checkpoint_id", envelope.target or parts[2]))
             checkpoint_path = self.checkpoint_dir / f"{checkpoint_id}.parquet"
             if not checkpoint_path.exists():
-                result = CommandResult(applied=False, scope="checkpoint", delta={"checkpoint_id": checkpoint_id, "restored": False}, risk_note="checkpoint not found", operator_level=operator_level, rollback_available=False)
+                result = self._mark_boundary_result(
+                    CommandResult(applied=False, scope="checkpoint", delta={"checkpoint_id": checkpoint_id, "restored": False}, risk_note="checkpoint not found", operator_level=operator_level, rollback_available=False),
+                    boundary_action="allow_internal",
+                )
             else:
                 self.flush_pending_io(raise_on_error=True)
                 shutil.copyfile(checkpoint_path, self.state_parquet_path)
                 rows = read_snapshot_rows(self.state_parquet_path, "select payload_json from read_parquet(?)")
-                self._state_cache = RuntimeState(**json.loads(rows[0]["payload_json"]))
+                restored_state = RuntimeState(**json.loads(rows[0]["payload_json"]))
+                restored_state, violation_code = self._preserve_subject_core_on_restore(
+                    before_state,
+                    restored_state,
+                    violation_code="subject_core_violation",
+                )
+                self._save_state(restored_state, sync=True)
                 state = self.load_runtime_state()
-                result = CommandResult(applied=True, scope="checkpoint", delta={"checkpoint_id": checkpoint_id, "restored": True, "safe_mode": state.safe_mode, "mode": state.mode}, operator_level=operator_level, rollback_available=True)
+                result = self._mark_boundary_result(
+                    CommandResult(applied=True, scope="checkpoint", delta={"checkpoint_id": checkpoint_id, "restored": True, "safe_mode": state.safe_mode, "mode": state.mode}, operator_level=operator_level, rollback_available=True),
+                    boundary_action="allow_internal",
+                    violation_code=violation_code,
+                )
         else:
             raise ValueError(f"unsupported mutable command: {envelope.canonical}")
 
@@ -4968,6 +5246,7 @@ class RuntimeController:
         self.flush_pending_io(raise_on_error=False)
         state = self.load_runtime_state()
         payload = to_dict(state)
+        payload["subjectivity"] = self._subjectivity_metrics()
         payload["trace_storage"] = self._trace_storage_payload()
         payload["memory_storage"] = self.memory_store.storage_status()
         payload["runtime_storage"] = self.runtime_storage_status()
@@ -5756,6 +6035,13 @@ class RuntimeController:
 
     def metrics_summary(self) -> dict[str, Any]:
         payload = self.long_run_analyzer.metrics_summary()
+        payload.update(
+            {
+                "boundary_violation_count": self._subjectivity_metrics()["boundary_violation_count"],
+                "external_to_internal_ratio": self._subjectivity_metrics()["external_to_internal_ratio"],
+                "endogenous_intent_rate": self._subjectivity_metrics()["endogenous_intent_rate"],
+            }
+        )
         payload["storage"] = self._trace_storage_payload()
         return payload
 
@@ -6065,9 +6351,11 @@ class RuntimeController:
                     "mode": row["mode"],
                     "budget_remaining": row.get("state_snapshot", {}).get("budget_remaining"),
                     "conflict_score": row.get("distribution_state", {}).get("conflict", {}).get("total_score", 0.0),
+                    "cause_type": row.get("cause_type", "external_stimulus"),
                 }
                 for row in rounds
             ],
+            "subjectivity": self._subjectivity_metrics(),
             "storage": self._trace_storage_payload(),
         }
 

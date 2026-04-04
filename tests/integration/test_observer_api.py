@@ -91,7 +91,9 @@ def test_observer_exposes_model_status(tmp_path):
     assert response.status_code == 200
     payload = response.json()
     assert payload["tiers"]["small_model"]["model"] == "ep-20260404191810-qfn7s"
+    assert payload["tiers"]["medium_model"]["model"] == "deepseek-chat"
     assert payload["agent_bindings"]["SalienceAgent"] == "small_model"
+    assert payload["agent_bindings"]["planner"] == "medium_model"
     assert "chat_fast" in payload["routes"]
 
 

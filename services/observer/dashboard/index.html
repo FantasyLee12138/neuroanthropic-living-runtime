@@ -199,7 +199,7 @@
         const root = document.getElementById("models");
         const tiers = modelStatus.tiers || {};
         const bindings = modelStatus.agent_bindings || {};
-        const tierRows = ["state_machine", "small_model", "large_model"].map((tierName) => {
+        const tierRows = Object.keys(tiers).map((tierName) => {
           const tier = tiers[tierName] || {};
           const label = tier.mode === "local"
             ? "local"

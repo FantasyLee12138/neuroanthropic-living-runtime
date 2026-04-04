@@ -513,7 +513,7 @@ class TerminalEventHandler:
         tiers = dict(model_status.get("tiers", {}))
         bindings = dict(model_status.get("agent_bindings", {}))
         rows = ["模型分层："]
-        for tier_name in ("state_machine", "small_model", "large_model"):
+        for tier_name in tiers:
             tier = dict(tiers.get(tier_name, {}))
             mode = str(tier.get("mode", "unknown"))
             if mode == "local":
@@ -621,9 +621,11 @@ class TerminalEventHandler:
         model_status = self.controller.model_status()
         tiers = dict(model_status.get("tiers", {}))
         small = dict(tiers.get("small_model", {}))
+        medium = dict(tiers.get("medium_model", {}))
         large = dict(tiers.get("large_model", {}))
         return (
             f"small:{small.get('model') or 'off'} "
+            f"medium:{medium.get('model') or 'off'} "
             f"large:{large.get('model') or 'off'}"
         )
 

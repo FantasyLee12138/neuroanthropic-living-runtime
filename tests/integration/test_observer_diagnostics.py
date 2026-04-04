@@ -86,7 +86,7 @@ def test_observer_conflict_timeline_includes_repair_visibility(tmp_path):
 
 def test_observer_exposes_identity_and_authenticity_metrics(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
-    controller.apply_command("identity set-name 阿澜")
+    controller.seed_identity_name("阿澜")
     controller.tick(
         RoundEvent(
             source="user",

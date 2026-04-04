@@ -72,6 +72,14 @@ model_tiers:
     timeout_ms: 12000
     retries: 0
     api_key_env: ARK_SMALL_MODEL_API_KEY
+  medium_model:
+    mode: remote
+    backend: deepseek
+    base_url: https://api.deepseek.com
+    model: deepseek-chat
+    timeout_ms: 12000
+    retries: 0
+    api_key_env: DEEPSEEK_API_KEY
   large_model:
     mode: remote
     backend: doubao
@@ -81,9 +89,9 @@ model_tiers:
     retries: 0
     api_key_env: ARK_API_KEY
 agent_model_bindings:
-  planner: large_model
+  planner: medium_model
   PFCAgent: large_model
-  PerspectiveModel: large_model
+  PerspectiveModel: medium_model
   Renderer: large_model
   SalienceAgent: small_model
   ValueAgent: small_model

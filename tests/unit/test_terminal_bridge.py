@@ -231,11 +231,14 @@ def test_model_control_command_reports_tiers_and_bindings(tmp_path):
     snapshot_event = next(item for item in events if item["type"] == "sidebar_snapshot")
 
     assert "small_model" in final_event["message"]
+    assert "medium_model" in final_event["message"]
     assert "large_model" in final_event["message"]
     assert "SalienceAgent -> small_model" in final_event["message"]
+    assert "PerspectiveModel -> medium_model" in final_event["message"]
     assert "Renderer -> large_model" in final_event["message"]
     assert "model_status" in snapshot_event
     assert snapshot_event["model_status"]["tiers"]["small_model"]["model"] == "ep-20260404191810-qfn7s"
+    assert snapshot_event["model_status"]["tiers"]["medium_model"]["model"] == "deepseek-chat"
 
 
 def test_control_command_mode_permissions_state_and_compact(tmp_path):

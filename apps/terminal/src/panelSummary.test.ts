@@ -95,6 +95,13 @@ describe("formatPanelBody", () => {
               api_key_env: "ARK_SMALL_MODEL_API_KEY",
               credential_present: true
             },
+            medium_model: {
+              mode: "remote",
+              backend: "deepseek",
+              model: "deepseek-chat",
+              api_key_env: "DEEPSEEK_API_KEY",
+              credential_present: true
+            },
             large_model: {
               mode: "remote",
               backend: "doubao",
@@ -106,8 +113,10 @@ describe("formatPanelBody", () => {
           agent_bindings: {
             SalienceAgent: "small_model",
             ValueAgent: "small_model",
+            PerspectiveModel: "medium_model",
             PFCAgent: "large_model",
-            Renderer: "large_model"
+            Renderer: "large_model",
+            planner: "medium_model"
           }
         },
         cognitiveSnapshot: {
@@ -149,8 +158,10 @@ describe("formatPanelBody", () => {
     expect(summary).toContain("连续性：名称与身份连续性稳定");
     expect(summary).toContain("模型分层");
     expect(summary).toContain("small_model：doubao / ep-20260404191810-qfn7s");
+    expect(summary).toContain("medium_model：deepseek / deepseek-chat");
     expect(summary).toContain("large_model：doubao / doubao-seed-2-0-pro-260215");
     expect(summary).toContain("SalienceAgent -> small_model");
+    expect(summary).toContain("PerspectiveModel -> medium_model");
     expect(summary).toContain("真实性");
     expect(summary).toContain("还没有足够证据判断这轮真实感");
     expect(summary).not.toContain("权限模式：ask");

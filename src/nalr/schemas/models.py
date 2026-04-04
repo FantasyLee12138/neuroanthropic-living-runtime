@@ -149,6 +149,8 @@ class RoundTrace:
     recorded_at: str
     recorded_date: str
     round_id: int
+    subject_id: str
+    continuity_nonce: str
     scenario: str
     mode: str
     sampled_action: str
@@ -156,6 +158,10 @@ class RoundTrace:
     top_drivers: list[AgentContribution]
     style_profile: dict[str, Any]
     state_snapshot: dict[str, Any]
+    cause_type: str = "external_stimulus"
+    boundary_action: str = "allow_internal"
+    violation_code: str = ""
+    deprecation_warning: str = ""
     pipeline_stages: list[str] = field(default_factory=list)
     proposal_summaries: list[dict[str, Any]] = field(default_factory=list)
     gate_decisions: list[dict[str, Any]] = field(default_factory=list)
@@ -251,6 +257,15 @@ class HealthEvent:
     event: str
     status: str
     detail: str
+
+
+@dataclass
+class SubjectCore:
+    subject_id: str = ""
+    birth_ts: str = ""
+    continuity_nonce: str = ""
+    original_vitality_anchor: dict[str, Any] = field(default_factory=dict)
+    core_boundary_version: int = 1
 
 
 @dataclass
@@ -505,6 +520,7 @@ class ConflictRepairState:
 @dataclass
 class RuntimeState:
     session_id: str = field(default_factory=lambda: uuid4().hex)
+    subject_core: SubjectCore = field(default_factory=SubjectCore)
     mode: str = "interactive"
     safe_mode: bool = False
     round_count: int = 0
@@ -538,6 +554,7 @@ class RuntimeState:
     last_entropy_failure: dict[str, Any] = field(default_factory=dict)
     session_metadata: dict[str, Any] = field(default_factory=dict)
     identity_state: IdentityState = field(default_factory=IdentityState)
+    endogenous_state: dict[str, Any] = field(default_factory=dict)
     active_run_id: str | None = None
     run_status: str = "idle"
     run_mode: str | None = None
@@ -551,6 +568,8 @@ class RuntimeState:
     commit_permission_required: bool = True
 
     def __post_init__(self) -> None:
+        if isinstance(self.subject_core, dict):
+            self.subject_core = SubjectCore(**self.subject_core)
         if isinstance(self.identity_state, dict):
             self.identity_state = IdentityState(**self.identity_state)
         self.identity_state.aliases = sanitize_identity_aliases(self.identity_state.aliases)
@@ -575,6 +594,12 @@ class RuntimeState:
         ]
         if not self.identity_state.internal_handle:
             self.identity_state.internal_handle = f"nalr-{self.session_id[:8]}"
+        if not isinstance(self.endogenous_state, dict):
+            self.endogenous_state = {}
+        self.endogenous_state.setdefault("current_intent", None)
+        self.endogenous_state.setdefault("stability", 0)
+        self.endogenous_state.setdefault("history", [])
+        self.endogenous_state.setdefault("last_trigger", "")
 
 
 @dataclass

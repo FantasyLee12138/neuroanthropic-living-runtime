@@ -126,6 +126,12 @@ COMMAND_TRACE_SCHEMA = {
     "rollback_json": "VARCHAR",
     "before_state_hash": "VARCHAR",
     "after_state_hash": "VARCHAR",
+    "subject_id": "VARCHAR",
+    "continuity_nonce": "VARCHAR",
+    "cause_type": "VARCHAR",
+    "boundary_action": "VARCHAR",
+    "violation_code": "VARCHAR",
+    "deprecation_warning": "VARCHAR",
 }
 
 REPAIR_LEDGER_SCHEMA = {
@@ -395,6 +401,12 @@ class TraceStore:
                         "rollback_json": json.dumps(row.get("rollback", {}), ensure_ascii=False, sort_keys=True),
                         "before_state_hash": row.get("before_state_hash"),
                         "after_state_hash": row.get("after_state_hash"),
+                        "subject_id": row.get("subject_id"),
+                        "continuity_nonce": row.get("continuity_nonce"),
+                        "cause_type": row.get("cause_type"),
+                        "boundary_action": row.get("boundary_action"),
+                        "violation_code": row.get("violation_code"),
+                        "deprecation_warning": row.get("deprecation_warning"),
                     }],
                     schema=COMMAND_TRACE_SCHEMA,
                 )
@@ -504,6 +516,9 @@ class TraceStore:
                 payload = ensure_recorded_fields(payload, recorded_at=_mtime_iso(path))
             traces.append(payload)
         return traces
+
+    def list_commands(self) -> list[dict]:
+        return [copy.deepcopy(item) for item in self._command_cache]
 
     def write_run(
         self,
@@ -664,6 +679,12 @@ class TraceStore:
             "rollback": result.rollback,
             "before_state_hash": before_state_hash,
             "after_state_hash": after_state_hash,
+            "subject_id": result.subject_id,
+            "continuity_nonce": result.continuity_nonce,
+            "cause_type": result.cause_type,
+            "boundary_action": result.boundary_action,
+            "violation_code": result.violation_code,
+            "deprecation_warning": result.deprecation_warning,
         }
         self._command_cache.append(copy.deepcopy(entry))
 
@@ -709,6 +730,12 @@ class TraceStore:
                         "rollback_json": json.dumps(entry.get("rollback", {}), ensure_ascii=False, sort_keys=True),
                         "before_state_hash": entry.get("before_state_hash"),
                         "after_state_hash": entry.get("after_state_hash"),
+                        "subject_id": entry.get("subject_id"),
+                        "continuity_nonce": entry.get("continuity_nonce"),
+                        "cause_type": entry.get("cause_type"),
+                        "boundary_action": entry.get("boundary_action"),
+                        "violation_code": entry.get("violation_code"),
+                        "deprecation_warning": entry.get("deprecation_warning"),
                     }
                 ],
                 schema=COMMAND_TRACE_SCHEMA,
