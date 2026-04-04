@@ -5,7 +5,7 @@ from typing import Any
 
 from nalr.runtime.controller import RuntimeController
 from nalr.runtime.metadata import utc_now_iso
-from nalr.schemas.models import RoundEvent, to_dict
+from nalr.schemas.models import to_dict
 from nalr.terminal_bridge.protocol import ProtocolError, build_outbound_event, validate_inbound_event
 from nalr.terminal_bridge.session import TerminalSessionState, TerminalSessionStore
 
@@ -54,41 +54,40 @@ class TerminalEventHandler:
 
     def _user_turn_stream(self, session_id: str, text: str) -> Iterable[dict[str, Any]]:
         session = self._load_session(session_id)
-        if self._turn_kind(text) == "direct_chat":
-            result = self.controller.tick(
-                RoundEvent(source="user", content=text.strip(), target="user"),
-                scenario="chat",
-                mode="interactive",
-            )
-            session.status = "active"
-            self.session_store.write(session)
-            yield build_outbound_event(
-                "assistant_final",
-                session_id=session_id,
-                message=result.rendered_expression.text.strip() or "你好，我在。你想让我帮你做什么？",
-            )
-            return
-
-        run = self.controller.start_run(
-            text,
+        plan = self.controller.plan_turn(
+            text.strip(),
+            target="user",
+            mode="interactive",
+            operator_level="read_only",
+        )
+        execution = self.controller.execute_turn(
+            plan,
             operator_level="read_only",
             replace_active=True,
             interrupt_reason="interrupted_by_user",
         )
+
+        route = execution["route"] if isinstance(execution, dict) else execution.route
+        if route == "direct_chat":
+            yield build_outbound_event(
+                "assistant_final",
+                session_id=session_id,
+                message=(execution["assistant_final"] if isinstance(execution, dict) else execution.assistant_final),
+            )
+            return
+
+        run = execution["run"] if isinstance(execution, dict) else execution.run
+        explain = execution["explain"] if isinstance(execution, dict) else execution.explain
+        steps = execution["steps"] if isinstance(execution, dict) else execution.steps
+        tools = execution["tools"] if isinstance(execution, dict) else execution.tools
+        task_message = execution["assistant_preamble"] if isinstance(execution, dict) else execution.assistant_preamble
         session.active_run_id = run["run_id"]
         session.last_run_id = run["run_id"]
         session.status = "active"
         self.session_store.write(session)
-        task_message = self._task_run_message(run)
         yield build_outbound_event("run_status", session_id=session_id, run=run)
         yield build_outbound_event("assistant_token", session_id=session_id, delta=task_message)
-
-        explain = self.controller.explain_run(run["run_id"])
-        steps = self.controller.run_steps(run["run_id"])["steps"]
-        tools = self.controller.run_tools(run["run_id"])["tools"]
         pending_approvals = [item for item in session.approvals_pending if item.get("status") == "pending"]
-        session.approvals_pending = pending_approvals
-        self.session_store.write(session)
         for step in steps:
             yield build_outbound_event("step_update", session_id=session_id, step=step)
         for index, tool in enumerate(tools):
@@ -144,7 +143,7 @@ class TerminalEventHandler:
             "assistant_final",
             session_id=session_id,
             run_id=run["run_id"],
-            message=task_message,
+            message=(execution["assistant_final"] if isinstance(execution, dict) else execution.assistant_final),
             payload=explain,
         )
 
@@ -347,17 +346,6 @@ class TerminalEventHandler:
         session.status = "ended"
         self.session_store.write(session)
         return [build_outbound_event("session_ended", session=to_dict(session))]
-
-    def _turn_kind(self, text: str) -> str:
-        normalized = text.strip()
-        if not normalized:
-            return "direct_chat"
-        return self.controller.probe_terminal_route(normalized)["route"]
-
-    def _task_run_message(self, run_payload: dict[str, Any]) -> str:
-        if run_payload.get("status") == "paused" and run_payload.get("dirty_worktree_detected"):
-            return "任务已建立，但当前处于暂停状态。可用 /status /why 查看原因。"
-        return "已进入只读任务处理。可用 /status /why /steps /tools 查看进度。"
 
     def _status_summary(self, run_payload: dict[str, Any]) -> str:
         current_step = run_payload.get("current_step") or {}

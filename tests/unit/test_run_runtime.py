@@ -50,3 +50,35 @@ def test_run_lifecycle_supports_pause_resume_and_abort(tmp_path):
     assert resumed["status"] == "running"
     assert aborted["status"] == "aborted"
     assert aborted["stop_reason"]["code"] == "operator_requested"
+
+
+def test_start_run_does_not_force_sync_trace_writes_on_hot_path(tmp_path, monkeypatch):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "worker.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    sync_flags: list[tuple[str, bool]] = []
+
+    original_write_run = controller.trace_store.write_run
+    original_append_step = controller.trace_store.append_step_trace
+    original_append_tool = controller.trace_store.append_tool_trace
+
+    def tracked_write_run(payload, *, session_id, recorded_at=None, sync=False):
+        sync_flags.append(("run", sync))
+        return original_write_run(payload, session_id=session_id, recorded_at=recorded_at, sync=sync)
+
+    def tracked_append_step(payload, *, session_id, recorded_at=None, sync=False):
+        sync_flags.append(("step", sync))
+        return original_append_step(payload, session_id=session_id, recorded_at=recorded_at, sync=sync)
+
+    def tracked_append_tool(payload, *, session_id, recorded_at=None, recorded_at_unused=None, sync=False):
+        sync_flags.append(("tool", sync))
+        return original_append_tool(payload, session_id=session_id, recorded_at=recorded_at, sync=sync)
+
+    monkeypatch.setattr(controller.trace_store, "write_run", tracked_write_run)
+    monkeypatch.setattr(controller.trace_store, "append_step_trace", tracked_append_step)
+    monkeypatch.setattr(controller.trace_store, "append_tool_trace", tracked_append_tool)
+
+    controller.start_run("检查 worker.py")
+
+    assert sync_flags == [("run", False), ("step", False), ("tool", False)]

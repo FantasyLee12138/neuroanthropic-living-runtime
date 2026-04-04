@@ -137,6 +137,7 @@ REPAIR_LEDGER_SCHEMA = {
     "winning_priority": "VARCHAR",
     "template": "VARCHAR",
     "repair_stage_after": "VARCHAR",
+    "conflict_score": "DOUBLE",
     "payload_json": "VARCHAR",
 }
 
@@ -409,6 +410,7 @@ class TraceStore:
                         "winning_priority": row.get("winning_priority"),
                         "template": row.get("template"),
                         "repair_stage_after": row.get("repair_stage_after"),
+                        "conflict_score": row.get("conflict_score", 0.0),
                         "payload_json": self._payload_json(row),
                     }],
                     schema=REPAIR_LEDGER_SCHEMA,
@@ -737,6 +739,7 @@ class TraceStore:
                         "winning_priority": entry.get("winning_priority"),
                         "template": entry.get("template"),
                         "repair_stage_after": entry.get("repair_stage_after"),
+                        "conflict_score": entry.get("conflict_score", 0.0),
                         "payload_json": self._payload_json(entry),
                     }
                 ],

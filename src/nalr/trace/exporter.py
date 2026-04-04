@@ -114,6 +114,7 @@ REPAIR_LEDGER_SCHEMA = {
     "winning_priority": "VARCHAR",
     "template": "VARCHAR",
     "repair_stage_after": "VARCHAR",
+    "conflict_score": "DOUBLE",
     "payload_json": "VARCHAR",
 }
 
@@ -176,8 +177,7 @@ class TraceExporter:
 
     def _canonical_round_rows(self, *, since_round: int | None) -> list[dict]:
         rows: list[dict] = []
-        for path in sorted(self.store.rounds_dir.glob("round_*.json")):
-            payload = ensure_recorded_fields(json.loads(path.read_text(encoding="utf-8")), recorded_at=_mtime_iso(path))
+        for payload in self.store.list_rounds():
             if since_round is not None and payload.get("round_id", 0) < since_round:
                 continue
             rows.append(
@@ -193,8 +193,7 @@ class TraceExporter:
 
     def _flatten_round_rows(self, *, since_round: int | None) -> list[dict]:
         rows: list[dict] = []
-        for path in sorted(self.store.rounds_dir.glob("round_*.json")):
-            payload = ensure_recorded_fields(json.loads(path.read_text(encoding="utf-8")), recorded_at=_mtime_iso(path))
+        for payload in self.store.list_rounds():
             if since_round is not None and payload.get("round_id", 0) < since_round:
                 continue
             summaries = payload.get("proposal_summaries", [])
@@ -235,7 +234,7 @@ class TraceExporter:
 
     def _flatten_skill_rows(self, *, since_round: int | None) -> list[dict]:
         rows = []
-        for row in self.store._read_jsonl(self.store.skill_jsonl_path):
+        for row in self.store.list_skill_traces():
             if since_round is not None and row.get("round_id", 0) < since_round:
                 continue
             rows.append(
@@ -259,7 +258,7 @@ class TraceExporter:
 
     def _canonical_skill_rows(self, *, since_round: int | None) -> list[dict]:
         rows = []
-        for row in self.store._read_jsonl(self.store.skill_jsonl_path):
+        for row in self.store.list_skill_traces():
             if since_round is not None and row.get("round_id", 0) < since_round:
                 continue
             rows.append(
@@ -276,7 +275,7 @@ class TraceExporter:
 
     def _flatten_command_rows(self) -> list[dict]:
         rows = []
-        for row in self.store._read_jsonl(self.store.commands_jsonl_path):
+        for row in self.store.list_command_traces():
             rows.append(
                 {
                     "session_id": row.get("session_id", "legacy"),
@@ -306,7 +305,7 @@ class TraceExporter:
 
     def _canonical_command_rows(self) -> list[dict]:
         rows = []
-        for row in self.store._read_jsonl(self.store.commands_jsonl_path):
+        for row in self.store.list_command_traces():
             rows.append(
                 {
                     "session_id": row.get("session_id", "legacy"),
@@ -320,7 +319,7 @@ class TraceExporter:
 
     def _canonical_repair_rows(self) -> list[dict]:
         rows = []
-        for row in self.store._read_jsonl(self.store.repair_jsonl_path):
+        for row in self.store.list_repair_entries():
             rows.append(
                 {
                     "session_id": row.get("session_id", "legacy"),
@@ -331,6 +330,7 @@ class TraceExporter:
                     "winning_priority": row.get("winning_priority"),
                     "template": row.get("template"),
                     "repair_stage_after": row.get("repair_stage_after"),
+                    "conflict_score": row.get("conflict_score", 0.0),
                     "payload_json": _json_blob(row),
                 }
             )
