@@ -7,6 +7,16 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
 from nalr.runtime.controller import RuntimeController
+from nalr.trace.probability_field import (
+    build_conflict_timeline,
+    build_contributions_view,
+    build_heatmap_view,
+    build_probability_field,
+    build_replay_view,
+    build_trace_view,
+    build_why_not_view,
+    build_why_view,
+)
 from nalr.terminal_bridge.session import TerminalSessionStore
 
 
@@ -16,6 +26,28 @@ def create_app(project_root: Path | str | None = None, config_root: Path | str |
     controller = RuntimeController(project_root=project_root_path, config_root=effective_config_root)
     terminal_sessions = TerminalSessionStore(controller.runtime_dir)
     app = FastAPI(title="NALR Observer", version="0.1.0")
+
+    def _trace_storage_payload(read_source: str | None = None) -> dict:
+        payload = dict(controller.trace_store.trace_storage_status())
+        if read_source is not None:
+            payload["read_source"] = read_source
+        return payload
+
+    def _load_round(round_id: int) -> tuple[dict, str]:
+        try:
+            return controller.trace_store.read_round_record(round_id)
+        except FileNotFoundError:
+            trace = controller.trace_round(round_id)
+            storage = trace.get("storage", {})
+            return trace, str(storage.get("read_source", "unknown"))
+
+    def _probability_field_payload(round_id: int) -> dict:
+        trace, read_source = _load_round(round_id)
+        payload = build_probability_field(trace)
+        payload["round_id"] = trace.get("round_id", round_id)
+        payload["sampled_action"] = trace.get("sampled_action")
+        payload["storage"] = _trace_storage_payload(read_source)
+        return payload
 
     @app.get("/state")
     async def state() -> dict:
@@ -69,21 +101,44 @@ def create_app(project_root: Path | str | None = None, config_root: Path | str |
     @app.get("/trace/{round_id}")
     async def trace(round_id: int) -> dict:
         try:
-            return controller.trace_round(round_id)
+            trace, read_source = _load_round(round_id)
+            payload = build_trace_view(trace)
+            payload["storage"] = _trace_storage_payload(read_source)
+            return payload
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/probability-field/{round_id}")
+    async def probability_field(round_id: int) -> dict:
+        try:
+            return _probability_field_payload(round_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/trace/{round_id}/probability-field")
+    async def probability_field_trace(round_id: int) -> dict:
+        try:
+            return _probability_field_payload(round_id)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/why/{round_id}")
     async def why(round_id: int) -> dict:
         try:
-            return controller.why_this(round_id)
+            trace, read_source = _load_round(round_id)
+            payload = build_why_view(trace)
+            payload["storage"] = _trace_storage_payload(read_source)
+            return payload
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/contributions/{round_id}")
     async def contributions(round_id: int) -> dict:
         try:
-            return controller.contribution_breakdown(round_id)
+            trace, read_source = _load_round(round_id)
+            payload = build_contributions_view(trace)
+            payload["storage"] = _trace_storage_payload(read_source)
+            return payload
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -102,6 +157,10 @@ def create_app(project_root: Path | str | None = None, config_root: Path | str |
     @app.get("/metrics/summary")
     async def metrics_summary() -> dict:
         return controller.metrics_summary()
+
+    @app.get("/probability-field/summary")
+    async def probability_field_summary() -> dict:
+        return controller.probability_field_summary()
 
     @app.get("/metrics/authenticity")
     async def authenticity_metrics() -> dict:
@@ -147,7 +206,9 @@ def create_app(project_root: Path | str | None = None, config_root: Path | str |
 
     @app.get("/metrics/conflicts")
     async def conflict_timeline() -> dict:
-        return controller.conflict_timeline()
+        payload = build_conflict_timeline(controller.trace_store.list_rounds())
+        payload["storage"] = _trace_storage_payload()
+        return payload
 
     @app.get("/metrics/entropy")
     async def entropy_metrics() -> dict:
@@ -167,7 +228,13 @@ def create_app(project_root: Path | str | None = None, config_root: Path | str |
 
     @app.get("/metrics/heatmap")
     async def metrics_heatmap() -> dict:
-        return controller.metrics_heatmap()
+        payload = build_heatmap_view(controller.trace_store.list_rounds())
+        payload["storage"] = _trace_storage_payload()
+        return payload
+
+    @app.get("/metrics/probability-field")
+    async def probability_field_metrics() -> dict:
+        return controller.probability_field_summary()
 
     @app.get("/diagnostics/state-delta")
     async def state_delta(window: int = 20) -> dict:
@@ -199,14 +266,30 @@ def create_app(project_root: Path | str | None = None, config_root: Path | str |
     @app.get("/replay/{round_id}")
     async def replay(round_id: int, seed: int = 0) -> dict:
         try:
-            return controller.replay(round_id, seed=seed)
+            trace, read_source = _load_round(round_id)
+            payload = build_replay_view(trace, seed=seed)
+            payload["storage"] = _trace_storage_payload(read_source)
+            return payload
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/counterfactual/{round_id}")
+    async def counterfactual(round_id: int, seed: int = 0) -> dict:
+        try:
+            trace, read_source = _load_round(round_id)
+            payload = build_replay_view(trace, seed=seed)
+            payload["storage"] = _trace_storage_payload(read_source)
+            return payload
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/why-not/{round_id}/{action}")
     async def why_not(round_id: int, action: str) -> dict:
         try:
-            return controller.why_not(round_id, action)
+            trace, read_source = _load_round(round_id)
+            payload = build_why_not_view(trace, action)
+            payload["storage"] = _trace_storage_payload(read_source)
+            return payload
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

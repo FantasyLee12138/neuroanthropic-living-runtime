@@ -277,3 +277,41 @@ def test_observer_state_and_metrics_expose_subjectivity_boundary_metrics(tmp_pat
     assert "endogenous_intent_rate" in metrics_response.json()
     assert "subjectivity" in timeline_response.json()
     assert "subject_id" in trace_response.json()
+
+
+def test_observer_probability_field_routes_expose_canonical_field_shape(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="Plan dinner and remember rice.",
+            target="user",
+            cue="rice",
+            valence=0.15,
+        ),
+        scenario="task",
+        mode="interactive",
+    )
+    controller.flush_pending_io(raise_on_error=True)
+
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+
+    probability_field_response = client.get("/probability-field/1")
+    trace_probability_field_response = client.get("/trace/1/probability-field")
+
+    assert probability_field_response.status_code == 200
+    assert trace_probability_field_response.status_code == 200
+    probability_field = probability_field_response.json()
+    trace_probability_field = trace_probability_field_response.json()
+
+    assert probability_field["round_id"] == 1
+    assert trace_probability_field["round_id"] == 1
+    assert probability_field["schema_version"] == "v0.57/probability-field"
+    assert trace_probability_field["schema_version"] == "v0.57/probability-field"
+    assert "probability_field" not in probability_field
+    assert "probability_field" not in trace_probability_field
+    assert probability_field["guard"]["soft_penalty"] >= 0.0
+    assert "hard_block" in probability_field["guard"]
+    assert trace_probability_field["guard"]["soft_penalty"] >= 0.0
+    assert "hard_block" in trace_probability_field["guard"]
+    assert probability_field["storage"]["read_source"] == "parquet"

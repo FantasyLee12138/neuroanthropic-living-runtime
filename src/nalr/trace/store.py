@@ -11,6 +11,7 @@ import duckdb
 from nalr.runtime.async_io import AsyncIOWorker
 from nalr.runtime.metadata import ensure_recorded_fields, iso_date, utc_now_iso
 from nalr.schemas.models import CommandResult, RoundTrace, to_dict
+from nalr.trace.probability_field import flatten_probability_rows, normalize_probability_trace
 from nalr.storage.parquet_io import append_dataset, read_dataset_rows
 
 
@@ -34,20 +35,41 @@ ROUND_TRACE_SCHEMA = {
     "scenario": "VARCHAR",
     "mode": "VARCHAR",
     "sampled_action": "VARCHAR",
+    "contribution_index": "BIGINT",
     "stage": "VARCHAR",
+    "layer": "VARCHAR",
     "agent_name": "VARCHAR",
+    "module_name": "VARCHAR",
     "action": "VARCHAR",
+    "target_name": "VARCHAR",
     "top_action": "VARCHAR",
     "selected": "BOOLEAN",
     "confidence": "DOUBLE",
     "sigma_scale": "DOUBLE",
     "weight_applied": "DOUBLE",
     "delta_p": "DOUBLE",
+    "delta_logits_json": "VARCHAR",
+    "delta_energy_json": "VARCHAR",
+    "attention_bias_json": "VARCHAR",
+    "soft_mask_json": "VARCHAR",
+    "hard_mask_json": "VARCHAR",
+    "posterior_json": "VARCHAR",
+    "counterfactual_json": "VARCHAR",
+    "probability_field_json": "VARCHAR",
+    "context_attn_json": "VARCHAR",
+    "memory_prior_json": "VARCHAR",
+    "action_logits_json": "VARCHAR",
+    "token_logits_json": "VARCHAR",
+    "winner_posterior_json": "VARCHAR",
+    "counterfactual_top_peaks_json": "VARCHAR",
     "resample_count": "BIGINT",
     "resample_idx": "BIGINT",
     "conflict_score": "DOUBLE",
     "plausibility_fail_score": "DOUBLE",
     "tags_json": "VARCHAR",
+    "trace_reason": "VARCHAR",
+    "peak_id": "VARCHAR",
+    "suppression_cause": "VARCHAR",
     "distribution_state_json": "VARCHAR",
     "state_snapshot_json": "VARCHAR",
     "render_plan_json": "VARCHAR",
@@ -211,7 +233,7 @@ class TraceStore:
         if parquet_rows:
             return parquet_rows
         return [
-            ensure_recorded_fields(json.loads(path.read_text(encoding="utf-8")), recorded_at=_mtime_iso(path))
+            normalize_probability_trace(ensure_recorded_fields(json.loads(path.read_text(encoding="utf-8")), recorded_at=_mtime_iso(path)))
             for path in sorted(self.rounds_dir.glob("round_*.json"))
         ]
 
@@ -253,41 +275,7 @@ class TraceStore:
         ]
 
     def _round_trace_rows(self, payload: dict) -> list[dict]:
-        rows: list[dict] = []
-        for summary in payload.get("proposal_summaries", []):
-            delta_map = summary.get("delta_p", {}) or {summary.get("top_action") or "unknown": None}
-            for action_name, delta_value in delta_map.items():
-                rows.append(
-                    {
-                        "session_id": payload["session_id"],
-                        "recorded_at": payload["recorded_at"],
-                        "recorded_date": payload["recorded_date"],
-                        "round_id": payload.get("round_id"),
-                        "scenario": payload.get("scenario"),
-                        "mode": payload.get("mode"),
-                        "sampled_action": payload.get("sampled_action"),
-                        "stage": summary.get("stage"),
-                        "agent_name": summary.get("agent_name"),
-                        "action": action_name,
-                        "top_action": summary.get("top_action"),
-                        "selected": summary.get("selected"),
-                        "confidence": summary.get("confidence"),
-                        "sigma_scale": summary.get("sigma_scale"),
-                        "weight_applied": summary.get("weight_applied"),
-                        "delta_p": delta_value,
-                        "resample_count": payload.get("resample_count", 0),
-                        "resample_idx": summary.get("resample_idx", 0),
-                        "conflict_score": summary.get("conflict_score"),
-                        "plausibility_fail_score": summary.get("plausibility_fail_score"),
-                        "tags_json": json.dumps(summary.get("tags", []), ensure_ascii=False, sort_keys=True),
-                        "distribution_state_json": json.dumps(payload.get("distribution_state", {}), ensure_ascii=False, sort_keys=True),
-                        "state_snapshot_json": json.dumps(payload.get("state_snapshot", {}), ensure_ascii=False, sort_keys=True),
-                        "render_plan_json": json.dumps(payload.get("render_plan", {}), ensure_ascii=False, sort_keys=True),
-                        "gate_decisions_json": json.dumps(payload.get("gate_decisions", []), ensure_ascii=False, sort_keys=True),
-                        "rendered_expression_json": json.dumps(payload.get("rendered_expression", {}), ensure_ascii=False, sort_keys=True),
-                    }
-                )
-        return rows
+        return flatten_probability_rows(payload)
 
     def _skill_rows(self, rows: list[dict]) -> tuple[list[dict], list[dict]]:
         canonical = []
@@ -331,16 +319,17 @@ class TraceStore:
             return
         try:
             for payload in self._load_round_records():
+                normalized_payload = normalize_probability_trace(payload)
                 self._append_dataset_rows(
                     self.round_canonical_dir,
-                    self._round_canonical_rows(payload),
+                    self._round_canonical_rows(normalized_payload),
                     schema=ROUND_CANONICAL_SCHEMA,
                     partition_keys=("recorded_date", "round_id"),
                 )
-                round_trace_rows = self._round_trace_rows(payload)
+                round_trace_rows = self._round_trace_rows(normalized_payload)
                 if round_trace_rows:
                     self._append_dataset_rows(self.round_trace_dir, round_trace_rows, schema=ROUND_TRACE_SCHEMA)
-                skill_rows = payload.get("skill_traces", [])
+                skill_rows = normalized_payload.get("skill_traces", [])
                 canonical, flat = self._skill_rows(skill_rows)
                 if canonical:
                     self._append_dataset_rows(self.skill_canonical_dir, canonical, schema=SKILL_CANONICAL_SCHEMA)
@@ -434,10 +423,12 @@ class TraceStore:
             raise
 
     def write_round(self, trace: RoundTrace, *, sync: bool = False) -> None:
-        payload = ensure_recorded_fields(
-            to_dict(trace),
-            session_id=trace.session_id,
-            recorded_at=trace.recorded_at,
+        payload = normalize_probability_trace(
+            ensure_recorded_fields(
+                to_dict(trace),
+                session_id=trace.session_id,
+                recorded_at=trace.recorded_at,
+            )
         )
         self._round_cache[int(payload["round_id"])] = copy.deepcopy(payload)
         self._skill_cache.extend(copy.deepcopy(payload.get("skill_traces", [])))
@@ -505,7 +496,7 @@ class TraceStore:
         if self._round_cache:
             return [copy.deepcopy(self._round_cache[key]) for key in sorted(self._round_cache)]
         status = self.trace_storage_status()
-        if status["storage_state"] == "healthy":
+        if status["storage_state"] == "healthy" and status.get("parquet_live_ready", False):
             parquet_rows = self._list_rounds_from_parquet()
             if parquet_rows or self.round_canonical_dir.exists():
                 return parquet_rows
@@ -514,8 +505,17 @@ class TraceStore:
             payload = json.loads(path.read_text(encoding="utf-8"))
             if "session_id" not in payload or "recorded_at" not in payload or "recorded_date" not in payload:
                 payload = ensure_recorded_fields(payload, recorded_at=_mtime_iso(path))
-            traces.append(payload)
+            traces.append(normalize_probability_trace(payload))
         return traces
+
+    def recent_rounds(self, limit: int) -> list[dict]:
+        limit = max(int(limit), 0)
+        if limit == 0:
+            return []
+        if self._round_cache:
+            keys = sorted(self._round_cache)[-limit:]
+            return [copy.deepcopy(self._round_cache[key]) for key in keys]
+        return self.list_rounds()[-limit:]
 
     def list_commands(self) -> list[dict]:
         return [copy.deepcopy(item) for item in self._command_cache]
@@ -657,34 +657,63 @@ class TraceStore:
         sync: bool = False,
     ) -> None:
         effective_recorded_at = recorded_at or utc_now_iso()
+        defaults = {
+            "applied": False,
+            "scope": "",
+            "delta": {},
+            "ttl": None,
+            "risk_note": "",
+            "rollback_hint": "",
+            "operator_level": "read_only",
+            "rollback_available": False,
+            "mutation_scope": None,
+            "snapshot_id": None,
+            "command_id": "",
+            "canonical": "",
+            "parsed_args": {},
+            "flags": {},
+            "rollback": {},
+            "subject_id": None,
+            "continuity_nonce": None,
+            "cause_type": None,
+            "boundary_action": None,
+            "violation_code": None,
+            "deprecation_warning": None,
+        }
+
+        def _result_value(name: str) -> object:
+            if isinstance(result, dict):
+                return result.get(name, defaults.get(name))
+            return getattr(result, name, defaults.get(name))
+
         entry = {
             "session_id": session_id,
             "recorded_at": effective_recorded_at,
             "recorded_date": iso_date(effective_recorded_at),
             "command": command,
-            "command_id": result.command_id,
-            "canonical": result.canonical,
-            "applied": result.applied,
-            "scope": result.scope,
-            "delta": result.delta,
-            "ttl": result.ttl,
-            "risk_note": result.risk_note,
-            "rollback_hint": result.rollback_hint,
-            "operator_level": result.operator_level,
-            "rollback_available": result.rollback_available,
-            "mutation_scope": result.mutation_scope,
-            "parsed_args": result.parsed_args,
-            "flags": result.flags,
-            "snapshot_id": result.snapshot_id,
-            "rollback": result.rollback,
+            "command_id": _result_value("command_id"),
+            "canonical": _result_value("canonical"),
+            "applied": _result_value("applied"),
+            "scope": _result_value("scope"),
+            "delta": _result_value("delta") or {},
+            "ttl": _result_value("ttl"),
+            "risk_note": _result_value("risk_note"),
+            "rollback_hint": _result_value("rollback_hint"),
+            "operator_level": _result_value("operator_level"),
+            "rollback_available": _result_value("rollback_available"),
+            "mutation_scope": _result_value("mutation_scope"),
+            "parsed_args": _result_value("parsed_args") or {},
+            "flags": _result_value("flags") or {},
+            "snapshot_id": _result_value("snapshot_id"),
+            "rollback": _result_value("rollback") or {},
             "before_state_hash": before_state_hash,
             "after_state_hash": after_state_hash,
-            "subject_id": result.subject_id,
-            "continuity_nonce": result.continuity_nonce,
-            "cause_type": result.cause_type,
-            "boundary_action": result.boundary_action,
-            "violation_code": result.violation_code,
-            "deprecation_warning": result.deprecation_warning,
+            "subject_id": _result_value("subject_id"),
+            "continuity_nonce": _result_value("continuity_nonce"),
+            "cause_type": _result_value("cause_type"),
+            "boundary_action": _result_value("boundary_action"),
+            "violation_code": _result_value("violation_code"),
+            "deprecation_warning": _result_value("deprecation_warning"),
         }
         self._command_cache.append(copy.deepcopy(entry))
 
@@ -804,6 +833,14 @@ class TraceStore:
                 return parquet_rows
         return self._read_jsonl(self.skill_jsonl_path)
 
+    def recent_skill_traces(self, limit: int) -> list[dict]:
+        limit = max(int(limit), 0)
+        if limit == 0:
+            return []
+        if self._skill_cache:
+            return copy.deepcopy(self._skill_cache[-limit:])
+        return self.list_skill_traces()[-limit:]
+
     def list_command_traces(self) -> list[dict]:
         if self._command_cache:
             return copy.deepcopy(self._command_cache)
@@ -921,9 +958,9 @@ class TraceStore:
             return None
         payload = json.loads(path.read_text(encoding="utf-8"))
         if "session_id" in payload and "recorded_at" in payload and "recorded_date" in payload:
-            return payload
+            return normalize_probability_trace(payload)
         recorded_at = _mtime_iso(path)
-        return ensure_recorded_fields(payload, recorded_at=recorded_at)
+        return normalize_probability_trace(ensure_recorded_fields(payload, recorded_at=recorded_at))
 
     def _read_round_from_parquet(self, round_id: int) -> dict | None:
         rows = read_dataset_rows(
@@ -933,14 +970,14 @@ class TraceStore:
         )
         if not rows:
             return None
-        return ensure_recorded_fields(json.loads(rows[0]["payload_json"]))
+        return normalize_probability_trace(ensure_recorded_fields(json.loads(rows[0]["payload_json"])))
 
     def _list_rounds_from_parquet(self) -> list[dict]:
         rows = read_dataset_rows(
             self.round_canonical_dir,
             "select payload_json from read_parquet(?) order by round_id, recorded_at",
         )
-        return [ensure_recorded_fields(json.loads(row["payload_json"])) for row in rows]
+        return [normalize_probability_trace(ensure_recorded_fields(json.loads(row["payload_json"]))) for row in rows]
 
     def _list_payload_rows_from_parquet(self, filename: str) -> list[dict]:
         path = self.parquet_dir / filename
