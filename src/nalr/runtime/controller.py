@@ -11,7 +11,7 @@ from typing import Any
 
 import yaml
 
-from nalr.agents.modules import build_agents
+from nalr.agents.modules import TEMPLATE_ACTION_SCALES, TEMPLATE_BY_PRIORITY, build_agents
 from nalr.memory.store import MemoryStore
 from nalr.output.renderer import fallback_render_text
 from nalr.output.style import build_expression_profile, build_render_plan, compute_style_profile
@@ -793,14 +793,9 @@ class RuntimeController:
             "reason": "",
         }
         if resolution.get("flag") and resample_policy.get("force_compromise") and not resample_policy.get("flag"):
-            template = resolution.get("applied_template") or {
-                "body_safety": "body_first",
-                "budget_overload": "budget_first",
-                "relation_boundary": "relation_first",
-                "task_goal": "task_first",
-                "immediate_desire": "body_first",
-                "roaming": "budget_first",
-            }.get(resolution.get("winning_priority"), "task_first")
+            template = resolution.get("applied_template") or TEMPLATE_BY_PRIORITY.get(
+                resolution.get("winning_priority"), "task_first"
+            )
             compromise = {
                 "triggered": True,
                 "template": template,
@@ -810,12 +805,7 @@ class RuntimeController:
             resolution["applied_template"] = template
             self._apply_conflict_scales(
                 distribution_state,
-                {
-                    "body_first": {"rest": 1.30, "respond": 1.05, "plan": 0.35, "connect": 0.0, "wander": 0.0},
-                    "relation_first": {"clarify": 1.20, "respond": 1.10, "connect": 0.20, "plan": 0.55, "wander": 0.35},
-                    "task_first": {"plan": 1.25, "respond": 1.10, "recall": 1.05, "rest": 0.55, "connect": 0.40, "wander": 0.0},
-                    "budget_first": {"respond": 1.15, "recall": 1.05, "rest": 1.10, "plan": 0.35, "connect": 0.0, "wander": 0.0},
-                }.get(template, {}),
+                TEMPLATE_ACTION_SCALES.get(template, {}),
                 thresholds,
             )
 
@@ -827,11 +817,20 @@ class RuntimeController:
         )
         blocked_by_circuit = []
         if circuit["active"]:
-            for action in ("connect",):
+            high_risk_actions = ("connect", "plan", "wander")
+            for action in high_risk_actions:
                 if action in distribution_state.p_raw:
                     distribution_state.gate[action] = 0.0
                     distribution_state.p_raw[action] = thresholds["p_floor"]
                     blocked_by_circuit.append(action)
+
+        # Deadlock fuse (§8.5): when the circuit just triggered (3 consecutive
+        # critical rounds), enter repair mode and force safe_mode.
+        deadlock_fuse_triggered = False
+        if circuit["triggered"]:
+            state.repair_mode = "deadlock_fuse"
+            state.safe_mode = True
+            deadlock_fuse_triggered = True
 
         distribution_state.conflict = {
             "score": assessment.get("score", 0.0),
@@ -846,6 +845,7 @@ class RuntimeController:
             "critical_conflict_streak": state.critical_conflict_streak,
             "circuit_breaker": {**circuit, "blocked_actions": blocked_by_circuit},
             "allowed_resamples": resample_policy.get("allowed_resamples", 0),
+            "deadlock_fuse_triggered": deadlock_fuse_triggered,
         }
         distribution_state.conflict_mode = "repair" if resample_policy.get("force_compromise") else "monitor"
         return float(assessment.get("score", 0.0))

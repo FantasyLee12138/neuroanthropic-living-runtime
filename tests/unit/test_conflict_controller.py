@@ -252,3 +252,34 @@ def test_runtime_sets_conflict_hot_after_three_critical_rounds_and_recovers(tmp_
     assert recovered_state.conflict_hot_rounds == 0
     assert recovered_state.critical_conflict_streak == 0
     assert recovered_state.last_compromise_template is None
+
+
+def test_deadlock_fuse_triggers_safe_mode_and_repair_mode(tmp_path):
+    """§8.5: 3 consecutive critical conflicts trigger deadlock fuse → safe_mode + repair_mode."""
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    _prime_conflict_state(controller, body_energy=0.06, budget_remaining=0.03, mood=0.15)
+
+    critical_event = RoundEvent(
+        source="user",
+        content="I need a quick easy break, but help me plan carefully, reply to Alex, and let me drift.",
+        target="alex",
+        cue="break",
+        valence=-0.45,
+        energy_delta=-0.20,
+    )
+
+    for _ in range(3):
+        result = controller.tick(critical_event, scenario="task", mode="interactive")
+
+    fuse_state = controller.load_runtime_state()
+    fuse_conflict = result.trace.distribution_state["conflict"]
+
+    # Deadlock fuse should have triggered
+    assert fuse_conflict["deadlock_fuse_triggered"] is True
+    assert fuse_state.safe_mode is True
+    assert fuse_state.repair_mode == "deadlock_fuse"
+
+    # High-risk actions should be gated by circuit breaker
+    blocked = fuse_conflict["circuit_breaker"]["blocked_actions"]
+    for action in ("connect", "plan", "wander"):
+        assert action in blocked, f"{action} should be blocked by deadlock fuse"
