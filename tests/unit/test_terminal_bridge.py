@@ -10,6 +10,10 @@ from nalr.terminal_bridge.session import TerminalSessionStore
 CONFIG_ROOT = Path(__file__).resolve().parents[2] / "config"
 
 
+def _seed_entropy(controller: RuntimeController) -> None:
+    controller.entropy_pool.ingest_bytes(bytes([index % 256 for index in range(4096)]), source="test_qrng")
+
+
 def test_protocol_validates_known_terminal_events():
     payload = validate_inbound_event({"type": "start_session", "session_id": "sess-1", "cwd": "/tmp/demo"})
 
@@ -67,33 +71,73 @@ def test_user_turn_emits_read_only_run_sequence_and_persists_session_mapping(tmp
     assert "authenticity" in run_snapshot["cognitive_snapshot"]
     assert session_state.active_run_id is not None
     assert session_state.status == "active"
+    assert session_state.transcript_lines[0] == {"kind": "user", "text": "检查 planner.py 并规划下一步"}
+    assert session_state.transcript_lines[1] == {"kind": "assistant", "text": "已进入只读任务处理。可用 /status /why /steps /tools 查看进度。"}
+    assert any(item["kind"] == "system" and item["text"].startswith("Step: ") for item in session_state.transcript_lines)
+    assert any(item["kind"] == "call" and item["tool"] == "repo_scan" for item in session_state.tool_timeline)
+    assert any(item["kind"] == "result" and item["tool"] == "repo_scan" for item in session_state.tool_timeline)
 
 
 def test_greeting_user_turn_uses_direct_chat_without_starting_run(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    _seed_entropy(controller)
     handler = TerminalEventHandler(controller)
 
     handler.handle({"type": "start_session", "session_id": "sess-greet", "cwd": str(tmp_path)})
     events = handler.handle({"type": "user_turn", "session_id": "sess-greet", "text": "你好"})
     session_state = TerminalSessionStore(controller.runtime_dir).read("sess-greet")
 
-    assert [item["type"] for item in events] == ["assistant_final"]
-    assert "你好" in events[0]["message"]
+    assert [item["type"] for item in events] == ["assistant_token", "assistant_final"]
+    assert "你好" in events[-1]["message"]
     assert session_state.active_run_id is None
+    assert session_state.transcript_lines == [
+        {"kind": "user", "text": "你好"},
+        {"kind": "assistant", "text": events[0]["message"]},
+    ]
 
 
 def test_identity_compound_user_turn_uses_direct_chat_without_starting_run(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    _seed_entropy(controller)
     handler = TerminalEventHandler(controller)
 
     handler.handle({"type": "start_session", "session_id": "sess-identity", "cwd": str(tmp_path)})
     events = handler.handle({"type": "user_turn", "session_id": "sess-identity", "text": "你好，你是谁？你有名字吗？"})
     session_state = TerminalSessionStore(controller.runtime_dir).read("sess-identity")
 
-    assert [item["type"] for item in events] == ["assistant_final"]
-    assert "runtime_instance" not in events[0]["message"]
-    assert "我是" in events[0]["message"]
+    assert [item["type"] for item in events] == ["assistant_token", "assistant_final"]
+    assert "runtime_instance" not in events[-1]["message"]
+    assert "我是" in events[-1]["message"]
     assert session_state.active_run_id is None
+
+
+def test_fast_chat_user_turn_streams_tokens_without_starting_run(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    handler = TerminalEventHandler(controller)
+
+    handler.handle({"type": "start_session", "session_id": "sess-fast", "cwd": str(tmp_path)})
+
+    class _Plan:
+        route = "fast_chat"
+
+    controller.plan_turn = lambda text, **kwargs: _Plan()
+    monkeypatch.setattr(
+        controller,
+        "stream_fast_chat_turn",
+        lambda plan: (
+            ["你好", "，我是当前运行体实例。"],
+            {
+                "route": "fast_chat",
+                "assistant_final": "你好，我是当前运行体实例。",
+                "payload": {"stream_deltas": ["你好", "，我是当前运行体实例。"]},
+            },
+        ),
+    )
+
+    events = handler.handle({"type": "user_turn", "session_id": "sess-fast", "text": "你是谁？"})
+
+    assert [item["type"] for item in events] == ["assistant_token", "assistant_token", "assistant_final"]
+    assert "".join(item["delta"] for item in events if item["type"] == "assistant_token") == "你好，我是当前运行体实例。"
 
 
 def test_task_run_uses_system_confirmation_message(tmp_path):
@@ -428,6 +472,54 @@ def test_start_session_keeps_permission_mode_and_pending_approvals(tmp_path):
     assert any(item["call_id"] == pending for item in before_restart.approvals_pending)
     assert after_restart.permission_mode == "ask"
     assert any(item["call_id"] == pending for item in after_restart.approvals_pending)
+    assert after_restart.transcript_lines == before_restart.transcript_lines
+    assert after_restart.tool_timeline == before_restart.tool_timeline
+
+
+def test_detach_session_preserves_transcript_and_restarts_same_session(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    _seed_entropy(controller)
+    handler = TerminalEventHandler(controller)
+    session_store = TerminalSessionStore(controller.runtime_dir)
+
+    handler.handle({"type": "start_session", "session_id": "sess-detach", "cwd": str(tmp_path)})
+    turn_events = handler.handle({"type": "user_turn", "session_id": "sess-detach", "text": "你好"})
+    detached = handler.handle({"type": "close_session", "session_id": "sess-detach", "detach": True, "transcript_mode": "compact"})
+    detached_state = session_store.read("sess-detach")
+
+    assert detached[0]["type"] == "session_ended"
+    assert detached_state.status == "detached"
+    assert detached_state.transcript_mode == "compact"
+    assert detached_state.compact is True
+    assert detached_state.transcript_lines == [
+        {"kind": "user", "text": "你好"},
+        {"kind": "assistant", "text": next(item for item in turn_events if item["type"] == "assistant_final")["message"]},
+    ]
+
+    restarted = handler.handle({"type": "start_session", "session_id": "sess-detach", "cwd": str(tmp_path)})
+    restarted_state = session_store.read("sess-detach")
+
+    assert restarted_state.status == "active"
+    assert restarted_state.transcript_lines == detached_state.transcript_lines
+    assert restarted_state.transcript_mode == "compact"
+    assert restarted[0]["session"]["transcript_lines"] == detached_state.transcript_lines
+
+
+def test_non_persistent_start_session_does_not_replace_current_restorable_session(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    handler = TerminalEventHandler(controller)
+    session_store = TerminalSessionStore(controller.runtime_dir)
+
+    handler.handle({"type": "start_session", "session_id": "sess-interactive", "cwd": str(tmp_path)})
+    current_before = session_store.read_current()
+
+    handler.handle({"type": "start_session", "session_id": "sess-oneshot", "cwd": str(tmp_path), "persist_current": False})
+    current_after = session_store.read_current()
+    oneshot_state = session_store.read("sess-oneshot")
+
+    assert current_before.session_id == "sess-interactive"
+    assert current_after.session_id == "sess-interactive"
+    assert oneshot_state.session_id == "sess-oneshot"
 
 
 def test_close_session_marks_session_ended(tmp_path):

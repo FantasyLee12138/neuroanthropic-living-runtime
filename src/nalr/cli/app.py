@@ -444,12 +444,12 @@ def why_not(action: Annotated[str, typer.Argument()], round_id: Annotated[int, t
 
 
 @what_app.command("changed")
-def what_changed(window: int = 5) -> None:
+def what_changed(window: Annotated[int, typer.Argument()] = 5) -> None:
     emit(get_cil().execute(f"what changed {window}"))
 
 
 @eval_app.command("longrun")
-def eval_longrun(rounds: int = 1000) -> None:
+def eval_longrun(rounds: Annotated[int, typer.Argument()] = 1000) -> None:
     emit(get_cil().execute(f"eval longrun {rounds}"))
 
 

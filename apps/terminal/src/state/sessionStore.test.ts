@@ -23,6 +23,58 @@ describe("sessionStore", () => {
     expect(withRun.toolTimeline).toEqual([]);
   });
 
+  it("hydrates transcript, timeline, approvals, and transcript mode from session_started", () => {
+    const initial = createInitialUiState();
+    const next = applyBridgeEvent(initial, {
+      type: "session_started",
+      session: {
+        session_id: "sess-restore",
+        cwd: "/tmp/demo",
+        status: "detached",
+        permission_mode: "ask",
+        transcript_mode: "compact",
+        transcript_lines: [
+          { kind: "user", text: "你好" },
+          { kind: "assistant", text: "我在。" }
+        ],
+        tool_timeline: [
+          { kind: "call", callId: "run-1:tool:0", tool: "repo_scan", summary: "scan", status: "completed" }
+        ],
+        approvals_pending: [
+          {
+            call_id: "run-1:tool:0",
+            tool: "repo_scan",
+            summary: "scan",
+            action_preview: "scan src",
+            status: "pending",
+            run_id: "run-1"
+          }
+        ]
+      }
+    });
+
+    expect(next.activeSessionId).toBe("sess-restore");
+    expect(next.permissionMode).toBe("ask");
+    expect(next.transcriptMode).toBe("compact");
+    expect(next.lines).toEqual([
+      { kind: "user", text: "你好" },
+      { kind: "assistant", text: "我在。" }
+    ]);
+    expect(next.toolTimeline).toEqual([
+      { kind: "call", callId: "run-1:tool:0", tool: "repo_scan", summary: "scan", status: "completed" }
+    ]);
+    expect(next.pendingApprovals).toEqual([
+      {
+        callId: "run-1:tool:0",
+        tool: "repo_scan",
+        summary: "scan",
+        actionPreview: "scan src",
+        status: "pending",
+        runId: "run-1"
+      }
+    ]);
+  });
+
   it("accumulates steps and tool results for side panels", () => {
     const initial = createInitialUiState();
     const withStep = applyBridgeEvent(initial, {

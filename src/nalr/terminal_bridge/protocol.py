@@ -50,6 +50,8 @@ def validate_inbound_event(payload: dict[str, Any]) -> dict[str, Any]:
     _require_str(payload, "session_id")
     if event_type == "start_session":
         _require_str(payload, "cwd")
+        if "persist_current" in payload and not isinstance(payload.get("persist_current"), bool):
+            raise ProtocolError("persist_current must be a boolean when provided")
     if event_type == "user_turn":
         _require_str(payload, "text")
     if event_type == "control_command":
@@ -62,6 +64,13 @@ def validate_inbound_event(payload: dict[str, Any]) -> dict[str, Any]:
         _require_str(payload, "call_id")
         if not isinstance(payload.get("approved"), bool):
             raise ProtocolError("approved must be a boolean")
+    if event_type == "close_session":
+        if "detach" in payload and not isinstance(payload.get("detach"), bool):
+            raise ProtocolError("detach must be a boolean when provided")
+        if "transcript_mode" in payload:
+            mode = payload.get("transcript_mode")
+            if mode not in {"full", "compact"}:
+                raise ProtocolError("transcript_mode must be 'full' or 'compact' when provided")
     return payload
 
 

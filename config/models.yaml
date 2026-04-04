@@ -23,6 +23,13 @@ model_routes:
     timeout_ms: 60000
     retries: 0
     enabled: true
+  chat_fast:
+    backend: deepseek
+    model: deepseek-chat
+    timeout_ms: 12000
+    retries: 0
+    enabled: true
+    base_url: https://api.deepseek.com
   tool_policy:
     backend: doubao
     model: doubao-seed-2-0-pro-260215

@@ -230,6 +230,126 @@ class DoubaoBackend:
             pass
 
 
+class DeepSeekBackend:
+    def __init__(self, client_factory: Callable[..., Any] | None = None) -> None:
+        self.client_factory = client_factory
+        self._client_cache: dict[tuple[str, str, int], Any] = {}
+
+    def _build_client(self, *, api_key: str, base_url: str, timeout_ms: int):
+        timeout_s = max(timeout_ms / 1000.0, 1.0)
+        if self.client_factory is not None:
+            return self.client_factory(base_url=base_url, api_key=api_key, timeout_s=timeout_s)
+        return httpx.Client(
+            base_url=base_url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            timeout=timeout_s,
+        )
+
+    def _client_for(self, *, api_key: str, base_url: str, timeout_ms: int):
+        cache_key = (api_key, base_url, timeout_ms)
+        client = self._client_cache.get(cache_key)
+        if client is None:
+            client = self._build_client(api_key=api_key, base_url=base_url, timeout_ms=timeout_ms)
+            self._client_cache[cache_key] = client
+        return client
+
+    def _request_body(self, *, route: ModelRouteConfig, request: ModelRequest, stream: bool) -> dict[str, Any]:
+        return {
+            "model": route.model,
+            "messages": [
+                {"role": "system", "content": request.system_prompt},
+                {"role": "user", "content": request.user_prompt},
+            ],
+            "stream": stream,
+        }
+
+    def _extract_response_text(self, raw_payload: dict[str, Any]) -> str:
+        if not isinstance(raw_payload, dict):
+            raise ModelProviderError("DeepSeek returned a non-dict response payload")
+        choices = raw_payload.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise ModelProviderError("DeepSeek response did not contain choices")
+        message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+        raise ModelProviderError("DeepSeek response did not contain message content")
+
+    def _extract_payload(self, raw_payload: dict[str, Any], request: ModelRequest) -> dict[str, Any]:
+        expected_keys = tuple(request.response_schema.keys())
+        if expected_keys and all(key in raw_payload for key in expected_keys):
+            return {key: raw_payload[key] for key in expected_keys}
+        response_text = self._extract_response_text(raw_payload).strip()
+        try:
+            parsed = json.loads(response_text)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict) and expected_keys and all(key in parsed for key in expected_keys):
+            return parsed
+        if expected_keys == ("text",):
+            if isinstance(parsed, dict) and isinstance(parsed.get("text"), str):
+                return {"text": parsed["text"].strip()}
+            return {"text": response_text}
+        raise ModelProviderError("DeepSeek response did not contain the required structured fields")
+
+    def generate(
+        self,
+        *,
+        route: ModelRouteConfig,
+        request: ModelRequest,
+        api_key: str | None = None,
+    ) -> ModelResponse:
+        effective_key = api_key or os.getenv("DEEPSEEK_API_KEY")
+        if not effective_key:
+            raise MissingModelCredentialError("DEEPSEEK_API_KEY is required for DeepSeek backend")
+        client = self._client_for(api_key=effective_key, base_url=route.base_url, timeout_ms=route.timeout_ms)
+        request_body = self._request_body(route=route, request=request, stream=False)
+        response = client.post("/chat/completions", json=request_body)
+        response.raise_for_status()
+        raw_payload = response.json()
+        raw_text = response.text
+        payload = self._extract_payload(raw_payload, request)
+        return ModelResponse(route=route.name, model=route.model, payload=payload, raw_text=raw_text)
+
+    def stream_generate(
+        self,
+        *,
+        route: ModelRouteConfig,
+        request: ModelRequest,
+        api_key: str | None = None,
+    ):
+        effective_key = api_key or os.getenv("DEEPSEEK_API_KEY")
+        if not effective_key:
+            raise MissingModelCredentialError("DEEPSEEK_API_KEY is required for DeepSeek backend")
+        client = self._client_for(api_key=effective_key, base_url=route.base_url, timeout_ms=route.timeout_ms)
+        request_body = self._request_body(route=route, request=request, stream=True)
+        with client.stream("POST", "/chat/completions", json=request_body) as response:
+            response.raise_for_status()
+            for raw_line in response.iter_lines():
+                if not raw_line:
+                    continue
+                line = raw_line.strip()
+                if not line.startswith("data: "):
+                    continue
+                data = line[6:]
+                if data == "[DONE]":
+                    break
+                try:
+                    payload = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                choices = payload.get("choices")
+                if not isinstance(choices, list) or not choices:
+                    continue
+                delta = choices[0].get("delta", {}) if isinstance(choices[0], dict) else {}
+                content = delta.get("content")
+                if isinstance(content, str) and content:
+                    yield content
+
+
 class ModelRouter:
     def __init__(
         self,
@@ -241,6 +361,7 @@ class ModelRouter:
         self.backends = {
             "fake": FakeBackend(),
             "doubao": DoubaoBackend(),
+            "deepseek": DeepSeekBackend(),
         }
         if backends:
             self.backends.update(backends)
@@ -259,3 +380,17 @@ class ModelRouter:
             raise ModelProviderError(f"model route {route_name} is disabled")
         backend = self.backends[route.backend]
         return backend.generate(route=route, request=request)
+
+    def stream_generate(self, route_name: str, request: ModelRequest):
+        route = self.route_configs[route_name]
+        if not route.enabled:
+            raise ModelProviderError(f"model route {route_name} is disabled")
+        backend = self.backends[route.backend]
+        stream_generate = getattr(backend, "stream_generate", None)
+        if callable(stream_generate):
+            yield from stream_generate(route=route, request=request)
+            return
+        response = backend.generate(route=route, request=request)
+        text = str(response.payload.get("text", "")).strip()
+        if text:
+            yield text

@@ -188,7 +188,7 @@ def test_terminal_route_probe_prefers_direct_chat_for_identity_prompt_without_wr
     after_memory = controller.memory_top()
     after_habits = controller.habit_top()
 
-    assert probe["route"] == "direct_chat"
+    assert probe["route"] == "fast_chat"
     assert probe["chat_mass"] > probe["task_mass"]
     assert before_state_hash == after_state_hash
     assert before_rounds == after_rounds
@@ -235,6 +235,38 @@ def test_plan_turn_uses_single_probe_path_for_terminal_routing(tmp_path, monkeyp
 
     assert plan.route == "task_run"
     assert calls == ["task"]
+
+
+def test_plan_turn_uses_fast_chat_for_simple_identity_prompt_without_task_bootstrap(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    plan = controller.plan_turn("你好，你是谁？你有名字吗？")
+
+    assert plan.route == "fast_chat"
+    assert plan.task_bootstrap is None
+
+
+def test_execute_turn_fast_chat_uses_chat_fast_route_once(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    calls: list[str] = []
+
+    def fake_generate(route_name, request):
+        calls.append(route_name)
+        return ModelResponse(
+            route=route_name,
+            model="deepseek-chat",
+            payload={"text": "你好，我是当前运行体实例。"},
+            raw_text='{"text":"你好，我是当前运行体实例。"}',
+        )
+
+    monkeypatch.setattr(controller.model_router, "generate", fake_generate)
+    plan = controller.plan_turn("你是谁？")
+
+    execution = controller.execute_turn(plan)
+
+    assert execution.route == "fast_chat"
+    assert execution.assistant_final == "你好，我是当前运行体实例。"
+    assert calls == ["chat_fast"]
 
 
 def test_hot_only_budget_for_low_salience(tmp_path, monkeypatch):

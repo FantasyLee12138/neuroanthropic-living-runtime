@@ -39,7 +39,7 @@ async function runOneShot(prompt: string): Promise<number> {
     printEvent(event);
   });
   try {
-    await bridge.startSession(sessionId, launchCwd);
+    await bridge.startSession(sessionId, launchCwd, { persistCurrent: false });
     const finalEvent = bridge.waitFor(
       (event) => event.type === "assistant_final" || event.type === "error",
       oneShotTimeoutMs()
@@ -64,7 +64,7 @@ async function runOneShotControlCommand(command: "dream", value?: string): Promi
     printEvent(event);
   });
   try {
-    await bridge.startSession(sessionId, launchCwd);
+    await bridge.startSession(sessionId, launchCwd, { persistCurrent: false });
     const finalEvent = bridge.waitFor(
       (event) => event.type === "assistant_final" || event.type === "error",
       oneShotTimeoutMs()
@@ -83,7 +83,7 @@ async function runInteractive(): Promise<void> {
   const launchCwd = process.env.NALR_LAUNCH_CWD ?? process.cwd();
   const repoRoot = resolveRepoRoot(launchCwd);
   const bridge = new PythonBridgeClient({ repoRoot, cwd: launchCwd });
-  const instance = render(React.createElement(App, { bridge, cwd: launchCwd }));
+  const instance = render(React.createElement(App, { bridge, cwd: launchCwd, repoRoot }));
   await instance.waitUntilExit();
 }
 

@@ -24,10 +24,10 @@ NeuroAnthropic Living Runtime（NALR）是一个对齐[开发文档 v0.56](./开
 |---|---|
 | Agent 注册表 | `RuntimeController` 负责编排显性 Agent、隐性模块、守卫层和控制面；`PFCAgent` 负责候选动作，`ConflictMonitorAgent` 负责冲突闭环，`ThalamusAttentionAgent` 负责聚合与采样。 |
 | Skill 注册表 | `SkillExecutor` 已统一承接类型契约校验、`timeout_ms` / `cost_class` / `failure_policy` 约束、权限边界、`policy_check`、降级路由和熔断器。 |
-| CLI / CIL / 命令控制层 | `alive` 已切到类型化命令封套；命令执行会留下 command trace、规范化命令形态、解析参数、快照和回滚契约。`NALR` 则作为认知控制台消费终端桥接事件。 |
+| CLI / CIL / 命令控制层 | `alive` 已切到类型化命令封套；命令执行会留下 command trace、规范化命令形态、解析参数、快照和回滚契约。`NALR` 则作为认知控制台消费终端桥接事件；`CommandInterfaceLayer`、`runtime/adapters.py` 与 `runtime/model_gateway.py` 共同承担兼容接口层。 |
 | 概率行为与冲突闭环 | runtime 会记录 `u_base -> u_shifted -> p_base_stochastic -> q_noise -> p_mix -> p_final`；冲突层支持 5 个冲突分项、优先级裁决链、重采样、妥协模板、修复状态机和事后纠偏。 |
 | 慢变量与长期运行 | memory / habit / relation / resource / temperament 已接入主链；真实性、身份演化、生命性塑形、长跑投影拆分为 `IdentityRuntime`、`AuthenticityPolicy`、`VitalityEngine`、`LongRunAnalyzer`；`idle/sleep` 还能触发 dream 侧车塑形。 |
-| trace / observer / 可观测性 | round / skill / command / repair trace 已形成规范化存储；observer 默认读取 Parquet 实时读取模型，并暴露 `why`、贡献拆解、冲突指标、真实性、生命性和 dream 指标。 |
+| trace / observer / 可观测性 | round / skill / command / repair trace 已形成规范化存储；observer 默认读取 Parquet 实时读取模型，并暴露 `why`、贡献拆解、冲突指标、entropy 健康、counterfactual replay、真实性、生命性和 dream 指标。 |
 
 ## 当前运行时逻辑
 
@@ -69,15 +69,18 @@ idle / sleep
 - 新增 dream 侧车链路：`idle` 与 `sleep` 模式可触发 `DreamOrchestrator`，生成 `dream_run_id`、`dream_trace_ref`、`dream_guard_summary`、`dream_effect_summary`；`alive dream ...` 与 observer `/dream/*` 已可直接查看。
 - `NALR` 已升级为 v2 认知控制台：主区显示 transcript、工具时间线与审批提示，侧栏显示 `core_goal`、`current_intent`、`vital_signs`、`identity`、`authenticity`，底部状态线显示权限、工作区与审批计数。
 - 终端桥接事件面扩展为 `run_status`、`step_update`、`tool_call`、`tool_result`、`approval_request`、`sidebar_snapshot`、`assistant_final`，终端与 observer 现在可以共享同一条任务证据链。
+- 终端 session 现在会显式持久化 `transcript_lines`、`tool_timeline`、`transcript_mode`、`approvals_pending`，`detach` / 恢复同一 session 时不会丢失上下文。
 - `NALR` slash 面补齐为 `/help /status /why /steps /tools /state /dream [cue] /pause /resume /abort /clear /compact /mode [value] /permissions [value] /model /exit`，并支持按 cwd 维度记录输入历史、`Ctrl+C` 中止、`Ctrl+D` 退出、`Ctrl+L` 清屏、`\ + Enter` 多行草稿。
+- `alive` / observer 补齐了 counterfactual 与维护接口：`trace compact`、`why this`、`why not`、`what changed`、`eval longrun`、`/metrics/entropy`、`/metrics/timeline`、`/metrics/heatmap`、`/replay/{round_id}`、`/why-not/{round_id}/{action}`。
 - 本轮补验已重新跑通：`tests/unit/test_dream_runtime.py`、`tests/integration/test_dream_bridge_stdio.py`、`tests/longrun/test_authenticity_acceptance.py`、`tests/unit/test_terminal_bridge.py`、`tests/integration/test_nalr_terminal.py`，共 `24 passed`；同时 `npm --prefix apps/terminal test` 与 `npm --prefix apps/terminal run build` 是当前终端侧的标准验证集。
 
 ### 2026-04-03
 
 - 新增 `./alive` 启动脚本，支持自动加载仓库根目录 `.env.local` / `.env`，`config/models.yaml` 成为 PFC、Perspective、renderer 的模型路由默认入口。
+- `config/models.yaml` 现在同时保留 `model_routes` 与 `models` 兼容块：前者供 `ModelRouter` 消费，后者供 `ModelGateway` / 兼容适配层消费。
 - skill runtime 已收口为类型化校验器：补齐 contract 解析/序列化/校验、运行时元数据约束、权限边界、熔断策略、降级路由与 provider 路由。
 - trace / memory 维护路径扩展为显式命令：`alive trace export parquet`、`alive memory compact`、`alive memory sample`，并让 `checkpoint create` 也写入 command trace。
-- CLI、observer 和表达层同步增强：新增 `trace agents|skills|gates` 视图、`memory recall` / `habit reset` / `nudge relation` / `budget set` 命令、`GET /memory/recall/{cue}` 观测接口，以及更贴近表达参数的兜底渲染器。
+- CLI、observer 和表达层同步增强：新增 `trace agents|skills|gates|compact` 视图、`memory recall` / `habit reset` / `nudge relation` / `budget set` / `why this|not` / `what changed` / `eval longrun` 命令、`GET /memory/recall/{cue}` / `GET /replay/{round_id}` / `GET /why-not/{round_id}/{action}` 观测接口，以及更贴近表达参数的兜底渲染器。
 
 ## 当前可直接观测的能力
 
@@ -88,9 +91,29 @@ idle / sleep
 - `alive memory recall <cue>` 会返回记忆层级、强度、gist/detail 模式、干扰信息和证据片段。
 - `alive habit reset <pattern>` 可以把习惯重置到 `strength = 0`，同时保留可恢复语义。
 - `alive budget set --cap 50000` 会通过 CIL 更新预算，并保持 runtime 内部状态归一到 `0..1`。
+- `alive trace compact` 会把 round / skill / command / repair trace 重新导出成 Parquet，并返回生成路径。
+- `alive why this <round>`、`alive why not <action> <round>`、`alive what changed <window>`、`alive eval longrun <rounds>` 可以直接做解释、反事实和轻量长跑评估。
 - `alive dream status`、`alive dream trace last`、`alive dream proposals last`、`alive dream metrics` 可以查看非交互塑形与 dream proposal 证据。
 - `alive trace round|why|contribution` 与 observer `/trace|/why|/contributions` 默认优先从 Parquet 规范化实时读模型读取，并显式返回 `storage.read_source` / `trace_sync_state`。
-- observer 已支持 `/metrics/authenticity`、`/metrics/vitality`、`/dream/status`、`/dream/runs`、`/dream/metrics`、`/skills/stats`、`/metrics/conflicts`、`/metrics/mode-switches`、`/analysis/ablation`。
+- observer 已支持 `/metrics/authenticity`、`/metrics/vitality`、`/metrics/entropy`、`/metrics/timeline`、`/metrics/heatmap`、`/dream/status`、`/dream/runs`、`/dream/metrics`、`/skills/stats`、`/metrics/conflicts`、`/metrics/mode-switches`、`/analysis/ablation`、`/replay/{round_id}`、`/why-not/{round_id}/{action}`。
+
+## v0.56 对账与归档来源
+
+这次整理工作树时，README 不再只记录“改了什么”，而是把可验证能力按开发文档主线重新对账，并把改动来源固定到可回溯分支。
+
+| 对账项 | 当前仓库中的结果 | 归档来源 |
+|---|---|---|
+| Agent / Skill / CLI-CIL 主线 | `RuntimeController`、`SkillExecutor`、`CommandInterfaceLayer`、`runtime/adapters.py`、`runtime/model_gateway.py` 都已在主链中可见；`alive` 命令与 observer 接口对齐到同一批运行时能力。 | `codex/nalr-integration@ae81a40` + `codex/archive-main-wip-2026-04-04@b2bab0e` |
+| entropy 配置与降级 | `config/entropy.yaml` 定义 `endpoint`、`timeout_s`、`prefetch_bytes`、`min_batch_bytes`、`max_batch_bytes`、`hard_block_on_unavailable`；`QuantumEntropyPool` 会记录 `entropy_ref`、健康状态与降级原因；observer 暴露 `/metrics/entropy`。 | 主要来自 `codex/archive-main-wip-2026-04-04@b2bab0e` |
+| terminal route 规划/执行分离 | `TurnPlan` / `TurnExecution` 已进入 runtime schema；terminal bridge 通过 `plan_turn()` + `execute_turn()` 统一 direct chat、fast chat 与只读 task run，并持久化 transcript 与 tool timeline。 | 主要来自 `codex/archive-main-wip-2026-04-04@b2bab0e` |
+| trace / repair / observer 增强 | repair ledger 已带 `conflict_score`、learning signal 与 repair tail；observer 补齐 `/metrics/timeline`、`/metrics/heatmap`、`/replay/{round_id}`、`/why-not/{round_id}/{action}`。 | `codex/nalr-integration@ae81a40` + `codex/archive-main-wip-2026-04-04@b2bab0e` |
+| conflict-controller deadlock fuse 对标 | deadlock fuse / circuit breaker 的 v0.56 断言被重新对齐到 `tests/unit/test_conflict_controller.py`，并保留 repair FSM 语义。 | `codex/archive-elegant-jemison-wip-2026-04-04@b6476fe` |
+
+归档说明：
+
+- `codex/nalr-integration` 已经吸收 `codex/runtime-parity`，因此本次只保留前者作为 codex 集成来源，不再重复整理 `codex/runtime-parity`。
+- 主工作树的未提交内容先归档到 `codex/archive-main-wip-2026-04-04`，再并入 `codex/archive-cleanup`，避免在清理 worktree 时丢失未提交状态。
+- `elegant-jemison` 的快照分支只吸收与 `docs/specs/conflict-controller-v056.md` 一致的 deadlock fuse / repair 断言，不盲目回滚到旧 runtime 实现。
 
 ## 目录说明
 
@@ -249,6 +272,9 @@ GET /memory/recall/{cue}
 GET /metrics/summary
 GET /metrics/authenticity
 GET /metrics/vitality
+GET /metrics/entropy
+GET /metrics/timeline
+GET /metrics/heatmap
 GET /dream/status
 GET /dream/runs
 GET /dream/runs/{round_ref}
@@ -257,6 +283,8 @@ GET /skills/stats
 GET /metrics/conflicts
 GET /metrics/mode-switches
 GET /analysis/ablation
+GET /replay/{round_id}
+GET /why-not/{round_id}/{action}
 GET /dashboard
 ```
 

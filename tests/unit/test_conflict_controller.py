@@ -355,6 +355,7 @@ def test_runtime_sets_conflict_hot_after_three_critical_rounds_and_recovers(tmp_
     assert recovered_state.repair_mode is None
     assert recovered_state.conflict_safe_mode_owner is None
     assert recovered_state.repair_state.stage == "recovered"
+    assert recovered_state.last_compromise_template is None
 
 
 def test_repair_ledger_entry_records_learning_and_conflict_context(tmp_path):

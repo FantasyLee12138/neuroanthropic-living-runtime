@@ -79,6 +79,52 @@ function replacePendingApproval(state: UiState, next: UiState["pendingApprovals"
   return state.pendingApprovals.map((item, itemIndex) => (itemIndex === index ? next : item));
 }
 
+function normalizeLines(lines: unknown): UiLine[] {
+  if (!Array.isArray(lines)) {
+    return [];
+  }
+  return lines
+    .filter((line): line is Record<string, unknown> => typeof line === "object" && line !== null)
+    .map((line) => ({
+      kind: String(line.kind ?? "system") as UiLine["kind"],
+      text: String(line.text ?? ""),
+    }));
+}
+
+function normalizeTimeline(entries: unknown): UiState["toolTimeline"] {
+  if (!Array.isArray(entries)) {
+    return [];
+  }
+  return entries
+    .filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
+    .map((entry) => ({
+      kind: String(entry.kind ?? "result") as UiState["toolTimeline"][number]["kind"],
+      callId: String(entry.callId ?? entry.call_id ?? ""),
+      tool: String(entry.tool ?? "unknown"),
+      summary: entry.summary == null ? undefined : String(entry.summary),
+      status: entry.status == null ? undefined : String(entry.status),
+    }));
+}
+
+function normalizePendingApprovals(entries: unknown): UiState["pendingApprovals"] {
+  if (!Array.isArray(entries)) {
+    return [];
+  }
+  return entries
+    .filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
+    .map((entry) => ({
+      callId: String(entry.callId ?? entry.call_id ?? ""),
+      tool: String(entry.tool ?? "unknown"),
+      args: (entry.args as Record<string, unknown> | undefined) ?? undefined,
+      riskLevel: entry.riskLevel == null ? (entry.risk_level == null ? undefined : String(entry.risk_level)) : String(entry.riskLevel),
+      summary: entry.summary == null ? undefined : String(entry.summary),
+      actionPreview: entry.actionPreview == null ? (entry.action_preview == null ? undefined : String(entry.action_preview)) : String(entry.actionPreview),
+      mode: entry.mode == null ? undefined : String(entry.mode),
+      status: entry.status == null ? undefined : String(entry.status),
+      runId: entry.runId == null ? (entry.run_id == null ? undefined : String(entry.run_id)) : String(entry.runId),
+    }));
+}
+
 function normalizeCognitiveSnapshot(snapshot: Record<string, unknown> | undefined): CognitiveSnapshotState {
   const vitalSigns = (snapshot?.vital_signs as Record<string, unknown> | undefined) ?? {};
   const identity = (snapshot?.identity as Record<string, unknown> | undefined) ?? {};
@@ -107,10 +153,22 @@ function normalizeCognitiveSnapshot(snapshot: Record<string, unknown> | undefine
 
 export function applyBridgeEvent(state: UiState, event: OutboundBridgeEvent): UiState {
   if (event.type === "session_started") {
+    const restoredLines = normalizeLines(event.session.transcript_lines);
+    const restoredTimeline = normalizeTimeline(event.session.tool_timeline);
+    const restoredApprovals = normalizePendingApprovals(event.session.approvals_pending);
+    const transcriptMode =
+      String(event.session.transcript_mode ?? "") === "compact" || Boolean(event.session.compact)
+        ? "compact"
+        : "full";
     return {
       ...state,
       activeSessionId: String(event.session.session_id ?? "") || state.activeSessionId,
+      activeRunId: String(event.session.active_run_id ?? event.session.last_run_id ?? "") || state.activeRunId,
       sessionMeta: event.session,
+      lines: restoredLines,
+      toolTimeline: restoredTimeline,
+      pendingApprovals: restoredApprovals,
+      transcriptMode,
       permissionMode: String(event.session.permission_mode ?? state.permissionMode),
     };
   }

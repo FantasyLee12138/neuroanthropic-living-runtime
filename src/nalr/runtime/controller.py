@@ -20,7 +20,7 @@ from nalr.dream.orchestrator import DreamOrchestrator
 from nalr.memory.store import MemoryStore, _derive_cue
 from nalr.output.renderer import fallback_render_text
 from nalr.output.style import build_expression_profile, build_render_plan, compute_style_profile
-from nalr.providers import ModelRequest, ModelRouter
+from nalr.providers import MissingModelCredentialError, ModelRequest, ModelRouter
 from nalr.run import SupervisorLoop
 from nalr.runtime.model_gateway import ModelGateway
 from nalr.runtime.async_io import AsyncIOWorker
@@ -767,14 +767,19 @@ class RuntimeController:
     def _identity_cfg(self) -> dict[str, Any]:
         return self.config["identity"]["identity"]
 
-    def _provider_descriptor(self) -> tuple[str, str]:
-        route_cfg = self.config["models"]["model_routes"].get("renderer", {})
+    def _provider_descriptor_for_route(self, route_name: str = "renderer") -> tuple[str, str]:
+        route_cfg = self.config["models"]["model_routes"].get(route_name, {})
         backend = str(route_cfg.get("backend", "model")).lower()
         if backend == "doubao":
             provider_label = "Doubao/Ark route"
+        elif backend == "deepseek":
+            provider_label = "DeepSeek route"
         else:
             provider_label = f"{backend.title()} route"
         return provider_label, str(route_cfg.get("model", "")).strip()
+
+    def _provider_descriptor(self) -> tuple[str, str]:
+        return self._provider_descriptor_for_route("renderer")
 
     def _unnamed_label(self) -> str:
         return self.identity_runtime.unnamed_label()
@@ -2463,6 +2468,210 @@ class RuntimeController:
             return f"{scenario}_probe task_mass={task_mass:.3f} chat_mass={chat_mass:.3f}"
         return f"{scenario}_probe chat_mass={chat_mass:.3f} task_mass={task_mass:.3f}"
 
+    def _is_fast_chat_candidate(self, text: str, *, target: str = "user", mode: str = "interactive") -> bool:
+        normalized = text.strip()
+        if not normalized or len(normalized) > 80:
+            return False
+        lowered = normalized.lower()
+        greeting_tokens = ("你好", "您好", "hello", "hi", "hey", "在吗")
+        direct_identity_tokens = (
+            "你是谁",
+            "你叫什么",
+            "有名字吗",
+            "who are you",
+            "what's your name",
+            "what is your name",
+        )
+        provider_tokens = (
+            "你是chatgpt",
+            "你是豆包",
+            "你底层是什么",
+            "what model are you",
+            "which model are you",
+        )
+        explanation_tokens = (
+            "为什么这样回答",
+            "为什么这么回答",
+            "why did you answer",
+            "why did you say",
+        )
+        capability_tokens = (
+            "你能做什么",
+            "你可以做什么",
+            "你会什么",
+            "能帮我做什么",
+            "what can you do",
+        )
+        if len(normalized) <= 24 and any(token in lowered for token in greeting_tokens):
+            return True
+        if len(normalized) <= 32 and any(
+            token in lowered
+            for token in (
+                *direct_identity_tokens,
+                *provider_tokens,
+                *explanation_tokens,
+                *capability_tokens,
+            )
+        ):
+            return True
+        event = RoundEvent(source="user", content=normalized, target=target)
+        state, _, _, _, context, relation_state, _ = self._probe_context(event, "chat", mode)
+        slow_variables = self._build_slow_variable_payload(
+            state=state,
+            context=context,
+            relation_state=relation_state,
+            prior_closeness=context.get("closeness", 0.5),
+        )
+        query_state = self._infer_query_intent(
+            event=event,
+            scenario="chat",
+            state=state,
+            relation_state=relation_state,
+            slow_variables=slow_variables,
+        )
+        return query_state.posterior.top_intent in {
+            "self_model_identity_probe",
+            "provider_lineage_probe",
+            "answer_reason_probe",
+            "capability_boundary_probe",
+        }
+
+    def _build_fast_chat_request(self, plan: TurnPlan) -> tuple[RuntimeState, dict[str, Any], ModelRequest]:
+        current_state = self.load_runtime_state()
+        event = RoundEvent(source="user", content=plan.text, target=plan.target)
+        probe_state, _, _, _, context, relation_state, _ = self._probe_context(event, "chat", plan.mode)
+        slow_variables = self._build_slow_variable_payload(
+            state=probe_state,
+            context=context,
+            relation_state=relation_state,
+            prior_closeness=context.get("closeness", 0.5),
+        )
+        query_state = self._infer_query_intent(
+            event=event,
+            scenario="chat",
+            state=probe_state,
+            relation_state=relation_state,
+            slow_variables=slow_variables,
+        )
+        disclosure_state = self._infer_disclosure_intent(
+            query_state=query_state,
+            scenario="chat",
+            state=probe_state,
+            relation_state=relation_state,
+            slow_variables=slow_variables,
+        )
+        identity_context = self._build_identity_context(
+            query_state=query_state,
+            disclosure_state=disclosure_state,
+            scenario="chat",
+            state=current_state,
+            shaping_events=[],
+            slow_variables=slow_variables,
+            state_sources=["focus"],
+            rename_event=None,
+        )
+        provider_label, model_label = self._provider_descriptor_for_route("chat_fast")
+        identity_context.provider_label = provider_label
+        identity_context.model_label = model_label
+        capsule = {
+            "user_text": plan.text,
+            "identity_context": to_dict(identity_context),
+            "state_summary": {
+                "mode": current_state.mode,
+                "focus": current_state.focus,
+                "mood": round(float(current_state.mood), 4),
+                "body_energy": round(float(current_state.body_energy), 4),
+                "affect_residue": round(float(current_state.affect_residue), 4),
+                "run_status": current_state.run_status,
+                "current_goal": current_state.current_goal,
+            },
+            "relation_state": relation_state,
+            "slow_variables": slow_variables,
+            "cognitive_snapshot": self.cognitive_snapshot(state=current_state),
+        }
+        request = ModelRequest(
+            system_prompt=self._fast_chat_system_prompt(identity_context),
+            user_prompt=self._json_prompt({"capsule": capsule}),
+            response_schema={"text": "str"},
+            metadata={"query_kind": identity_context.query_kind, "route": "chat_fast"},
+        )
+        return current_state, capsule, request
+
+    def _persist_fast_chat_capsule(self, state: RuntimeState, capsule: dict[str, Any], message: str) -> None:
+        state.session_metadata["fast_chat_capsule"] = {
+            **capsule,
+            "assistant_text": message,
+            "recorded_at": utc_now_iso(),
+        }
+        self._save_state(state)
+
+    def _fast_chat_system_prompt(self, identity: IdentityContext) -> str:
+        lines = [
+            "你是 NALR 的 fast-chat 表达层。",
+            "你只输出最终给用户看的自然语言正文，不要输出 JSON，不要解释规则。",
+            "你必须从当前运行体视角表达，不能把底层 provider 当成本体身份。",
+            f"当前本体标签: {identity.display_label or self._unnamed_label()} / {identity.class_label}.",
+            f"query_kind={identity.query_kind}; disclosure_detail={identity.disclosure_detail}.",
+            f"query_intent={identity.query_intent}; disclosure_intent={identity.disclosure_intent}.",
+            "回答应自然、简洁、像同一个运行体正在开口，不要写成客服、产品介绍或命令帮助。",
+        ]
+        if identity.query_kind == "self_identity":
+            lines.append("当用户在问你是谁时，只能说明自己是当前运行体实例，不得说“我是豆包/ChatGPT/provider”。")
+        elif identity.query_kind == "provider_identity":
+            lines.append("当用户追问底层能力时，先说明本体，再把 provider 作为底层能力来源说明。")
+        elif identity.query_kind == "answer_explanation":
+            lines.append("当用户追问为什么这样回答时，只能引用当前状态、记忆、关系、focus 和本轮表达收束。")
+        elif identity.query_intent == "capability_boundary_probe":
+            lines.append("当用户问你能做什么时，自然说明你会如何响应、记住、规划或协助，不要列清单。")
+        return " ".join(lines)
+
+    def _execute_fast_chat_turn(self, plan: TurnPlan) -> TurnExecution:
+        state, capsule, request = self._build_fast_chat_request(plan)
+        try:
+            response = self.model_router.generate("chat_fast", request)
+            final_message = str(response.payload.get("text", "")).strip()
+        except Exception:
+            result = self.tick(
+                RoundEvent(source="user", content=plan.text, target=plan.target),
+                scenario="chat",
+                mode=plan.mode,
+            )
+            final_message = result.rendered_expression.text.strip()
+        final_message = final_message or "你好，我在。你想让我帮你做什么？"
+        self._persist_fast_chat_capsule(state, capsule, final_message)
+        return TurnExecution(
+            route="fast_chat",
+            assistant_final=final_message,
+            payload={"capsule": capsule},
+        )
+
+    def stream_fast_chat_turn(self, plan: TurnPlan) -> tuple[list[str], TurnExecution]:
+        state, capsule, request = self._build_fast_chat_request(plan)
+        try:
+            deltas = [chunk for chunk in self.model_router.stream_generate("chat_fast", request) if isinstance(chunk, str) and chunk]
+            final_message = "".join(deltas).strip()
+            if not final_message:
+                response = self.model_router.generate("chat_fast", request)
+                final_message = str(response.payload.get("text", "")).strip()
+                deltas = [final_message] if final_message else []
+        except Exception:
+            result = self.tick(
+                RoundEvent(source="user", content=plan.text, target=plan.target),
+                scenario="chat",
+                mode=plan.mode,
+            )
+            final_message = result.rendered_expression.text.strip()
+            deltas = [final_message] if final_message else []
+        if not final_message:
+            final_message = "你好，我在。你想让我帮你做什么？"
+            deltas = [final_message]
+        self._persist_fast_chat_capsule(state, capsule, final_message)
+        return deltas, TurnExecution(
+            route="fast_chat",
+            assistant_final=final_message,
+            payload={"capsule": capsule, "stream_deltas": deltas},
+        )
+
     def _build_task_bootstrap(
         self,
         goal: str,
@@ -2506,6 +2715,22 @@ class RuntimeController:
             )
 
         scenario = self._terminal_route_scenario_hint(normalized)
+        if scenario == "chat" and self._is_fast_chat_candidate(normalized, target=target, mode=mode):
+            return TurnPlan(
+                text=normalized,
+                route="fast_chat",
+                scenario=scenario,
+                mode=mode,
+                target=target,
+                reason="chat_fast_heuristic",
+                top_action="respond",
+                precomputed_distribution={
+                    "action_distribution": {"respond": 1.0},
+                    "task_mass": 0.0,
+                    "chat_mass": 1.0,
+                },
+                task_bootstrap=None,
+            )
         event = RoundEvent(source="user", content=normalized, target=target)
         probe = self._probe_distribution_for_scenario(event, scenario=scenario, mode=mode)
         task_selected = (
@@ -2545,6 +2770,8 @@ class RuntimeController:
         replace_active: bool = False,
         interrupt_reason: str = "interrupted_by_user",
     ) -> TurnExecution:
+        if plan.route == "fast_chat":
+            return self._execute_fast_chat_turn(plan)
         if plan.route == "direct_chat":
             result = self.tick(
                 RoundEvent(source="user", content=plan.text, target=plan.target),

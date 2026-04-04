@@ -25,7 +25,11 @@ class TerminalEventHandler:
         event = validate_inbound_event(payload)
         event_type = event["type"]
         if event_type == "start_session":
-            return self._start_session(event["session_id"], event["cwd"])
+            return self._start_session(
+                event["session_id"],
+                event["cwd"],
+                persist_current=bool(event.get("persist_current", True)),
+            )
         if event_type == "user_turn":
             return self._user_turn_stream(event["session_id"], event["text"])
         if event_type == "control_command":
@@ -33,33 +37,75 @@ class TerminalEventHandler:
         if event_type == "approve":
             return self._approve(event["session_id"], event["call_id"], event["approved"])
         if event_type == "close_session":
-            return self._close_session(event["session_id"])
+            return self._close_session(
+                event["session_id"],
+                detach=bool(event.get("detach", False)),
+                transcript_mode=event.get("transcript_mode"),
+            )
         raise ProtocolError(f"unhandled event type: {event_type}")
 
     def _load_session(self, session_id: str) -> TerminalSessionState:
         return self.session_store.read(session_id)
 
-    def _start_session(self, session_id: str, cwd: str) -> list[dict[str, Any]]:
+    def _start_session(self, session_id: str, cwd: str, *, persist_current: bool = True) -> list[dict[str, Any]]:
         try:
             state = self.session_store.read(session_id)
-            state.cwd = cwd
-            state.status = "active"
+            if state.status in {"active", "detached"}:
+                state.cwd = cwd
+                state.status = "active"
+            else:
+                state = TerminalSessionState(session_id=session_id, cwd=cwd, status="active")
         except FileNotFoundError:
             state = TerminalSessionState(session_id=session_id, cwd=cwd, status="active")
-        self.session_store.write(state)
+        self.session_store.write(state, mark_current=persist_current)
         return [
             build_outbound_event("session_started", session=to_dict(state)),
             self._build_sidebar_snapshot_event(state),
         ]
 
+    def _append_transcript(self, session: TerminalSessionState, kind: str, text: str) -> None:
+        if not text:
+            return
+        session.transcript_lines.append({"kind": kind, "text": text.strip()})
+
+    def _append_tool_timeline(
+        self,
+        session: TerminalSessionState,
+        kind: str,
+        *,
+        call_id: str,
+        tool: str,
+        summary: str,
+        status: str | None,
+    ) -> None:
+        session.tool_timeline.append(
+            {
+                "kind": kind,
+                "callId": call_id,
+                "tool": tool,
+                "summary": summary,
+                "status": status,
+            }
+        )
+
     def _user_turn_stream(self, session_id: str, text: str) -> Iterable[dict[str, Any]]:
         session = self._load_session(session_id)
+        self._append_transcript(session, "user", text.strip())
         plan = self.controller.plan_turn(
             text.strip(),
             target="user",
             mode="interactive",
             operator_level="read_only",
         )
+        if getattr(plan, "route", "") == "fast_chat":
+            deltas, execution = self.controller.stream_fast_chat_turn(plan)
+            message = execution["assistant_final"] if isinstance(execution, dict) else execution.assistant_final
+            self._append_transcript(session, "assistant", message)
+            self.session_store.write(session)
+            for delta in deltas:
+                yield build_outbound_event("assistant_token", session_id=session_id, delta=delta, message=message)
+            yield build_outbound_event("assistant_final", session_id=session_id, message=message)
+            return
         execution = self.controller.execute_turn(
             plan,
             operator_level="read_only",
@@ -68,11 +114,25 @@ class TerminalEventHandler:
         )
 
         route = execution["route"] if isinstance(execution, dict) else execution.route
-        if route == "direct_chat":
+        if route in {"direct_chat", "fast_chat"}:
+            message = execution["assistant_final"] if isinstance(execution, dict) else execution.assistant_final
+            payload = execution.get("payload", {}) if isinstance(execution, dict) else getattr(execution, "payload", {})
+            deltas = list(payload.get("stream_deltas", [])) if isinstance(payload, dict) else []
+            if not deltas:
+                deltas = [message]
+            self._append_transcript(session, "assistant", message)
+            self.session_store.write(session)
+            for delta in deltas:
+                yield build_outbound_event(
+                    "assistant_token",
+                    session_id=session_id,
+                    delta=delta,
+                    message=message,
+                )
             yield build_outbound_event(
                 "assistant_final",
                 session_id=session_id,
-                message=(execution["assistant_final"] if isinstance(execution, dict) else execution.assistant_final),
+                message=message,
             )
             return
 
@@ -84,15 +144,23 @@ class TerminalEventHandler:
         session.active_run_id = run["run_id"]
         session.last_run_id = run["run_id"]
         session.status = "active"
+        self._append_transcript(session, "assistant", task_message)
         self.session_store.write(session)
         yield build_outbound_event("run_status", session_id=session_id, run=run)
         yield build_outbound_event("assistant_token", session_id=session_id, delta=task_message)
         pending_approvals = [item for item in session.approvals_pending if item.get("status") == "pending"]
+        session.approvals_pending = pending_approvals
         for step in steps:
+            self._append_transcript(session, "system", f"Step: {step.get('title') or step.get('step_id') or 'unknown'}")
+            self.session_store.write(session)
             yield build_outbound_event("step_update", session_id=session_id, step=step)
         for index, tool in enumerate(tools):
             call_id = f"{run['run_id']}:tool:{index}"
             tool_name = str(tool.get("tool_name") or "unknown")
+            summary = tool.get("summary") or tool.get("status") or ""
+            self._append_tool_timeline(session, "call", call_id=call_id, tool=tool_name, summary=summary, status=tool.get("status"))
+            self._append_transcript(session, "system", f"Tool: {tool_name}{f' - {summary}' if summary else ''}")
+            self.session_store.write(session)
             yield build_outbound_event(
                 "tool_call",
                 session_id=session_id,
@@ -100,7 +168,7 @@ class TerminalEventHandler:
                 run_id=run["run_id"],
                 tool=tool_name,
                 args=tool.get("input") or {},
-                summary=tool.get("summary") or tool.get("status") or "",
+                summary=summary,
                 status=tool.get("status"),
             )
             if session.permission_mode == "ask":
@@ -120,6 +188,15 @@ class TerminalEventHandler:
                 }
                 pending_approvals.append(approval_payload)
                 session.approvals_pending = pending_approvals
+                self._append_tool_timeline(
+                    session,
+                    "approval",
+                    call_id=call_id,
+                    tool=tool_name,
+                    summary=str(approval_payload["summary"]),
+                    status=str(approval_payload["status"]),
+                )
+                self._append_transcript(session, "system", f"Approval: {tool_name} - {approval_payload['summary']}")
                 self.session_store.write(session)
                 yield build_outbound_event(
                     "approval_request",
@@ -136,8 +213,19 @@ class TerminalEventHandler:
                     actions=approval_payload["actions"],
                     approved=None,
                 )
+            self._append_tool_timeline(
+                session,
+                "result",
+                call_id=call_id,
+                tool=tool_name,
+                summary=tool.get("output_excerpt") or summary,
+                status=tool.get("status"),
+            )
+            self._append_transcript(session, "system", f"Result: {tool_name}")
+            self.session_store.write(session)
             yield build_outbound_event("tool_result", session_id=session_id, call_id=call_id, result=tool)
 
+        self.session_store.write(session)
         yield self._build_sidebar_snapshot_event(session, run_id=run["run_id"], run=run, explain=explain, steps=steps, tools=tools)
         yield build_outbound_event(
             "assistant_final",
@@ -198,6 +286,7 @@ class TerminalEventHandler:
                 session.compact = False
             else:
                 return [build_outbound_event("error", session_id=session_id, message="Usage: /compact [on|off]")]
+            session.transcript_mode = "compact" if session.compact else "full"
             self.session_store.write(session)
             return [
                 self._build_sidebar_snapshot_event(session, run_id=run_id),
@@ -341,10 +430,13 @@ class TerminalEventHandler:
             )
         ]
 
-    def _close_session(self, session_id: str) -> list[dict[str, Any]]:
+    def _close_session(self, session_id: str, *, detach: bool = False, transcript_mode: str | None = None) -> list[dict[str, Any]]:
         session = self._load_session(session_id)
-        session.status = "ended"
-        self.session_store.write(session)
+        if transcript_mode:
+            session.transcript_mode = transcript_mode
+            session.compact = transcript_mode == "compact"
+        session.status = "detached" if detach else "ended"
+        self.session_store.write(session, mark_current=detach)
         return [build_outbound_event("session_ended", session=to_dict(session))]
 
     def _status_summary(self, run_payload: dict[str, Any]) -> str:

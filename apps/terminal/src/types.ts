@@ -15,11 +15,11 @@ export type BridgeControlCommand =
 export type PanelKey = "status" | "why" | "steps" | "tools" | "state" | null;
 
 export type InboundBridgeEvent =
-  | { type: "start_session"; session_id: string; cwd: string }
+  | { type: "start_session"; session_id: string; cwd: string; persist_current?: boolean }
   | { type: "user_turn"; session_id: string; text: string }
   | { type: "control_command"; session_id: string; command: BridgeControlCommand; value?: string }
   | { type: "approve"; session_id: string; call_id: string; approved: boolean }
-  | { type: "close_session"; session_id: string };
+  | { type: "close_session"; session_id: string; detach?: boolean; transcript_mode?: "full" | "compact" };
 
 export type OutboundBridgeEvent =
   | { type: "session_started"; session: Record<string, unknown> }

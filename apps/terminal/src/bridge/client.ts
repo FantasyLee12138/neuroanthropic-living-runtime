@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
@@ -35,6 +35,26 @@ export function createSessionId(prefix = "nalr"): string {
   return `${prefix}-${randomUUID().slice(0, 8)}`;
 }
 
+function resolveNalrHome(repoRoot: string): string {
+  return process.env.NALR_HOME ?? path.join(repoRoot, ".alive");
+}
+
+export function resolveInteractiveSessionId(repoRoot: string): string {
+  const currentPath = path.join(resolveNalrHome(repoRoot), "runtime", "current_terminal_session.json");
+  if (!existsSync(currentPath)) {
+    return createSessionId();
+  }
+  try {
+    const payload = JSON.parse(readFileSync(currentPath, "utf8")) as { session_id?: string; status?: string };
+    if (payload.session_id && (payload.status === "active" || payload.status === "detached")) {
+      return payload.session_id;
+    }
+  } catch {
+    return createSessionId();
+  }
+  return createSessionId();
+}
+
 export class PythonBridgeClient {
   private child: ChildProcessWithoutNullStreams | null = null;
   private listeners = new Set<EventListener>();
@@ -47,10 +67,10 @@ export class PythonBridgeClient {
     }
   ) {}
 
-  async startSession(sessionId: string, cwd: string): Promise<OutboundBridgeEvent> {
+  async startSession(sessionId: string, cwd: string, options?: { persistCurrent?: boolean }): Promise<OutboundBridgeEvent> {
     this.ensureProcess();
     const started = this.waitFor((event) => event.type === "session_started" && String(event.session.session_id ?? "") === sessionId);
-    this.send({ type: "start_session", session_id: sessionId, cwd });
+    this.send({ type: "start_session", session_id: sessionId, cwd, persist_current: options?.persistCurrent ?? true });
     return started;
   }
 
@@ -89,6 +109,25 @@ export class PythonBridgeClient {
     }
   }
 
+  async detachSession(sessionId: string, options?: { transcriptMode?: "full" | "compact" }): Promise<void> {
+    if (!this.child) {
+      return;
+    }
+    const detached = this.waitFor(
+      (event) =>
+        event.type === "session_ended" &&
+        String(event.session.session_id ?? "") === sessionId &&
+        String(event.session.status ?? "") === "detached",
+      4000,
+    );
+    this.send({ type: "close_session", session_id: sessionId, detach: true, transcript_mode: options?.transcriptMode });
+    try {
+      await detached;
+    } finally {
+      this.dispose();
+    }
+  }
+
   dispose(): void {
     for (const waiter of this.waiters) {
       clearTimeout(waiter.timeout);
@@ -108,7 +147,7 @@ export class PythonBridgeClient {
     const pythonBin = this.resolvePythonBin();
     const env = {
       ...process.env,
-      NALR_HOME: process.env.NALR_HOME ?? path.join(this.options.repoRoot, ".alive"),
+      NALR_HOME: resolveNalrHome(this.options.repoRoot),
       NALR_CONFIG_DIR: process.env.NALR_CONFIG_DIR ?? path.join(this.options.repoRoot, "config"),
       PYTHONPATH: process.env.PYTHONPATH
         ? `${path.join(this.options.repoRoot, "src")}:${process.env.PYTHONPATH}`

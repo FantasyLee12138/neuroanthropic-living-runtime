@@ -3,7 +3,7 @@ import { Box, Text, useApp, useInput } from "ink";
 import TextInput from "ink-text-input";
 
 import { parseSlashCommand } from "./commands/slash.js";
-import { PythonBridgeClient, createSessionId } from "./bridge/client.js";
+import { PythonBridgeClient, resolveInteractiveSessionId } from "./bridge/client.js";
 import { buildConsoleViewportPlan } from "./consoleLayout.js";
 import { formatCognitiveSummary, formatPanelBody } from "./panelSummary.js";
 import { commitPrompt, createPromptHistoryState, movePromptCursor } from "./promptHistory.js";
@@ -32,7 +32,7 @@ function truncateBlock(text: string, maxLines: number): string {
     .join("\n");
 }
 
-export function App({ bridge, cwd }: { bridge: PythonBridgeClient; cwd: string }) {
+export function App({ bridge, cwd, repoRoot }: { bridge: PythonBridgeClient; cwd: string; repoRoot: string }) {
   const { exit } = useApp();
   const stdoutWidth = process.stdout.columns ?? 120;
   const stdoutHeight = process.stdout.rows ?? 32;
@@ -41,7 +41,8 @@ export function App({ bridge, cwd }: { bridge: PythonBridgeClient; cwd: string }
   const [promptHistoryState, setPromptHistoryState] = useState(createPromptHistoryState());
   const [panel, setPanel] = useState<PanelKey>(null);
   const [transcriptOffset, setTranscriptOffset] = useState(0);
-  const sessionId = useMemo(() => createSessionId(), []);
+  const sessionId = useMemo(() => resolveInteractiveSessionId(repoRoot), [repoRoot]);
+  const effectiveSessionId = uiState.activeSessionId ?? sessionId;
   const pendingApproval = uiState.pendingApprovals[0] ?? null;
   const viewportPlan = buildConsoleViewportPlan({
     width: stdoutWidth,
@@ -77,11 +78,11 @@ export function App({ bridge, cwd }: { bridge: PythonBridgeClient; cwd: string }
   useInput((rawInput, key) => {
     const normalizedInput = rawInput.toLowerCase();
     if (key.ctrl && normalizedInput === "c") {
-      bridge.send({ type: "control_command", session_id: sessionId, command: "abort" });
+      bridge.send({ type: "control_command", session_id: effectiveSessionId, command: "abort" });
       return;
     }
     if (key.ctrl && normalizedInput === "d") {
-      void bridge.closeSession(sessionId).finally(() => exit());
+      void bridge.detachSession(effectiveSessionId, { transcriptMode: uiState.transcriptMode }).finally(() => exit());
       return;
     }
     if (key.ctrl && normalizedInput === "l") {
@@ -91,7 +92,7 @@ export function App({ bridge, cwd }: { bridge: PythonBridgeClient; cwd: string }
     if (pendingApproval && (normalizedInput === "y" || normalizedInput === "n")) {
       bridge.send({
         type: "approve",
-        session_id: sessionId,
+        session_id: effectiveSessionId,
         call_id: pendingApproval.callId,
         approved: normalizedInput === "y",
       });
@@ -157,7 +158,7 @@ export function App({ bridge, cwd }: { bridge: PythonBridgeClient; cwd: string }
     const parsed = parseSlashCommand(trimmed);
     if (!parsed) {
       setUiState((current) => addUserLine(current, trimmed));
-      bridge.send({ type: "user_turn", session_id: sessionId, text: trimmed });
+      bridge.send({ type: "user_turn", session_id: effectiveSessionId, text: trimmed });
       return;
     }
     if (parsed.kind === "local") {
@@ -178,7 +179,7 @@ export function App({ bridge, cwd }: { bridge: PythonBridgeClient; cwd: string }
         return;
       }
       if (parsed.command === "exit") {
-        await bridge.closeSession(sessionId);
+        await bridge.detachSession(effectiveSessionId, { transcriptMode: uiState.transcriptMode });
         exit();
       }
       return;
@@ -196,7 +197,7 @@ export function App({ bridge, cwd }: { bridge: PythonBridgeClient; cwd: string }
     ) {
       setPanel(parsed.command);
     }
-    bridge.send({ type: "control_command", session_id: sessionId, command: parsed.command, value: parsed.value });
+    bridge.send({ type: "control_command", session_id: effectiveSessionId, command: parsed.command, value: parsed.value });
   }
 
   const transcriptWindow = buildTranscriptWindow(
