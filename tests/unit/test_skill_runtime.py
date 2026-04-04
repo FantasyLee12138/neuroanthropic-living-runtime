@@ -1,8 +1,10 @@
 import json
 import shutil
 import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from nalr.agents.probability_field import build_probabilistic_contribution
 from nalr.runtime.controller import RuntimeController
 from nalr.schemas.models import (
     CircuitBreakerPolicy,
@@ -12,7 +14,9 @@ from nalr.schemas.models import (
     SkillPermissionProfile,
     SkillRuntimeContext,
     SkillSpec,
+    to_dict,
 )
+from nalr.skills.contracts import coerce_contract
 from nalr.skills.executor import SkillExecutor
 from nalr.skills.registry import build_skill_registry
 
@@ -183,6 +187,176 @@ def test_skill_executor_coerces_typed_inputs_and_outputs(tmp_path):
     assert output.reason == "help me plan"
     assert result.degraded is False
     assert result.output["action_preferences"]["plan"] == 0.3
+
+
+def test_skill_executor_accepts_probability_contribution_for_proposal_contract(tmp_path):
+    spec = SkillSpec(
+        name="typed_probability_demo",
+        owner_module="PFCAgent",
+        input_schema={"event": RoundEvent},
+        output_schema=ProposalBundle,
+        timeout_ms=20,
+        cost_class="H",
+        failure_policy="fallback_to_rules",
+        trace_tags=["proposal"],
+        skill_kind="planning",
+        output_kind="candidate_actions",
+        policy_check=True,
+        permission=SkillPermissionProfile(external_io=True),
+        fallback_route=FallbackRoute(strategy="fallback_to_rules", target="PFCAgent.fallback_generate_candidates", cost_class="L"),
+        breaker_policy=CircuitBreakerPolicy(failure_threshold=3, cooldown_rounds=5),
+    )
+    executor = SkillExecutor({"typed_probability_demo": spec}, circuit_breaker_path=tmp_path / "circuit_breakers.json")
+
+    contribution = build_probabilistic_contribution(
+        owner="PFCAgent",
+        prefs={"respond": 0.08, "plan": 0.32, "recall": 0.18},
+        confidence=0.84,
+        sigma_scale=0.92,
+        reason="deliberate planner",
+        trace_tags=["pfc"],
+        layer="action",
+    )
+
+    output, result = executor.run(
+        round_id=1,
+        skill_name="typed_probability_demo",
+        inputs={"event": {"source": "user", "content": "help me plan", "cue": "plan"}},
+        provider=lambda event: asdict(contribution),
+        runtime_context=SkillRuntimeContext(round_id=1, scenario="task", mode="interactive"),
+    )
+
+    assert isinstance(output, ProposalBundle)
+    assert output.action_preferences["plan"] == 0.32
+    assert result.degraded is False
+
+
+def test_contract_coercion_projects_kernel_payload_into_proposal_bundle():
+    contribution = build_probabilistic_contribution(
+        owner="PFCAgent",
+        prefs={"respond": 0.08, "plan": 0.32, "recall": 0.18},
+        confidence=0.84,
+        sigma_scale=0.92,
+        reason="deliberate planner",
+        trace_tags=["pfc"],
+        layer="action",
+    )
+
+    payload = asdict(contribution)
+    payload.pop("owner")
+    payload.pop("action_preferences")
+    payload.pop("delta_p")
+    payload.pop("reason")
+
+    coerced = coerce_contract(payload, ProposalBundle, path="typed_probability_demo.output")
+
+    assert isinstance(coerced, ProposalBundle)
+    assert coerced.owner == "PFCAgent"
+    assert coerced.action_preferences["plan"] == 0.32
+    assert coerced.delta_p["plan"] == 0.32
+    assert coerced.reason == "deliberate planner"
+
+
+def test_skill_executor_skip_breaker_persist_when_success_state_is_already_clean(tmp_path, monkeypatch):
+    spec = SkillSpec(
+        name="typed_demo",
+        owner_module="demo",
+        input_schema={"event": RoundEvent},
+        output_schema=ProposalBundle,
+        timeout_ms=20,
+        cost_class="L",
+        failure_policy="fallback_to_rules",
+        trace_tags=["demo"],
+        skill_kind="planning",
+        output_kind="candidate_actions",
+        breaker_policy=CircuitBreakerPolicy(failure_threshold=3, cooldown_rounds=5),
+    )
+    breaker_path = tmp_path / "circuit_breakers.json"
+    breaker_path.write_text("{}", encoding="utf-8")
+    executor = SkillExecutor({"typed_demo": spec}, circuit_breaker_path=breaker_path)
+    executor._breaker_for("typed_demo")
+
+    called = False
+
+    def fail_save():
+        nonlocal called
+        called = True
+        raise AssertionError("_save_breakers should not be called for already-clean success state")
+
+    monkeypatch.setattr(executor, "_save_breakers", fail_save)
+
+    state = executor._record_success("typed_demo")
+
+    assert state.failure_count == 0
+    assert state.open_until_round is None
+    assert called is False
+
+
+def test_skill_executor_reuses_loaded_breaker_cache_without_reloading_file(tmp_path, monkeypatch):
+    spec = SkillSpec(
+        name="typed_demo",
+        owner_module="demo",
+        input_schema={"event": RoundEvent},
+        output_schema=ProposalBundle,
+        timeout_ms=20,
+        cost_class="L",
+        failure_policy="fallback_to_rules",
+        trace_tags=["demo"],
+        skill_kind="planning",
+        output_kind="candidate_actions",
+        breaker_policy=CircuitBreakerPolicy(failure_threshold=3, cooldown_rounds=5),
+    )
+    breaker_path = tmp_path / "circuit_breakers.json"
+    breaker_path.write_text(
+        json.dumps({"typed_demo": {"failure_count": 1, "last_failure_round": 7}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    executor = SkillExecutor({"typed_demo": spec}, circuit_breaker_path=breaker_path)
+
+    first = executor._breaker_for("typed_demo")
+
+    def fail_read_text(*args, **kwargs):
+        raise AssertionError("breaker file should not be reread after cache is loaded")
+
+    monkeypatch.setattr(Path, "read_text", fail_read_text)
+
+    second = executor._breaker_for("typed_demo")
+
+    assert first.failure_count == 1
+    assert second.failure_count == 1
+
+
+@dataclass
+class _NestedToDict:
+    label: str
+    path: Path
+    payload: dict[str, object]
+
+
+def test_to_dict_preserves_nested_dataclass_shape_without_asdict():
+    payload = _NestedToDict(
+        label="demo",
+        path=Path("/tmp/example.txt"),
+        payload={"event": RoundEvent(source="user", content="hello", cue="tea")},
+    )
+
+    serialized = to_dict(payload)
+
+    assert serialized == {
+        "label": "demo",
+        "path": "/tmp/example.txt",
+        "payload": {
+            "event": {
+                "source": "user",
+                "content": "hello",
+                "target": None,
+                "cue": "tea",
+                "valence": 0.0,
+                "energy_delta": 0.0,
+                "cue_quality": 0.0,
+            }
+        },
+    }
 
 
 def test_skill_executor_persists_breaker_and_uses_fallback_during_cooldown(tmp_path):

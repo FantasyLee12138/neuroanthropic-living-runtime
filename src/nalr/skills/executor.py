@@ -40,6 +40,7 @@ class SkillExecutor:
         self.circuit_breaker_path = Path(circuit_breaker_path) if circuit_breaker_path else None
         self.environment_fingerprint = environment_fingerprint
         self._breaker_cache: dict[str, CircuitBreakerState] = {}
+        self._breakers_loaded = False
         self._breaker_lock = threading.RLock()
 
     def _write_text_atomic(self, path: Path, content: str) -> None:
@@ -51,15 +52,20 @@ class SkillExecutor:
     def _load_breakers(self) -> dict[str, CircuitBreakerState]:
         with self._breaker_lock:
             if self.circuit_breaker_path is None:
+                self._breakers_loaded = True
+                return self._breaker_cache
+            if self._breakers_loaded:
                 return self._breaker_cache
             if not self.circuit_breaker_path.exists():
                 self._save_breakers()
+                self._breakers_loaded = True
                 return self._breaker_cache
 
             raw_text = self.circuit_breaker_path.read_text(encoding="utf-8").strip()
             if not raw_text:
                 self._breaker_cache = {}
                 self._save_breakers()
+                self._breakers_loaded = True
                 return self._breaker_cache
 
             try:
@@ -67,6 +73,7 @@ class SkillExecutor:
             except json.JSONDecodeError:
                 self._breaker_cache = {}
                 self._save_breakers()
+                self._breakers_loaded = True
                 return self._breaker_cache
 
             meta: dict[str, Any] = {}
@@ -80,6 +87,7 @@ class SkillExecutor:
             if self.environment_fingerprint is not None and stored_fingerprint != self.environment_fingerprint:
                 self._breaker_cache = {}
                 self._save_breakers()
+                self._breakers_loaded = True
                 return self._breaker_cache
 
             self._breaker_cache = {
@@ -87,6 +95,7 @@ class SkillExecutor:
                 for name, state in payload.items()
                 if isinstance(state, dict)
             }
+            self._breakers_loaded = True
             return self._breaker_cache
 
     def _save_breakers(self) -> None:
@@ -132,12 +141,22 @@ class SkillExecutor:
     def _record_success(self, skill_name: str) -> CircuitBreakerState:
         with self._breaker_lock:
             state = self._breaker_for(skill_name)
+            was_dirty = any(
+                (
+                    state.failure_count != 0,
+                    state.open_until_round is not None,
+                    state.last_failure_round is not None,
+                    state.last_failure_reason is not None,
+                    state.fallback_route is not None,
+                )
+            )
             state.failure_count = 0
             state.open_until_round = None
             state.last_failure_round = None
             state.last_failure_reason = None
             state.fallback_route = None
-            self._save_breakers()
+            if was_dirty:
+                self._save_breakers()
             return state
 
     def _invoke_callable(self, provider: Any, validated_inputs: dict[str, Any]) -> Any:

@@ -10,6 +10,84 @@ def _clip(value: float, low: float = 0.0, high: float = 1.0) -> float:
 
 
 class VitalityEngine:
+    def build_vitality_modulation_payload(
+        self,
+        *,
+        state: RuntimeState,
+        context: dict[str, Any],
+        relation_state: dict[str, float],
+        prior_closeness: float,
+        requested_mode: str | None = None,
+    ) -> dict[str, Any]:
+        slow_variables = self.build_slow_variable_payload(
+            state=state,
+            context=context,
+            relation_state=relation_state,
+            prior_closeness=prior_closeness,
+        )
+        resource_scarcity = float(slow_variables["resource_scarcity"])
+        body_energy = float(slow_variables["body_energy"])
+        affect_residue = float(slow_variables["affect_residue"])
+        memory_activation = float(slow_variables["memory_activation"])
+        habit_readiness = float(slow_variables["habit_readiness"])
+        relationship_drift = float(slow_variables["relationship_drift"])
+
+        temperature_scale = _clip(1.0 + resource_scarcity * 0.14 + affect_residue * 0.10 - body_energy * 0.12, 0.65, 1.25)
+        search_scale = _clip(1.0 + memory_activation * 0.10 + habit_readiness * 0.06 - resource_scarcity * 0.08, 0.55, 1.30)
+        tool_budget_scale = _clip(1.0 - resource_scarcity * 0.30 - (1.0 - body_energy) * 0.10, 0.35, 1.05)
+        exploration_bias = _clip(body_energy * 0.30 + memory_activation * 0.22 - resource_scarcity * 0.18 + relationship_drift * 0.06, 0.0, 1.0)
+        conservatism_bias = _clip(1.0 - exploration_bias * 0.80 + resource_scarcity * 0.10, 0.0, 1.0)
+        vitality_score = _clip(0.40 + body_energy * 0.25 + conservatism_bias * 0.15 - resource_scarcity * 0.10)
+        vitality_penalty = _clip(resource_scarcity * 0.22 + (1.0 - body_energy) * 0.18 + affect_residue * 0.08)
+
+        action_bias = {
+            "rest": round(_clip(0.12 + (1.0 - body_energy) * 0.22 + resource_scarcity * 0.08), 4),
+            "respond": round(_clip(0.08 + float(slow_variables["relationship_closeness"]) * 0.10 + body_energy * 0.04), 4),
+            "plan": round(_clip(0.06 + memory_activation * 0.08 - resource_scarcity * 0.04), 4),
+            "clarify": round(_clip(0.05 + float(slow_variables["relationship_closeness"]) * 0.06 + habit_readiness * 0.04), 4),
+            "recall": round(_clip(0.05 + memory_activation * 0.14), 4),
+            "connect": round(_clip(0.03 + float(slow_variables["relationship_closeness"]) * 0.08 - resource_scarcity * 0.03), 4),
+            "wander": round(_clip(0.04 + exploration_bias * 0.12 - resource_scarcity * 0.06), 4),
+        }
+        if requested_mode == "idle":
+            action_bias["wander"] = round(_clip(action_bias["wander"] + 0.04), 4)
+        elif requested_mode == "sleep":
+            action_bias["rest"] = round(_clip(action_bias["rest"] + 0.08), 4)
+            action_bias["wander"] = round(_clip(action_bias["wander"] - 0.04), 4)
+
+        return {
+            "module_name": "VitalityEngine",
+            "layer": "global",
+            "kind": "vitality_modulation",
+            "prior_role": "stable_prior",
+            "mode": requested_mode or state.mode,
+            "slow_variables": slow_variables,
+            "modulation": {
+                "temperature_scale": round(temperature_scale, 4),
+                "search_scale": round(search_scale, 4),
+                "tool_budget_scale": round(tool_budget_scale, 4),
+                "exploration_bias": round(exploration_bias, 4),
+                "conservatism_bias": round(conservatism_bias, 4),
+            },
+            "delta_logits": action_bias,
+            "attention_bias": {
+                "memory": round(_clip(memory_activation + habit_readiness * 0.4), 4),
+                "stability": round(_clip(conservatism_bias), 4),
+                "exploration": round(_clip(exploration_bias), 4),
+            },
+            "vitality_score": round(vitality_score, 4),
+            "vitality_penalty": round(vitality_penalty, 4),
+            "soft_mask": {
+                "wander": round(_clip(resource_scarcity * 0.14 + (1.0 - body_energy) * 0.05), 4),
+            },
+            "hard_mask": {},
+            "confidence": round(vitality_score, 4),
+            "trace_reason": (
+                f"mode={requested_mode or state.mode}; energy={body_energy:.2f}; "
+                f"scarcity={resource_scarcity:.2f}; memory={memory_activation:.2f}"
+            ),
+        }
+
     def apply_noninteractive_shaping(
         self,
         state: RuntimeState,
@@ -109,6 +187,13 @@ class VitalityEngine:
             row.agent_name == "HabitAgent" and row.action_name == sampled_action.name and row.score >= 0.03
             for row in contributions
         )
+        modulation_payload = self.build_vitality_modulation_payload(
+            state=state,
+            context=context,
+            relation_state=relation_state,
+            prior_closeness=prior_closeness,
+            requested_mode=state.mode,
+        )
         snapshot.update(
             {
                 "scenario": scenario,
@@ -118,6 +203,10 @@ class VitalityEngine:
                 "habit_takeover": habit_takeover,
                 "forced_recovery": any(item.get("stage") == "forced_mode_switch" for item in gate_decisions),
                 "non_interactive_event_count": len([item for item in shaping_events if item.get("non_interactive")]),
+                "vitality_score": modulation_payload["vitality_score"],
+                "vitality_penalty": modulation_payload["vitality_penalty"],
+                "vitality_modulation": modulation_payload["modulation"],
+                "vitality_bias": modulation_payload["delta_logits"],
             }
         )
         return snapshot

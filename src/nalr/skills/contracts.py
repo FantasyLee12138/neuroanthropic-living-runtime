@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import MISSING, fields, is_dataclass
+from dataclasses import MISSING, asdict, fields, is_dataclass
 from types import UnionType
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
@@ -50,6 +50,13 @@ TYPE_REF_REGISTRY: dict[str, Any] = {
 
 
 UNION_ORIGINS = {Union, UnionType}
+PROPOSAL_BUNDLE_KERNEL_ALIASES = {
+    "owner": ("owner", "module_name", "agent_name", "owner_module"),
+    "action_preferences": ("action_preferences", "delta_p", "delta_logits"),
+    "delta_p": ("delta_p", "action_preferences", "delta_logits"),
+    "reason": ("reason", "trace_reason"),
+    "trace_tags": ("trace_tags", "tags"),
+}
 
 
 def _split_generic_args(expr: str) -> list[str]:
@@ -133,6 +140,19 @@ def _coerce_primitive(value: Any, contract: type, path: str) -> Any:
     raise ValueError(f"{path} unsupported primitive contract {contract}")
 
 
+def _project_proposal_bundle_payload(value: dict[str, Any]) -> dict[str, Any]:
+    projected = dict(value)
+    for target, aliases in PROPOSAL_BUNDLE_KERNEL_ALIASES.items():
+        if projected.get(target):
+            continue
+        for alias in aliases[1:]:
+            alias_value = projected.get(alias)
+            if alias_value:
+                projected[target] = alias_value
+                break
+    return projected
+
+
 def coerce_contract(value: Any, contract: Any, *, path: str = "value") -> Any:
     if contract is Any:
         return value
@@ -179,12 +199,39 @@ def coerce_contract(value: Any, contract: Any, *, path: str = "value") -> Any:
     if isinstance(contract, type) and is_dataclass(contract):
         if isinstance(value, contract):
             return value
+        if is_dataclass(value):
+            value = asdict(value)
         if not isinstance(value, dict):
             raise ValueError(f"{path} expected {contract.__name__}")
+        if contract is ProposalBundle:
+            value = _project_proposal_bundle_payload(value)
         field_values: dict[str, Any] = {}
         known_fields = {field.name: field for field in fields(contract)}
         type_hints = get_type_hints(contract)
         extras = [key for key in value if key not in known_fields]
+        if extras:
+            if contract is ProposalBundle and {
+                "module_name",
+                "layer",
+                "level",
+                "delta_logits",
+                "delta_energy",
+                "attention_bias",
+                "soft_mask",
+                "hard_mask",
+                "posterior",
+                "trace_reason",
+                "trace_scope",
+                "confidence_trace",
+                "weight_applied",
+                "selected",
+                "target_name",
+                "top_action",
+                "tags",
+                "suppression_cause",
+            }.issuperset(extras):
+                value = {key: item for key, item in value.items() if key in known_fields}
+                extras = []
         if extras:
             raise ValueError(f"{path} unexpected keys: {', '.join(extras)}")
         for field in fields(contract):

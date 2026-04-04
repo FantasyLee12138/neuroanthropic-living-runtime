@@ -14,7 +14,7 @@ class AuthenticityPolicy:
     def __init__(self, identity_cfg: dict[str, Any]) -> None:
         self.identity_cfg = identity_cfg
 
-    def apply_sampling_penalties(
+    def _score_sampling_penalties(
         self,
         distribution: dict[str, float],
         *,
@@ -23,13 +23,23 @@ class AuthenticityPolicy:
         slow_variables: dict[str, Any],
         memory_cue: str | None,
         shaping_events: list[dict[str, Any]],
-    ) -> tuple[dict[str, float], dict[str, float], float]:
+    ) -> dict[str, Any]:
         if not distribution:
-            return {}, {}, 0.0
+            return {
+                "adjusted_distribution": {},
+                "candidate_penalties": {},
+                "sampling_penalty_applied": 0.0,
+                "self_grounding_score": 0.0,
+                "guard_action": "pass",
+                "trace_reason": "empty_distribution",
+                "penalty_strength": 0.0,
+            }
 
         penalties = {action: 0.0 for action in distribution}
         has_non_interactive = any(item.get("source") in {"idle", "sleep"} for item in shaping_events)
         cue_active = bool(memory_cue) or float(slow_variables.get("memory_activation", 0.0) or 0.0) >= 0.15
+        self_grounding_score = 0.8 if query_kind == "general" else 0.55
+        guard_action = "pass"
 
         if query_kind in {"self_identity", "provider_identity"}:
             for action in distribution:
@@ -37,6 +47,8 @@ class AuthenticityPolicy:
                     penalties[action] += 0.18
                 if action == "wander":
                     penalties[action] += 0.16
+            self_grounding_score += 0.12
+            guard_action = "soft_penalty"
         elif query_kind == "answer_explanation":
             for action in distribution:
                 if action not in {"respond", "recall", "clarify", "short_reply"}:
@@ -45,10 +57,13 @@ class AuthenticityPolicy:
                     penalties[action] += 0.08
                 if has_non_interactive and action == "wander":
                     penalties[action] += 0.08
+            self_grounding_score += 0.08
+            guard_action = "soft_penalty"
         if disclosure_intent == "withhold":
             for action in distribution:
                 if action in {"connect", "wander"}:
                     penalties[action] += 0.10
+            self_grounding_score -= 0.05
         elif disclosure_intent == "provider_origin":
             for action in distribution:
                 if action in {"connect", "wander"}:
@@ -56,7 +71,7 @@ class AuthenticityPolicy:
         elif disclosure_intent == "relational_self_disclosure":
             penalties["short_reply"] = penalties.get("short_reply", 0.0) + 0.08
 
-        adjusted = {}
+        adjusted: dict[str, float] = {}
         sampling_penalty_applied = 0.0
         for action, probability in distribution.items():
             penalty = _clip(penalties.get(action, 0.0), 0.0, 0.75)
@@ -67,7 +82,85 @@ class AuthenticityPolicy:
         total = sum(adjusted.values()) or 1.0
         normalized = {action: round(value / total, 6) for action, value in adjusted.items()}
         normalized_penalties = {action: round(value, 4) for action, value in penalties.items() if value > 0.0}
-        return normalized, normalized_penalties, round(sampling_penalty_applied, 4)
+        trace_reason = (
+            f"query={query_kind}; disclosure={disclosure_intent}; "
+            f"cue_active={cue_active}; non_interactive={has_non_interactive}"
+        )
+        return {
+            "adjusted_distribution": normalized,
+            "candidate_penalties": normalized_penalties,
+            "sampling_penalty_applied": round(sampling_penalty_applied, 4),
+            "self_grounding_score": round(_clip(self_grounding_score, 0.0, 1.0), 4),
+            "guard_action": guard_action,
+            "trace_reason": trace_reason,
+            "penalty_strength": round(
+                _clip(
+                    sampling_penalty_applied + float(sum(penalties.values())) * 0.15 + (0.08 if guard_action != "pass" else 0.0),
+                    0.0,
+                    1.0,
+                ),
+                4,
+            ),
+        }
+
+    def apply_sampling_penalties(
+        self,
+        distribution: dict[str, float],
+        *,
+        query_kind: str,
+        disclosure_intent: str,
+        slow_variables: dict[str, Any],
+        memory_cue: str | None,
+        shaping_events: list[dict[str, Any]],
+    ) -> tuple[dict[str, float], dict[str, float], float]:
+        payload = self._score_sampling_penalties(
+            distribution,
+            query_kind=query_kind,
+            disclosure_intent=disclosure_intent,
+            slow_variables=slow_variables,
+            memory_cue=memory_cue,
+            shaping_events=shaping_events,
+        )
+        return payload["adjusted_distribution"], payload["candidate_penalties"], payload["sampling_penalty_applied"]
+
+    def build_authenticity_penalty_payload(
+        self,
+        distribution: dict[str, float],
+        *,
+        query_kind: str,
+        disclosure_intent: str,
+        slow_variables: dict[str, Any],
+        memory_cue: str | None,
+        shaping_events: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        payload = self._score_sampling_penalties(
+            distribution,
+            query_kind=query_kind,
+            disclosure_intent=disclosure_intent,
+            slow_variables=slow_variables,
+            memory_cue=memory_cue,
+            shaping_events=shaping_events,
+        )
+        return {
+            "module_name": "AuthenticityPolicy",
+            "layer": "action",
+            "kind": "penalty",
+            "prior_role": "penalty",
+            "candidate_penalties": payload["candidate_penalties"],
+            "normalized_distribution": payload["adjusted_distribution"],
+            "sampling_penalty_applied": payload["sampling_penalty_applied"],
+            "self_grounding_score": payload["self_grounding_score"],
+            "confidence": payload["self_grounding_score"],
+            "penalty_strength": payload["penalty_strength"],
+            "guard_action": payload["guard_action"],
+            "trace_reason": payload["trace_reason"],
+            "signal_summary": {
+                "query_kind": query_kind,
+                "disclosure_intent": disclosure_intent,
+                "memory_cue_active": bool(memory_cue),
+                "non_interactive": any(item.get("source") in {"idle", "sleep"} for item in shaping_events),
+            },
+        }
 
     def evaluate_text(self, text: str, render_plan: RenderPlan) -> dict[str, Any]:
         identity = render_plan.identity_context
@@ -127,6 +220,48 @@ class AuthenticityPolicy:
             "false_self_claim_penalty": false_self_claim_penalty,
             "violation_types": violation_types,
             "state_sources": state_sources,
+        }
+
+    def build_authenticity_prior_payload(
+        self,
+        *,
+        render_plan: RenderPlan,
+        evaluation: dict[str, Any],
+        candidate_penalties: dict[str, float],
+        sampling_penalty_applied: float,
+    ) -> dict[str, Any]:
+        identity = render_plan.identity_context
+        return {
+            "module_name": "AuthenticityPolicy",
+            "layer": "action",
+            "kind": "prior_penalty",
+            "prior_role": "penalty",
+            "identity_context": {
+                "query_kind": identity.query_kind,
+                "disclosure_detail": identity.disclosure_detail,
+                "disclosure_intent": identity.disclosure_intent,
+                "display_label": identity.display_label,
+                "class_label": identity.class_label,
+                "self_description_sources": list(identity.self_description_sources),
+                "state_sources": list(evaluation.get("state_sources", [])),
+            },
+            "candidate_penalties": dict(candidate_penalties),
+            "sampling_penalty_applied": float(sampling_penalty_applied),
+            "self_grounding_score": float(evaluation.get("self_grounding_score", 0.0)),
+            "confidence": float(evaluation.get("self_grounding_score", 0.0)),
+            "provider_leak_penalty": float(evaluation.get("provider_leak_penalty", 0.0)),
+            "false_self_claim_penalty": float(evaluation.get("false_self_claim_penalty", 0.0)),
+            "penalty_strength": float(evaluation.get("penalty_strength", sampling_penalty_applied)),
+            "trace_reason": (
+                f"query={identity.query_kind}; disclosure={identity.disclosure_detail}; "
+                f"grounding={float(evaluation.get('self_grounding_score', 0.0)):.2f}"
+            ),
+            "bias": {
+                "respond": round(_clip(0.05 + float(evaluation.get("self_grounding_score", 0.0)) * 0.05), 4),
+                "clarify": round(_clip(0.04 + len(candidate_penalties) * 0.01), 4),
+                "short_reply": round(_clip(0.03 + sampling_penalty_applied * 0.02), 4),
+                "wander": round(_clip(0.10 + float(evaluation.get("provider_leak_penalty", 0.0)) * 0.08), 4),
+            },
         }
 
     def build_record(

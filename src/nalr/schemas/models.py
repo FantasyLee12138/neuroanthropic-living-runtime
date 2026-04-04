@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 
 def to_dict(value: Any) -> Any:
-    if hasattr(value, "__dataclass_fields__"):
-        return to_dict(asdict(value))
+    if is_dataclass(value) and not isinstance(value, type):
+        return {field.name: to_dict(getattr(value, field.name)) for field in fields(value)}
     if isinstance(value, list):
         return [to_dict(item) for item in value]
     if isinstance(value, tuple):
@@ -809,6 +809,201 @@ class ProposalBundle:
     completion_tokens: int = 0
     agent_tier: str = ""
 
+    def to_probability_contribution(
+        self,
+        *,
+        module_name: str | None = None,
+        layer: str = "action",
+        level: str | None = None,
+        trace_reason: str | None = None,
+        trace_scope: str | None = None,
+    ) -> "ProbabilisticContribution":
+        return ProbabilisticContribution.from_proposal_bundle(
+            self,
+            module_name=module_name,
+            layer=layer,
+            level=level,
+            trace_reason=trace_reason,
+            trace_scope=trace_scope,
+        )
+
+
+@dataclass
+class ProbabilisticContribution:
+    module_name: str
+    layer: str
+    level: str
+    confidence: float
+    owner: str = ""
+    action_preferences: dict[str, float] = field(default_factory=dict)
+    delta_p: dict[str, float] = field(default_factory=dict)
+    delta_logits: dict[str, float] = field(default_factory=dict)
+    delta_energy: dict[str, float] = field(default_factory=dict)
+    attention_bias: dict[str, float] = field(default_factory=dict)
+    soft_mask: dict[str, float] = field(default_factory=dict)
+    hard_mask: list[str] = field(default_factory=list)
+    posterior: dict[str, float] = field(default_factory=dict)
+    veto: bool = False
+    mode_switch: str | None = None
+    utility_shift: dict[str, Any] = field(default_factory=dict)
+    state_patch: dict[str, Any] = field(default_factory=dict)
+    memory_ops: list[dict[str, Any]] = field(default_factory=list)
+    trace_tags: list[str] = field(default_factory=list)
+    reason: str = ""
+    priority_bucket: str = "task_goal"
+    control_domain: str = "task"
+    gated_actions: list[str] = field(default_factory=list)
+    risk_hints: dict[str, Any] = field(default_factory=dict)
+    provider: str = ""
+    model: str = ""
+    backend: str = ""
+    latency_ms: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    agent_tier: str = ""
+    trace_reason: str = ""
+    trace_scope: str = ""
+    confidence_trace: dict[str, float] = field(default_factory=dict)
+    weight_applied: float = 1.0
+    sigma_scale: float = 1.0
+    selected: bool = False
+    target_name: str = ""
+    top_action: str = ""
+    tags: list[str] = field(default_factory=list)
+    suppression_cause: str = ""
+
+    @classmethod
+    def from_proposal_bundle(
+        cls,
+        bundle: ProposalBundle,
+        *,
+        module_name: str | None = None,
+        layer: str = "action",
+        level: str | None = None,
+        trace_reason: str | None = None,
+        trace_scope: str | None = None,
+    ) -> "ProbabilisticContribution":
+        delta_logits = dict(bundle.delta_p or bundle.action_preferences)
+        action_preferences = dict(bundle.action_preferences or delta_logits)
+        delta_p = dict(bundle.delta_p or action_preferences)
+        return cls(
+            module_name=module_name or bundle.owner,
+            layer=layer,
+            level=level or layer,
+            confidence=bundle.confidence,
+            owner=bundle.owner,
+            action_preferences=action_preferences,
+            delta_p=delta_p,
+            delta_logits=delta_logits,
+            delta_energy={},
+            attention_bias={},
+            soft_mask={},
+            hard_mask=[],
+            posterior={},
+            veto=bundle.veto,
+            mode_switch=bundle.mode_switch,
+            utility_shift=dict(bundle.utility_shift),
+            state_patch=dict(bundle.state_patch),
+            memory_ops=[dict(item) for item in bundle.memory_ops],
+            trace_tags=list(bundle.trace_tags),
+            reason=bundle.reason,
+            priority_bucket=bundle.priority_bucket,
+            control_domain=bundle.control_domain,
+            gated_actions=list(bundle.gated_actions),
+            risk_hints=dict(bundle.risk_hints),
+            provider=bundle.provider,
+            model=bundle.model,
+            backend=bundle.backend,
+            latency_ms=bundle.latency_ms,
+            prompt_tokens=bundle.prompt_tokens,
+            completion_tokens=bundle.completion_tokens,
+            agent_tier=bundle.agent_tier,
+            trace_reason=trace_reason or bundle.reason,
+            trace_scope=trace_scope or layer,
+        )
+
+    def to_proposal_bundle(self) -> ProposalBundle:
+        return ProposalBundle(
+            owner=self.owner or self.module_name,
+            confidence=self.confidence,
+            action_preferences=dict(self.action_preferences or self.delta_logits),
+            delta_p=dict(self.delta_p or self.delta_logits),
+            sigma_scale=self.sigma_scale,
+            veto=self.veto,
+            mode_switch=self.mode_switch,
+            utility_shift=dict(self.utility_shift),
+            state_patch=dict(self.state_patch),
+            memory_ops=[dict(item) for item in self.memory_ops],
+            trace_tags=list(self.trace_tags),
+            reason=self.reason or self.trace_reason,
+            priority_bucket=self.priority_bucket,
+            control_domain=self.control_domain,
+            gated_actions=list(self.gated_actions),
+            risk_hints=dict(self.risk_hints),
+            provider=self.provider,
+            model=self.model,
+            backend=self.backend,
+            latency_ms=self.latency_ms,
+            prompt_tokens=self.prompt_tokens,
+            completion_tokens=self.completion_tokens,
+            agent_tier=self.agent_tier,
+        )
+
+    def __post_init__(self) -> None:
+        self.module_name = str(self.module_name or self.owner)
+        self.owner = str(self.owner or self.module_name)
+        self.layer = str(self.layer or "action")
+        self.level = str(self.level or self.layer)
+        self.confidence = round(_clip_unit(float(self.confidence)), 4)
+        self.delta_logits = {
+            str(key): round(float(value), 6)
+            for key, value in self.delta_logits.items()
+            if isinstance(key, str) and isinstance(value, (int, float))
+        }
+        self.delta_energy = {
+            str(key): round(float(value), 6)
+            for key, value in self.delta_energy.items()
+            if isinstance(key, str) and isinstance(value, (int, float))
+        }
+        self.attention_bias = {
+            str(key): round(float(value), 6)
+            for key, value in self.attention_bias.items()
+            if isinstance(key, str) and isinstance(value, (int, float))
+        }
+        self.soft_mask = {
+            str(key): round(float(value), 6)
+            for key, value in self.soft_mask.items()
+            if isinstance(key, str) and isinstance(value, (int, float))
+        }
+        self.hard_mask = [str(item) for item in self.hard_mask if isinstance(item, str)]
+        self.posterior = {
+            str(key): round(float(value), 6)
+            for key, value in self.posterior.items()
+            if isinstance(key, str) and isinstance(value, (int, float))
+        }
+        if not self.action_preferences:
+            self.action_preferences = dict(self.delta_logits)
+        if not self.delta_p:
+            self.delta_p = dict(self.action_preferences or self.delta_logits)
+        if not self.action_preferences:
+            self.action_preferences = dict(self.delta_p)
+        self.trace_scope = str(self.trace_scope or self.layer)
+        self.weight_applied = round(max(float(self.weight_applied), 0.0), 4)
+        self.sigma_scale = round(max(float(self.sigma_scale), 0.0), 4)
+        self.confidence_trace = {
+            str(key): round(float(value), 6)
+            for key, value in self.confidence_trace.items()
+            if isinstance(key, str) and isinstance(value, (int, float))
+        }
+        if not self.confidence_trace:
+            self.confidence_trace = {"confidence": self.confidence}
+        if not self.top_action and self.delta_logits:
+            self.top_action = max(self.delta_logits, key=self.delta_logits.get)
+        if not self.target_name:
+            self.target_name = self.top_action
+        if not self.reason:
+            self.reason = self.trace_reason
+
 
 @dataclass
 class GateDecision:
@@ -866,6 +1061,46 @@ class ActionDistributionState:
     resample_idx: int = 0
     conflict_mode: str = "none"
     conflict: dict[str, Any] = field(default_factory=dict)
+    probability_field: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ProbabilityLayerState:
+    layer: str
+    contributions: list[str] = field(default_factory=list)
+    combined_bias: dict[str, float] = field(default_factory=dict)
+    suppressed_targets: list[str] = field(default_factory=list)
+
+
+@dataclass
+class TokenContributionTrace:
+    token: str
+    final_logit: float
+    module_deltas: dict[str, float] = field(default_factory=dict)
+    suppressed_by: list[str] = field(default_factory=list)
+    reason: str = ""
+
+
+@dataclass
+class PeakArbitrationRecord:
+    winning_peak: str = ""
+    winning_score: float = 0.0
+    competing_peaks: dict[str, float] = field(default_factory=dict)
+    suppression_reasons: dict[str, str] = field(default_factory=dict)
+    compromise_applied: bool = False
+
+
+@dataclass
+class ProbabilityFieldSnapshot:
+    layers: list[ProbabilityLayerState] = field(default_factory=list)
+    context_attn_final: dict[str, float] = field(default_factory=dict)
+    memory_prior_final: dict[str, float] = field(default_factory=dict)
+    action_logits_final: dict[str, float] = field(default_factory=dict)
+    token_logits_final: dict[str, float] = field(default_factory=dict)
+    winner_posterior: dict[str, Any] = field(default_factory=dict)
+    counterfactual_top_peaks: list[dict[str, Any]] = field(default_factory=list)
+    token_traces: list[TokenContributionTrace] = field(default_factory=list)
+    peak_arbitration: PeakArbitrationRecord = field(default_factory=PeakArbitrationRecord)
 
 
 @dataclass

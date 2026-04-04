@@ -24,6 +24,7 @@ from nalr.output.style import build_expression_profile, build_render_plan, compu
 from nalr.providers import MissingModelCredentialError, ModelRequest, ModelRouteConfig, ModelRouter
 from nalr.run import SupervisorLoop
 from nalr.runtime.model_gateway import ModelGateway
+from nalr.runtime.probability_field import ProbabilityFieldIntegrator
 from nalr.runtime.async_io import AsyncIOWorker
 from nalr.runtime.dynamics import smooth_resource_biases
 from nalr.runtime.entropy import AnuQuantumEntropyProvider, QuantumEntropyPool, QuantumEntropyUnavailableError
@@ -76,6 +77,16 @@ from nalr.skills.executor import SkillExecutor
 from nalr.skills.registry import build_skill_registry, serialize_contract
 from nalr.storage.parquet_io import read_snapshot_rows, rewrite_snapshot
 from nalr.trace.exporter import TraceExporter
+from nalr.trace.probability_field import (
+    build_contributions_view,
+    build_module_heatmap,
+    build_probability_field,
+    build_replay_view,
+    build_trace_view,
+    build_why_not_view,
+    build_why_view,
+    normalize_probability_trace,
+)
 from nalr.trace.store import TraceStore
 
 
@@ -182,6 +193,7 @@ class RuntimeController:
             self.entropy_pool.ingest_bytes(bytes([128]) * (256 * 64), source="pytest_qrng_fixture", reason="test harness")
         self.authenticity_policy = AuthenticityPolicy(self._identity_cfg())
         self.vitality_engine = VitalityEngine()
+        self.probability_integrator = ProbabilityFieldIntegrator()
         self.dream_orchestrator = DreamOrchestrator(
             project_root=self.project_root,
             home_path=self.home_path,
@@ -445,7 +457,7 @@ class RuntimeController:
         queue_cap = max(int(defaults.get("queue_cap", 64)), 1)
         queue_depth = max(len(state.pending_steps), int(state.resource_state.get("queue_depth", 0) or 0))
         queue_pressure = _clip(queue_depth / queue_cap, 0.0, 1.0)
-        recent_skills = self.trace_store.list_skill_traces()[-20:]
+        recent_skills = self.trace_store.recent_skill_traces(20)
         avg_latency_ms = (
             sum(float(row.get("latency_ms", 0) or 0.0) for row in recent_skills) / len(recent_skills)
             if recent_skills
@@ -961,7 +973,7 @@ class RuntimeController:
         scenario: str,
         window: int = 20,
     ) -> dict[str, Any]:
-        recent = self.trace_store.list_rounds()[-window:]
+        recent = self.trace_store.recent_rounds(window)
         appraisal = dict(context.get("appraisal", {}))
         valences = [
             float(trace.get("appraisal_snapshot", {}).get("semantic_valence", 0.0) or 0.0)
@@ -3203,6 +3215,112 @@ class RuntimeController:
         contributions = sorted(contributions, key=lambda item: item.score, reverse=True)
         return contributions, proposal_records
 
+    def _bundle_layer(self, bundle: ProposalBundle) -> str:
+        layer = str(getattr(bundle, "layer", "") or "").strip().lower()
+        if layer:
+            return layer
+        owner = str(getattr(bundle, "owner", ""))
+        stage = next((stage for stage, owners in PIPELINE_ORDER if owner in owners), "action")
+        if stage in {"state_update", "salience", "body", "emotion", "relationship", "resource"}:
+            return "context"
+        if stage in {"hippocampus"}:
+            return "memory"
+        if stage in {"conflict", "thalamus", "plausibility_guard", "forced_mode_switch", "output_gate", "late_perspective", "renderer"}:
+            return "token"
+        return "action"
+
+    def _base_token_logits(self, event: RoundEvent, sampled_action: str) -> dict[str, float]:
+        tokens = [token for token in event.content.replace("。", " ").replace(",", " ").split() if token]
+        base = {"我": 0.12, "你": 0.11, "我们": 0.08, sampled_action: 0.1}
+        for token in tokens[:6]:
+            base[str(token)] = round(base.get(str(token), 0.05) + 0.03, 6)
+        return base
+
+    def _build_probability_field_snapshot(
+        self,
+        *,
+        bundles: list[ProposalBundle],
+        distribution_state: ActionDistributionState,
+        event: RoundEvent,
+        sampled_action: ActionCandidate,
+        gate_decisions: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        typed_bundles = []
+        for bundle in bundles:
+            typed_bundles.append(
+                {
+                    "module_name": getattr(bundle, "module_name", getattr(bundle, "owner", "unknown")),
+                    "layer": self._bundle_layer(bundle),
+                    "level": getattr(bundle, "level", self._bundle_layer(bundle)),
+                    "confidence": getattr(bundle, "confidence", 0.0),
+                    "delta_logits": dict(getattr(bundle, "delta_logits", {}) or getattr(bundle, "delta_p", {})),
+                    "delta_energy": dict(getattr(bundle, "delta_energy", {})),
+                    "attention_bias": dict(getattr(bundle, "attention_bias", {})),
+                    "soft_mask": dict(getattr(bundle, "soft_mask", {})),
+                    "hard_mask": list(getattr(bundle, "hard_mask", [])),
+                    "posterior": dict(getattr(bundle, "posterior", {})),
+                    "trace_reason": getattr(bundle, "trace_reason", getattr(bundle, "reason", "")),
+                    "weight_applied": 1.0,
+                    "sigma_scale": getattr(bundle, "sigma_scale", 1.0),
+                    "target_name": getattr(bundle, "target_name", ""),
+                    "top_action": getattr(bundle, "top_action", ""),
+                    "tags": list(getattr(bundle, "trace_tags", [])),
+                }
+            )
+        contributions = [self._coerce_probability_bundle(item) for item in typed_bundles]
+        snapshot = self.probability_integrator.integrate(
+            base_action_logits=dict(distribution_state.p_raw or distribution_state.p_final),
+            base_token_logits=self._base_token_logits(event, sampled_action.name),
+            context_contributions=[row for row in contributions if row.layer == "context"],
+            memory_contributions=[row for row in contributions if row.layer == "memory"],
+            action_contributions=[row for row in contributions if row.layer == "action"],
+            token_contributions=[row for row in contributions if row.layer == "token"],
+        )
+        payload = to_dict(snapshot)
+        payload["guard"] = {
+            "soft_penalty": round(float(distribution_state.__dict__.get("guard_penalty", 0.0) or 0.0), 6),
+            "hard_block": {
+                action: True
+                for action, value in (distribution_state.gate or {}).items()
+                if float(value) <= 0.0
+            },
+            "plausibility_fail_score": round(
+                max(
+                    (
+                        float(item.get("reason", "0").split("fail_score=")[1].split(";")[0])
+                        for item in gate_decisions
+                        if item.get("stage") == "plausibility_guard" and "fail_score=" in str(item.get("reason", ""))
+                    ),
+                    default=0.0,
+                ),
+                6,
+            ),
+        }
+        payload["arbitration"] = {
+            "winning_priority": distribution_state.conflict.get("winning_priority"),
+            "total_conflict_score": round(float(distribution_state.conflict.get("total_score", distribution_state.conflict.get("score", 0.0))), 6),
+            "compromise_template": distribution_state.conflict.get("compromise", {}).get("template"),
+            "repair_mode": distribution_state.conflict.get("repair_mode"),
+            "repair_stage": distribution_state.conflict.get("repair_state_snapshot", {}).get("stage", "idle"),
+        }
+        payload["module_heatmap"] = build_module_heatmap(
+            [
+                {
+                    "layer": row["layer"],
+                    "module_name": row["module_name"],
+                    "delta_score": max((abs(value) for value in row["delta_logits"].values()), default=0.0),
+                    "confidence": row["confidence"],
+                }
+                for row in typed_bundles
+            ]
+        )
+        return payload
+
+    def _coerce_probability_bundle(self, payload: dict[str, Any]):
+        from nalr.schemas.models import ProbabilisticContribution
+
+        return ProbabilisticContribution(**payload)
+
     def _collapse_internal_sampled_action(self, sampled_action: ActionCandidate) -> ActionCandidate:
         if sampled_action.name != "short_reply":
             return sampled_action
@@ -4791,6 +4909,14 @@ class RuntimeController:
             "total_model_wait_ms": int(sum(int(row.get("latency_ms", 0) or 0) for row in model_call_traces)),
             "total_turn_ms": max(1, int((time.perf_counter() - turn_started) * 1000)),
         }
+        probability_field_snapshot = self._build_probability_field_snapshot(
+            bundles=bundles,
+            distribution_state=distribution_state,
+            event=event,
+            sampled_action=sampled_action,
+            gate_decisions=gate_decisions,
+        )
+        distribution_state.probability_field = probability_field_snapshot
 
         trace = RoundTrace(
             session_id=state.session_id,
@@ -4858,6 +4984,22 @@ class RuntimeController:
             runtime_metrics=runtime_metrics,
             resample_count=distribution_state.resample_idx,
         )
+        normalized_trace = normalize_probability_trace(to_dict(trace))
+        trace.distribution_state = {
+            **trace.distribution_state,
+            **dict(normalized_trace.get("distribution_state", {})),
+            "conflict": {
+                **trace.distribution_state.get("conflict", {}),
+                **dict(normalized_trace.get("distribution_state", {})).get("conflict", {}),
+            },
+        }
+        trace.distribution_state["probability_field"] = dict(normalized_trace.get("probability_field", {}))
+        trace.distribution_state["candidate_distribution"] = dict(normalized_trace.get("candidate_distribution", {}))
+        trace.distribution_state["counterfactual_top_peaks"] = list(normalized_trace.get("counterfactual_top_peaks", []))
+        trace.dream_effect_summary = {
+            **trace.dream_effect_summary,
+            "recalibration": dict(dream_payload.get("recalibration", {})),
+        }
 
         health = HealthEvent(event="tick", status="ok", detail=f"budget={state.budget_remaining:.2f}")
         state.entropy_health_state = self.entropy_pool.health_snapshot()
@@ -5848,7 +5990,7 @@ class RuntimeController:
     def trace_round(self, round_ref: int | str) -> dict[str, Any]:
         self.trace_store.flush(raise_on_error=False)
         payload, read_source = self.trace_store.read_round_record(self.resolve_round_ref(round_ref))
-        enriched = dict(payload)
+        enriched = normalize_probability_trace(dict(payload))
         enriched["storage"] = self._trace_storage_payload(read_source=read_source)
         dream = self._dream_summary_from_trace(enriched)
         if dream is not None:
@@ -5861,55 +6003,16 @@ class RuntimeController:
 
     def why_this(self, round_ref: int | str) -> dict[str, Any]:
         trace = self.trace_round(round_ref)
-        return {
-            "round_id": trace["round_id"],
-            "sampled_action": trace["sampled_action"],
-            "top_drivers": trace["top_drivers"],
-            "style_profile": trace["style_profile"],
-            "distribution_state": trace.get("distribution_state", {}),
-            "stochastic_state": trace.get("stochastic_state", {}),
-            "render_plan": trace.get("render_plan", {}),
-            "rendered_expression": trace.get("rendered_expression", {}),
-            "authenticity": trace.get("authenticity", trace.get("rendered_expression", {}).get("authenticity", {})),
-            "identity_evolution": trace.get("identity_evolution", {}),
-            "vitality_snapshot": trace.get("vitality_snapshot", {}),
-            "vitality_events": trace.get("vitality_events", []),
-            "long_run_projection": trace.get("long_run_projection", {}),
-            "appraisal_snapshot": trace.get("appraisal_snapshot", {}),
-            "state_delta_before_clip": trace.get("state_delta_before_clip", {}),
-            "state_delta_after_clip": trace.get("state_delta_after_clip", {}),
-            "delta_suppression_reason": trace.get("delta_suppression_reason", []),
-            "run_context": trace.get("run_context", {}),
-            "run_contamination_detected": trace.get("run_contamination_detected", False),
-            "identity_evidence_score": trace.get("identity_evidence_score", 0.0),
-            "identity_trigger_blockers": trace.get("identity_trigger_blockers", []),
-            "temperament_window_summary": trace.get("temperament_window_summary", {}),
-            "dream": self._dream_summary_from_trace(trace),
-            "state_snapshot": {
-                "mode": trace["state_snapshot"]["mode"],
-                "safe_mode": trace["state_snapshot"]["safe_mode"],
-                "focus": trace["state_snapshot"]["focus"],
-                "budget_remaining": trace["state_snapshot"]["budget_remaining"],
-            },
-            "storage": trace.get("storage", self._trace_storage_payload()),
-        }
+        payload = build_why_view(trace)
+        payload["storage"] = trace.get("storage", self._trace_storage_payload())
+        payload["dream"] = self._dream_summary_from_trace(trace)
+        return payload
 
     def contribution_breakdown(self, round_ref: int | str) -> dict[str, Any]:
         trace = self.trace_round(round_ref)
-        conflict = trace.get("distribution_state", {}).get("conflict", {})
-        return {
-            "round_id": trace["round_id"],
-            "sampled_action": trace["sampled_action"],
-            "contributions": trace["contributions"],
-            "repair": {
-                "mode": conflict.get("repair_mode"),
-                "stage": conflict.get("repair_state_snapshot", {}).get("stage", "idle"),
-                "transition": conflict.get("repair_transition", {}),
-                "post_error_adjustment": conflict.get("post_error_adjustment", {}),
-                "ledger_tail": conflict.get("repair_ledger_tail", []),
-            },
-            "storage": trace.get("storage", self._trace_storage_payload()),
-        }
+        payload = build_contributions_view(trace)
+        payload["storage"] = trace.get("storage", self._trace_storage_payload())
+        return payload
 
     def trace_agents(self, round_ref: int | str) -> dict[str, Any]:
         trace = self.trace_round(round_ref)
@@ -6183,47 +6286,46 @@ class RuntimeController:
     def replay_round(self, round_id: int, seed: int | None = None) -> dict[str, Any]:
         return self.replay(round_id, seed=seed or 0)
 
-    def replay(self, round_id: int, seed: int = 0) -> dict[str, Any]:
-        trace = self.trace_round(round_id)
-        proposal_rows = trace.get("proposal_summaries", [])
-        ablations = []
-        for item in proposal_rows[:3]:
-            delta_map = item.get("delta_p", {}) if isinstance(item.get("delta_p"), dict) else {}
-            top_action = item.get("top_action", trace.get("sampled_action"))
-            ablations.append(
-                {
-                    "agent": item.get("agent_name", "unknown"),
-                    "action": top_action,
-                    "delta": round(float(delta_map.get(top_action, 0.0)), 4),
-                }
-            )
+    def probability_field_summary(self, window: int = 20) -> dict[str, Any]:
+        rounds = [normalize_probability_trace(row) for row in self.trace_store.list_rounds()[-window:]]
+        if not rounds:
+            return {
+                "window": window,
+                "layers": {},
+                "module_heatmap": {"layers": {}, "modules": {}},
+                "storage": self._trace_storage_payload(),
+            }
+        latest = rounds[-1]
+        field = build_probability_field(latest)
         return {
-            "round_id": round_id,
-            "original_action": trace["sampled_action"],
-            "replayed_action": trace["sampled_action"],
-            "candidate_distribution": trace.get("candidate_distribution", trace.get("distribution_state", {}).get("p_final", {})),
-            "ablations": ablations,
-            "seed": seed,
+            "window": window,
+            "layers": field.get("layers", {}),
+            "module_heatmap": field.get("module_heatmap", {}),
+            "winner_posterior": field.get("winner_posterior", {}),
             "storage": self._trace_storage_payload(),
         }
 
+    def trace_probability_field(self, round_ref: int | str) -> dict[str, Any]:
+        trace = self.trace_round(round_ref)
+        field = build_probability_field(trace)
+        return {
+            **field,
+            "round_id": trace.get("round_id"),
+            "sampled_action": trace.get("sampled_action"),
+            "storage": trace.get("storage", self._trace_storage_payload()),
+        }
+
+    def replay(self, round_id: int, seed: int = 0) -> dict[str, Any]:
+        trace = self.trace_round(round_id)
+        payload = build_replay_view(trace, seed=seed)
+        payload["storage"] = self._trace_storage_payload()
+        return payload
+
     def why_not(self, round_id: int, action: str) -> dict[str, Any]:
         trace = self.trace_round(round_id)
-        candidate_distribution = trace.get("candidate_distribution", trace.get("distribution_state", {}).get("p_final", {}))
-        blocked_by = []
-        if action not in candidate_distribution:
-            blocked_by.append("not_proposed")
-        if trace.get("distribution_state", {}).get("plausibility_fail_score", 0.0) >= self.config["thresholds"]["thresholds"]["plausibility_fail"]:
-            blocked_by.append("plausibility_guard")
-        blocked_by.extend(item["agent_name"] for item in trace.get("top_drivers", [])[:2])
-        return {
-            "round_id": round_id,
-            "action": action,
-            "selected_action": trace["sampled_action"],
-            "candidate_score": candidate_distribution.get(action, 0.0),
-            "blocked_by": blocked_by,
-            "storage": self._trace_storage_payload(),
-        }
+        payload = build_why_not_view(trace, action)
+        payload["storage"] = self._trace_storage_payload()
+        return payload
 
     def what_changed(self, window: int = 5) -> dict[str, Any]:
         rounds = self.trace_store.list_rounds()[-window:]

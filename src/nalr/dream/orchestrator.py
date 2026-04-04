@@ -149,6 +149,86 @@ class DreamOrchestrator:
             reasons=reasons,
         )
 
+    def build_recalibration_payload(
+        self,
+        *,
+        mode: str,
+        trigger: str,
+        snapshot: DreamSnapshot,
+        proposal_bundle: dict[str, Any],
+        guard: DreamGuardDecision,
+        effect_summary: dict[str, Any],
+        trace: dict[str, Any],
+        trace_ref: str,
+    ) -> dict[str, Any]:
+        allowed_types = set(guard.allowed_types)
+        applied_prior_updates = {
+            "memory_prior_updates": list(proposal_bundle.get("memory_consolidation", [])),
+            "emotion_prior_updates": list(proposal_bundle.get("emotion_adjustments", []))
+            if "emotion_adjustments" in allowed_types
+            else [],
+            "habit_prior_updates": list(proposal_bundle.get("habit_adjustments", []))
+            if "habit_adjustments" in allowed_types
+            else [],
+            "relationship_prior_updates": list(proposal_bundle.get("relationship_adjustments", []))
+            if "relationship_adjustments" in allowed_types
+            else [],
+            "identity_prior_updates": list(proposal_bundle.get("limited_identity_drift", []))
+            if "limited_identity_drift" in allowed_types and "limited_identity_drift" not in guard.rejected_types
+            else [],
+            "dream_memory_write": list(proposal_bundle.get("dream_memory_write", []))
+            if "dream_memory_write" in allowed_types
+            else [],
+        }
+        proposed_prior_updates = {
+            "memory_prior_updates": list(proposal_bundle.get("memory_consolidation", [])),
+            "emotion_prior_updates": list(proposal_bundle.get("emotion_adjustments", [])),
+            "habit_prior_updates": list(proposal_bundle.get("habit_adjustments", [])),
+            "relationship_prior_updates": list(proposal_bundle.get("relationship_adjustments", [])),
+            "identity_prior_updates": list(proposal_bundle.get("limited_identity_drift", [])),
+            "dream_memory_write": list(proposal_bundle.get("dream_memory_write", [])),
+        }
+        prior_summary = {
+            key: len(value)
+            for key, value in applied_prior_updates.items()
+        }
+        recalibration_strength = _clip(
+            0.25
+            + len(applied_prior_updates["memory_prior_updates"]) * 0.10
+            + len(applied_prior_updates["habit_prior_updates"]) * 0.06
+            + len(applied_prior_updates["identity_prior_updates"]) * 0.12
+            + float(effect_summary.get("applied", False)) * 0.08
+        )
+        confidence = _clip(
+            recalibration_strength
+            + len(applied_prior_updates["identity_prior_updates"]) * 0.05
+            + len(applied_prior_updates["habit_prior_updates"]) * 0.03
+        )
+        return {
+            "module_name": "DreamOrchestrator",
+            "layer": "offline",
+            "kind": "recalibration",
+            "prior_role": "stable_prior",
+            "mode": mode,
+            "trigger": trigger,
+            "sleep_session_id": snapshot.sleep_session_id,
+            "trace_ref": trace_ref,
+            "dream_run_id": trace.get("dream_run_id", ""),
+            "proposal_counts": dict(trace.get("proposal_counts", {})),
+            "guard_summary": to_dict(guard),
+            "effect_summary": dict(effect_summary),
+            "proposed_prior_updates": proposed_prior_updates,
+            "applied_prior_updates": applied_prior_updates,
+            "prior_summary": prior_summary,
+            "recalibration_strength": round(recalibration_strength, 4),
+            "confidence": round(confidence, 4),
+            "dream_score": round(confidence, 4),
+            "trace_reason": (
+                f"mode={mode}; trigger={trigger}; approved={guard.approved}; "
+                f"identity_updates={prior_summary['identity_prior_updates']}"
+            ),
+        }
+
     def _memory_payload(self, *, mode: str, cue: str | None, bundle: dict[str, Any]) -> dict[str, Any]:
         return {
             "mode": mode,
@@ -205,10 +285,23 @@ class DreamOrchestrator:
         )
         if shaping_events:
             applied_types.extend(list(shaping_events[0].get("applied_types", [])))
+        identity_state = getattr(state, "identity_state", None)
+        drift_credit = round(float(getattr(identity_state, "drift_credit", 0.0)), 4) if identity_state is not None else 0.0
+        aliases = list(getattr(identity_state, "aliases", [])) if identity_state is not None else []
         effect_summary = {
             "applied": bool(applied_types),
             "applied_types": sorted(set(applied_types)),
             "cue": cue,
+            "prior_updates": sorted(set(applied_types)),
+            "identity_prior": {
+                "drift_credit": drift_credit,
+                "aliases": aliases,
+            },
+            "habit_prior": {
+                "updated": "habit_adjustments" in applied_types,
+                "sources": [item for item in bundle.get("habit_adjustments", [])],
+            },
+            "prior_role": "stable_prior",
         }
         return shaping_events, effect_summary
 
@@ -221,6 +314,7 @@ class DreamOrchestrator:
                 "trace_ref": None,
                 "guard_summary": {},
                 "effect_summary": {},
+                "recalibration": {},
             }
         if not self.enabled(state):
             shaping_events = self.vitality_engine.apply_noninteractive_shaping(state, mode, cue, self.memory_store)
@@ -231,6 +325,7 @@ class DreamOrchestrator:
                 "trace_ref": None,
                 "guard_summary": {"approved": False, "allowed_types": [], "evaluated_types": [], "rejected_types": [], "reasons": ["dream_disabled"]},
                 "effect_summary": shaping_events[0] if shaping_events else {},
+                "recalibration": {},
             }
 
         trigger = "sleep_full" if mode == "sleep" else "idle_light"
@@ -253,11 +348,31 @@ class DreamOrchestrator:
             bundle=result["proposal_bundle"],
             guard=guard,
         )
+        trace_ref = f"dream://runs/{result['trace']['dream_run_id']}"
+        recalibration = self.build_recalibration_payload(
+            mode=mode,
+            trigger=trigger,
+            snapshot=snapshot,
+            proposal_bundle=result["proposal_bundle"],
+            guard=guard,
+            effect_summary=effect_summary,
+            trace=result["trace"],
+            trace_ref=trace_ref,
+        )
+        effect_summary = {
+            **effect_summary,
+            "prior_updates": dict(recalibration.get("applied_prior_updates", {})),
+            "identity_prior_updates": list(recalibration.get("applied_prior_updates", {}).get("identity_prior_updates", [])),
+            "habit_prior_updates": list(recalibration.get("applied_prior_updates", {}).get("habit_prior_updates", [])),
+            "confidence": float(recalibration.get("confidence", recalibration.get("recalibration_strength", 0.0))),
+            "dream_score": float(recalibration.get("dream_score", recalibration.get("recalibration_strength", 0.0))),
+        }
         payload = {
             "trace": result["trace"],
             "proposal_bundle": result["proposal_bundle"],
             "guard_summary": to_dict(guard),
             "effect_summary": effect_summary,
+            "recalibration": recalibration,
         }
         trace_ref = self.store.write_run(payload)
         return {
@@ -267,4 +382,5 @@ class DreamOrchestrator:
             "trace_ref": trace_ref,
             "guard_summary": to_dict(guard),
             "effect_summary": effect_summary,
+            "recalibration": recalibration,
         }
