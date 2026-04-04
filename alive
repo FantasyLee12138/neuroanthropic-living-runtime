@@ -13,10 +13,30 @@ elif [ -f "$SCRIPT_DIR/.env" ]; then
   set +a
 fi
 
-if [ -x "$SCRIPT_DIR/.venv/bin/python" ]; then
-  PYTHON_BIN="$SCRIPT_DIR/.venv/bin/python"
-else
-  PYTHON_BIN="${PYTHON:-python3}"
+find_python_bin() {
+  for candidate in \
+    "${VIRTUAL_ENV:-}/bin/python" \
+    "${CONDA_PREFIX:-}/bin/python" \
+    "$SCRIPT_DIR/.venv/bin/python" \
+    "${PYTHON:-}" \
+    "$(command -v python3.11 2>/dev/null || true)" \
+    "$(command -v python3.12 2>/dev/null || true)" \
+    "$(command -v python3.13 2>/dev/null || true)" \
+    "$(command -v python3 2>/dev/null || true)" \
+    "$(command -v python 2>/dev/null || true)"
+  do
+    if [ -n "$candidate" ] && [ -x "$candidate" ] && "$candidate" -c "import typer" >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+PYTHON_BIN=$(find_python_bin || true)
+if [ -z "$PYTHON_BIN" ]; then
+  echo "Unable to find a Python interpreter with nalr dependencies installed." >&2
+  exit 1
 fi
 
 if [ "${PYTHONPATH:-}" = "" ]; then

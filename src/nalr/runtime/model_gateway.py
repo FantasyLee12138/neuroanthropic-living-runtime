@@ -14,7 +14,7 @@ class ModelGateway:
         timeout_seconds: int = 20,
         retries: int = 1,
         max_output_tokens: int = 512,
-        client_factory: Callable[[], Any] | None = None,
+        client_factory: Callable[..., Any] | None = None,
     ) -> None:
         self.provider = provider
         self.base_url = base_url
@@ -40,14 +40,55 @@ class ModelGateway:
 
     def _get_client(self):
         if self.client_factory is not None:
-            return self.client_factory()
+            return self.client_factory(
+                base_url=self.base_url,
+                api_key=os.getenv("ARK_API_KEY"),
+                timeout_s=self.timeout_seconds,
+            )
         from openai import OpenAI
 
         return OpenAI(base_url=self.base_url, api_key=os.getenv("ARK_API_KEY"), timeout=self.timeout_seconds)
 
     def _extract_text(self, response: Any) -> str:
         if isinstance(response, dict):
-            return response.get("output_text", "")
+            if isinstance(response.get("output_text"), str):
+                return response["output_text"]
+            if isinstance(response.get("text"), str):
+                return response["text"]
+            choices = response.get("choices", [])
+            if isinstance(choices, list):
+                chunks = []
+                for choice in choices:
+                    if not isinstance(choice, dict):
+                        continue
+                    message = choice.get("message", {})
+                    if isinstance(message, dict):
+                        content = message.get("content")
+                        if isinstance(content, str) and content:
+                            chunks.append(content)
+                            continue
+                    delta = choice.get("delta", {})
+                    if isinstance(delta, dict):
+                        content = delta.get("content")
+                        if isinstance(content, str) and content:
+                            chunks.append(content)
+                if chunks:
+                    return "\n".join(chunks)
+            output = response.get("output", [])
+            if isinstance(output, list):
+                chunks = []
+                for item in output:
+                    if not isinstance(item, dict):
+                        continue
+                    for content in item.get("content", []):
+                        if not isinstance(content, dict):
+                            continue
+                        text = content.get("text")
+                        if isinstance(text, str) and text:
+                            chunks.append(text)
+                if chunks:
+                    return "\n".join(chunks)
+            return ""
         if hasattr(response, "output_text"):
             return getattr(response, "output_text")
         if hasattr(response, "output") and response.output:
@@ -71,30 +112,35 @@ class ModelGateway:
             }
 
         client = self._get_client()
+        request_body = {
+            "model": model,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": prompt,
+                        }
+                    ],
+                }
+            ],
+            "max_output_tokens": self.max_output_tokens,
+        }
         try:
-            response = client.responses.create(
-                model=model,
-                input=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "input_text",
-                                "text": prompt,
-                            }
-                        ],
-                    }
-                ],
-            )
+            response = client.responses.create(**request_body)
             usage = response.get("usage", {}) if isinstance(response, dict) else getattr(response, "usage", {})
             text = self._extract_text(response)
         except AttributeError:
             chat = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
+                max_tokens=self.max_output_tokens,
             )
-            usage = getattr(chat, "usage", {})
-            text = chat.choices[0].message.content
+            usage = chat.get("usage", {}) if isinstance(chat, dict) else getattr(chat, "usage", {})
+            text = self._extract_text(chat)
+            if not text and not isinstance(chat, dict) and getattr(chat, "choices", None):
+                text = chat.choices[0].message.content
         return {
             "text": text,
             "provider": self.provider,

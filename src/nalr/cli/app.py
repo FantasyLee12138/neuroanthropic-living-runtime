@@ -238,7 +238,10 @@ def identity_show() -> None:
 
 @identity_app.command("set-name")
 def identity_set_name(name: str) -> None:
-    emit(get_cil().execute(f"identity set-name {name}"))
+    controller = get_controller()
+    # Compatibility path: identity seeding is handled by the runtime directly,
+    # while the command interface layer keeps the policy boundary rejection.
+    emit(controller.seed_identity_name(name, source_hint="user_seed"))
 
 
 @run_app.command("start")
