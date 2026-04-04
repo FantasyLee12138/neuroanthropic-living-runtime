@@ -32,17 +32,20 @@ def test_observer_exposes_skill_conflict_mode_and_ablation_views(tmp_path):
     conflict_response = client.get("/metrics/conflicts")
     mode_response = client.get("/metrics/mode-switches")
     ablation_response = client.get("/analysis/ablation")
+    entropy_response = client.get("/metrics/entropy")
 
     assert skill_response.status_code == 200
     assert conflict_response.status_code == 200
     assert mode_response.status_code == 200
     assert ablation_response.status_code == 200
+    assert entropy_response.status_code == 200
     assert skill_response.json()["total_calls"] > 0
     assert conflict_response.json()["points"]
     assert "components" in conflict_response.json()["points"][0]
     assert "critical_conflict_streak" in conflict_response.json()["points"][0]
     assert mode_response.json()["points"]
     assert ablation_response.json()["modules"]
+    assert entropy_response.json()["provider_class"]
     assert "approx_gain" in ablation_response.json()["modules"][0]
     assert "coverage" in ablation_response.json()["modules"][0]
 
@@ -78,6 +81,7 @@ def test_observer_conflict_timeline_includes_repair_visibility(tmp_path):
     assert point["conflict_safe_mode_owned"] is True
     assert point["last_post_error_adjustment"]["triggered"] is True
     assert point["repair_ledger_summary"]["entries"] >= 1
+    assert point["repair_learning"]["adjustment_reasons"]
 
 
 def test_observer_exposes_identity_and_authenticity_metrics(tmp_path):

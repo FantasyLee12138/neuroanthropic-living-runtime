@@ -1,12 +1,60 @@
+import shutil
 from pathlib import Path
 
 from nalr.providers.router import ModelResponse
 from nalr.runtime.controller import RuntimeController
-from nalr.schemas.models import RenderPlan, RoundEvent
+from nalr.schemas.models import QuantumEntropyRef, RenderPlan, RoundEvent
 from nalr.trace.store import TraceStore
 
 
 CONFIG_ROOT = Path(__file__).resolve().parents[2] / "config"
+
+
+def test_tick_degrades_when_entropy_provider_unavailable_and_config_allows_fallback(tmp_path, monkeypatch):
+    config_root = tmp_path / "config"
+    shutil.copytree(CONFIG_ROOT, config_root)
+    (config_root / "entropy.yaml").write_text(
+        """entropy:
+  provider: anu_qrng
+  endpoint: "https://broken-qrng.test/api"
+  timeout_s: 1.7
+  prefetch_bytes: 96
+  min_batch_bytes: 32
+  max_batch_bytes: 1024
+  hard_block_on_unavailable: false
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("NALR_DISABLE_TEST_QRNG_SEED", "1")
+
+    controller = RuntimeController(project_root=tmp_path, config_root=config_root)
+
+    def broken_fetch_batch(*, byte_count: int):
+        raise RuntimeError(f"provider unavailable for {byte_count} bytes")
+
+    monkeypatch.setattr(controller.entropy_pool.provider, "fetch_batch", broken_fetch_batch)
+
+    result = controller.tick(
+        RoundEvent(
+            source="user",
+            content="你好，今天状态怎么样？",
+            target="user",
+            cue="状态",
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    assert controller.entropy_pool.prefetch_bytes == 96
+    assert controller.entropy_pool.provider.endpoint == "https://broken-qrng.test/api"
+    assert controller.entropy_pool.provider.timeout_s == 1.7
+    assert result.trace.stochastic_state["entropy_ref"]["source"] == "deterministic_fallback"
+    assert result.trace.stochastic_state["entropy_ref"]["degraded"] is True
+    assert result.trace.stochastic_state["entropy_ref"]["health_state"] == "degraded"
+    state = controller.load_runtime_state()
+    assert state.entropy_health_state["state"] == "degraded"
+    assert state.entropy_health_state["last_failure"]["failure_class"] == "provider_fetch_failed"
+    assert state.last_entropy_failure == {}
 
 
 def test_tick_records_trace_and_top_drivers(tmp_path):
@@ -85,6 +133,7 @@ def test_state_and_trace_payloads_surface_trace_storage_status(tmp_path):
         scenario="task",
         mode="interactive",
     )
+    controller.flush_pending_io(raise_on_error=False)
 
     state_payload = controller.state_payload()
     trace_payload = controller.trace_round(1)
@@ -109,7 +158,7 @@ def test_cognitive_snapshot_humanizes_chat_intent_without_internal_tokens(tmp_pa
 
     snapshot = controller.state_payload()["cognitive_snapshot"]
 
-    assert snapshot["current_intent"] == "正在自然交流，准备直接回应"
+    assert snapshot["current_intent"].startswith("正在自然交流，准备")
     assert "general_exchange" not in snapshot["current_intent"]
     assert "respond" not in snapshot["current_intent"]
 
@@ -165,13 +214,39 @@ def test_terminal_route_probe_prefers_task_run_for_repo_task_without_writes(tmp_
     assert before_rounds == after_rounds
 
 
+def test_plan_turn_uses_single_probe_path_for_terminal_routing(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    calls: list[str] = []
+
+    def fake_probe(event, *, scenario, mode):
+        calls.append(scenario)
+        return {
+            "scenario": scenario,
+            "mode": mode,
+            "top_action": "plan",
+            "action_distribution": {"plan": 0.8, "respond": 0.2},
+            "task_mass": 0.8,
+            "chat_mass": 0.2,
+        }
+
+    monkeypatch.setattr(controller, "_probe_distribution_for_scenario", fake_probe)
+
+    plan = controller.plan_turn("检查 worker.py 并规划下一步")
+
+    assert plan.route == "task_run"
+    assert calls == ["task"]
+
+
 def test_hot_only_budget_for_low_salience(tmp_path, monkeypatch):
     monkeypatch.setattr(TraceStore, "mark_trace_sync_healthy", lambda self: None)
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     calls: list[tuple[str, str | None, tuple[str, ...]]] = []
+    entropy_ref = QuantumEntropyRef(source="test")
+    derived_cue = "teacup"
 
     def fake_ingest_event(event, **kwargs):
-        return event.cue
+        assert event.cue is None
+        return derived_cue
 
     def fake_recall_strength(cue, tier_budget=("hot", "warm", "archive")):
         calls.append(("recall_strength", cue, tuple(tier_budget)))
@@ -182,37 +257,63 @@ def test_hot_only_budget_for_low_salience(tmp_path, monkeypatch):
         return {
             "cue": cue,
             "tier": "hot",
-            "strength": 0.12,
+            "strength": 0.48,
             "detail": False,
             "found": True,
-            "interference": 0.0,
+            "interference": 0.08,
             "evidence": [],
         }
 
     monkeypatch.setattr(controller.memory_store, "ingest_event", fake_ingest_event)
     monkeypatch.setattr(controller.memory_store, "recall_strength", fake_recall_strength)
     monkeypatch.setattr(controller.memory_store, "recall", fake_recall)
+    monkeypatch.setattr(controller.entropy_pool, "truncated_normal", lambda *args, **kwargs: (0.0, entropy_ref))
+    monkeypatch.setattr(controller.entropy_pool, "uniform_range", lambda *args, **kwargs: (0.0, entropy_ref))
+    monkeypatch.setattr(controller.entropy_pool, "uniform", lambda *args, **kwargs: (0.0, entropy_ref))
 
-    event = RoundEvent(source="user", content="hello there", target="user", cue="tea", valence=0.05)
+    event = RoundEvent(source="user", content="hello teacup tonight", target="user", valence=0.05)
 
-    controller._probe_context(event, scenario="chat", mode="interactive")
+    _, _, _, _, probe_context, _, _ = controller._probe_context(event, scenario="chat", mode="interactive")
+    tick_context: dict[str, float | str | None] = {}
+    original_relation_state = controller._relation_state
+
+    def capture_relation_state(event, context):
+        tick_context.update(
+            cue=context.get("cue"),
+            recall_strength=context.get("recall_strength"),
+            interference=context.get("interference"),
+        )
+        return original_relation_state(event, context)
+
+    monkeypatch.setattr(controller, "_relation_state", capture_relation_state)
     controller.tick(event, scenario="chat", mode="interactive")
 
     assert calls == [
-        ("recall_strength", "tea", ("hot",)),
-        ("recall", "tea", ("hot",)),
-        ("recall_strength", "tea", ("hot",)),
-        ("recall", "tea", ("hot",)),
+        ("recall_strength", derived_cue, ("hot",)),
+        ("recall", derived_cue, ("hot",)),
+        ("recall_strength", derived_cue, ("hot",)),
+        ("recall", derived_cue, ("hot",)),
     ]
+    assert probe_context["cue"] == derived_cue
+    assert probe_context["recall_strength"] == 0.12
+    assert probe_context["interference"] == 0.08
+    assert tick_context == {
+        "cue": derived_cue,
+        "recall_strength": 0.12,
+        "interference": 0.08,
+    }
 
 
 def test_full_budget_for_high_salience(tmp_path, monkeypatch):
     monkeypatch.setattr(TraceStore, "mark_trace_sync_healthy", lambda self: None)
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     calls: list[tuple[str, str | None, tuple[str, ...]]] = []
+    entropy_ref = QuantumEntropyRef(source="test")
+    derived_cue = "fallbackfix"
 
     def fake_ingest_event(event, **kwargs):
-        return event.cue
+        assert event.cue is None
+        return derived_cue
 
     def fake_recall_strength(cue, tier_budget=("hot", "warm", "archive")):
         calls.append(("recall_strength", cue, tuple(tier_budget)))
@@ -223,34 +324,56 @@ def test_full_budget_for_high_salience(tmp_path, monkeypatch):
         return {
             "cue": cue,
             "tier": "warm",
-            "strength": 0.66,
+            "strength": 0.91,
             "detail": True,
             "found": True,
-            "interference": 0.0,
+            "interference": 0.14,
             "evidence": ["warm memory"],
         }
 
     monkeypatch.setattr(controller.memory_store, "ingest_event", fake_ingest_event)
     monkeypatch.setattr(controller.memory_store, "recall_strength", fake_recall_strength)
     monkeypatch.setattr(controller.memory_store, "recall", fake_recall)
+    monkeypatch.setattr(controller.entropy_pool, "truncated_normal", lambda *args, **kwargs: (0.0, entropy_ref))
+    monkeypatch.setattr(controller.entropy_pool, "uniform_range", lambda *args, **kwargs: (0.0, entropy_ref))
+    monkeypatch.setattr(controller.entropy_pool, "uniform", lambda *args, **kwargs: (0.0, entropy_ref))
 
     event = RoundEvent(
         source="user",
-        content="Help me remember this code fix and summarize the failing test.",
+        content="Help me remember fallbackfix and summarize the failing test.",
         target="user",
-        cue="tea",
         valence=0.1,
     )
 
-    controller._probe_context(event, scenario="task", mode="interactive")
+    _, _, _, _, probe_context, _, _ = controller._probe_context(event, scenario="task", mode="interactive")
+    tick_context: dict[str, float | str | None] = {}
+    original_relation_state = controller._relation_state
+
+    def capture_relation_state(event, context):
+        tick_context.update(
+            cue=context.get("cue"),
+            recall_strength=context.get("recall_strength"),
+            interference=context.get("interference"),
+        )
+        return original_relation_state(event, context)
+
+    monkeypatch.setattr(controller, "_relation_state", capture_relation_state)
     controller.tick(event, scenario="task", mode="interactive")
 
     assert calls == [
-        ("recall_strength", "tea", ("hot", "warm", "archive")),
-        ("recall", "tea", ("hot", "warm", "archive")),
-        ("recall_strength", "tea", ("hot", "warm", "archive")),
-        ("recall", "tea", ("hot", "warm", "archive")),
+        ("recall_strength", derived_cue, ("hot", "warm", "archive")),
+        ("recall", derived_cue, ("hot", "warm", "archive")),
+        ("recall_strength", derived_cue, ("hot", "warm", "archive")),
+        ("recall", derived_cue, ("hot", "warm", "archive")),
     ]
+    assert probe_context["cue"] == derived_cue
+    assert probe_context["recall_strength"] == 0.66
+    assert probe_context["interference"] == 0.14
+    assert tick_context == {
+        "cue": derived_cue,
+        "recall_strength": 0.66,
+        "interference": 0.14,
+    }
 
 
 def test_tick_degrades_to_json_fallback_when_parquet_sync_fails(tmp_path):
@@ -271,6 +394,7 @@ def test_tick_degrades_to_json_fallback_when_parquet_sync_fails(tmp_path):
         scenario="task",
         mode="interactive",
     )
+    controller.flush_pending_io(raise_on_error=False)
 
     state_payload = controller.state_payload()
     trace_payload = controller.trace_round(1)

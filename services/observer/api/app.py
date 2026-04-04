@@ -145,6 +145,10 @@ def create_app(project_root: Path | str | None = None, config_root: Path | str |
     async def conflict_timeline() -> dict:
         return controller.conflict_timeline()
 
+    @app.get("/metrics/entropy")
+    async def entropy_metrics() -> dict:
+        return controller.entropy_metrics()
+
     @app.get("/metrics/mode-switches")
     async def mode_switch_timeline() -> dict:
         return controller.mode_switch_timeline()

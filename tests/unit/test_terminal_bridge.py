@@ -259,6 +259,154 @@ def test_ask_permissions_emit_approval_request_and_persist_pending_approvals(tmp
     assert match["status"] == "approved"
 
 
+def test_user_turn_uses_plan_and_execute_paths_instead_of_legacy_route_and_trace_refetch(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    handler = TerminalEventHandler(controller)
+
+    handler.handle({"type": "start_session", "session_id": "sess-plan", "cwd": str(tmp_path)})
+
+    monkeypatch.setattr(controller, "probe_terminal_route", lambda *args, **kwargs: pytest.fail("legacy route probe should not be used"))
+    monkeypatch.setattr(controller, "start_run", lambda *args, **kwargs: pytest.fail("legacy start_run path should not be used"))
+    monkeypatch.setattr(controller, "tick", lambda *args, **kwargs: pytest.fail("legacy tick path should not be used"))
+    monkeypatch.setattr(controller, "explain_run", lambda *args, **kwargs: pytest.fail("explain_run should not be called during streamed turn"))
+    monkeypatch.setattr(controller, "run_steps", lambda *args, **kwargs: pytest.fail("run_steps should not be called during streamed turn"))
+    monkeypatch.setattr(controller, "run_tools", lambda *args, **kwargs: pytest.fail("run_tools should not be called during streamed turn"))
+
+    class _Plan:
+        route = "task_run"
+
+    controller.plan_turn = lambda text, **kwargs: _Plan()
+    controller.execute_turn = lambda plan, **kwargs: {
+        "route": "task_run",
+        "run": {
+            "run_id": "run-1",
+            "status": "running",
+            "goal": "检查 app.py",
+            "goal_summary": "检查 app.py",
+            "current_step_id": "step-1",
+            "current_step": {"node_id": "step-1", "title": "阅读 app.py", "tool_choice": "repo_scan"},
+            "dirty_worktree_detected": False,
+            "commit_permission_required": True,
+            "stop_reason": {},
+            "pending_steps": 1,
+            "completed_steps": 0,
+            "last_tool_result": {"tool_name": "repo_scan", "summary": "scanned 1 files"},
+            "created_at": "2026-04-04T00:00:00Z",
+            "updated_at": "2026-04-04T00:00:00Z",
+        },
+        "assistant_preamble": "已进入只读任务处理。可用 /status /why /steps /tools 查看进度。",
+        "assistant_final": "已进入只读任务处理。可用 /status /why /steps /tools 查看进度。",
+        "explain": {
+            "run_id": "run-1",
+            "status": "running",
+            "goal": "检查 app.py",
+            "goal_summary": "检查 app.py",
+            "current_step": {"node_id": "step-1", "title": "阅读 app.py", "tool_choice": "repo_scan"},
+            "last_tool_result": {"tool_name": "repo_scan", "summary": "scanned 1 files"},
+            "policy": {"allow_commit": False},
+            "budget": {"max_steps": 12},
+            "dirty_worktree_detected": False,
+            "stop_reason": {},
+        },
+        "steps": [
+            {
+                "run_id": "run-1",
+                "step_id": "step-1",
+                "title": "阅读 app.py",
+                "detail": "先检查相关文件",
+                "status": "running",
+                "tool_choice": "repo_scan",
+                "expected_observation": "找到入口文件",
+                "success_criteria": "定位到相关上下文",
+                "confidence": 0.82,
+            }
+        ],
+        "tools": [
+            {
+                "run_id": "run-1",
+                "tool_name": "repo_scan",
+                "status": "ok",
+                "summary": "scanned 1 files",
+                "output_excerpt": "src/app.py",
+                "input": {},
+            }
+        ],
+    }
+
+    events = list(handler.handle_stream({"type": "user_turn", "session_id": "sess-plan", "text": "检查 app.py"}))
+
+    assert [event["type"] for event in events] == [
+        "run_status",
+        "assistant_token",
+        "step_update",
+        "tool_call",
+        "tool_result",
+        "sidebar_snapshot",
+        "assistant_final",
+    ]
+
+
+def test_task_user_turn_streams_visible_token_before_followup_events(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    handler = TerminalEventHandler(controller)
+
+    handler.handle({"type": "start_session", "session_id": "sess-stream", "cwd": str(tmp_path)})
+
+    class _Plan:
+        route = "task_run"
+
+    observed: list[str] = []
+    controller.plan_turn = lambda text, **kwargs: _Plan()
+
+    def fake_execute_turn(plan, **kwargs):
+        observed.append("execute_turn")
+        return {
+            "route": "task_run",
+            "run": {
+                "run_id": "run-2",
+                "status": "running",
+                "goal": "检查 worker.py",
+                "goal_summary": "检查 worker.py",
+                "current_step_id": "step-2",
+                "current_step": {"node_id": "step-2", "title": "阅读 worker.py", "tool_choice": "repo_scan"},
+                "dirty_worktree_detected": False,
+                "commit_permission_required": True,
+                "stop_reason": {},
+                "pending_steps": 1,
+                "completed_steps": 0,
+                "last_tool_result": {"tool_name": "repo_scan", "summary": "scanned 1 files"},
+                "created_at": "2026-04-04T00:00:00Z",
+                "updated_at": "2026-04-04T00:00:00Z",
+            },
+            "assistant_preamble": "已进入只读任务处理。可用 /status /why /steps /tools 查看进度。",
+            "assistant_final": "已进入只读任务处理。可用 /status /why /steps /tools 查看进度。",
+            "explain": {
+                "run_id": "run-2",
+                "status": "running",
+                "goal": "检查 worker.py",
+                "goal_summary": "检查 worker.py",
+                "current_step": {"node_id": "step-2", "title": "阅读 worker.py", "tool_choice": "repo_scan"},
+                "last_tool_result": {"tool_name": "repo_scan", "summary": "scanned 1 files"},
+                "policy": {"allow_commit": False},
+                "budget": {"max_steps": 12},
+                "dirty_worktree_detected": False,
+                "stop_reason": {},
+            },
+            "steps": [{"run_id": "run-2", "step_id": "step-2", "title": "阅读 worker.py", "status": "running", "tool_choice": "repo_scan"}],
+            "tools": [{"run_id": "run-2", "tool_name": "repo_scan", "status": "ok", "summary": "scanned 1 files", "input": {}}],
+        }
+
+    controller.execute_turn = fake_execute_turn
+
+    stream = handler.handle_stream({"type": "user_turn", "session_id": "sess-stream", "text": "检查 worker.py"})
+    first = next(stream)
+    second = next(stream)
+
+    assert observed == ["execute_turn"]
+    assert first["type"] == "run_status"
+    assert second["type"] == "assistant_token"
+
+
 def test_start_session_keeps_permission_mode_and_pending_approvals(tmp_path):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "persist.py").write_text("VALUE = 1\n", encoding="utf-8")

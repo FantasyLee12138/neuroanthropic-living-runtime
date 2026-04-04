@@ -17,14 +17,15 @@ import yaml
 
 from nalr.agents.modules import TEMPLATE_ACTION_SCALES, TEMPLATE_BY_PRIORITY, build_agents, compute_salience_signal
 from nalr.dream.orchestrator import DreamOrchestrator
-from nalr.memory.store import MemoryStore
+from nalr.memory.store import MemoryStore, _derive_cue
 from nalr.output.renderer import fallback_render_text
 from nalr.output.style import build_expression_profile, build_render_plan, compute_style_profile
 from nalr.providers import ModelRequest, ModelRouter
 from nalr.run import SupervisorLoop
 from nalr.runtime.model_gateway import ModelGateway
 from nalr.runtime.async_io import AsyncIOWorker
-from nalr.runtime.entropy import QuantumEntropyPool
+from nalr.runtime.dynamics import smooth_resource_biases
+from nalr.runtime.entropy import AnuQuantumEntropyProvider, QuantumEntropyPool, QuantumEntropyUnavailableError
 from nalr.runtime.authenticity import AuthenticityPolicy
 from nalr.runtime.identity import IdentityRuntime
 from nalr.runtime.longrun import LongRunAnalyzer
@@ -62,12 +63,15 @@ from nalr.schemas.models import (
     StopReason,
     StochasticState,
     TaskNode,
+    TurnExecution,
+    TurnPlan,
     ToolResult,
     normalize_temperament_state,
     to_dict,
 )
 from nalr.skills.executor import SkillExecutor
 from nalr.skills.registry import build_skill_registry, serialize_contract
+from nalr.storage.parquet_io import read_snapshot_rows, rewrite_snapshot
 from nalr.trace.exporter import TraceExporter
 from nalr.trace.store import TraceStore
 
@@ -121,8 +125,11 @@ class RuntimeController:
         self.runtime_dir = self.home_path / "runtime"
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         self.state_path = self.runtime_dir / "persona_state.json"
+        self.runtime_parquet_dir = self.runtime_dir / "parquet"
+        self.state_parquet_path = self.runtime_parquet_dir / "persona_state.parquet"
         self.checkpoint_dir = self.runtime_dir / "checkpoints"
         self.snapshot_dir = self.runtime_dir / "snapshots"
+        self.runtime_parquet_dir.mkdir(parents=True, exist_ok=True)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.snapshot_dir.mkdir(parents=True, exist_ok=True)
         self._state_io = AsyncIOWorker("nalr-state-io")
@@ -152,7 +159,20 @@ class RuntimeController:
         model_gateway_cfg = self.config["models"].get("models")
         self.model_gateway = ModelGateway.from_config(model_gateway_cfg) if isinstance(model_gateway_cfg, dict) else None
         self.identity_runtime = IdentityRuntime(self._identity_cfg(), self._provider_descriptor)
-        self.entropy_pool = QuantumEntropyPool()
+        entropy_cfg = dict(self.config.get("entropy", {}).get("entropy", {}))
+        entropy_provider = AnuQuantumEntropyProvider(
+            endpoint=str(entropy_cfg.get("endpoint", "https://qrng.anu.edu.au/API/jsonI.php")),
+            timeout_s=float(entropy_cfg.get("timeout_s", 0.6)),
+            min_batch_bytes=int(entropy_cfg.get("min_batch_bytes", 32)),
+            max_batch_bytes=int(entropy_cfg.get("max_batch_bytes", 1024)),
+        )
+        self.entropy_pool = QuantumEntropyPool(
+            provider=entropy_provider,
+            prefetch_bytes=int(entropy_cfg.get("prefetch_bytes", 256)),
+            hard_block_on_unavailable=bool(entropy_cfg.get("hard_block_on_unavailable", True)),
+        )
+        if os.getenv("PYTEST_CURRENT_TEST") and not os.getenv("NALR_DISABLE_TEST_QRNG_SEED"):
+            self.entropy_pool.ingest_bytes(bytes([128]) * (256 * 64), source="pytest_qrng_fixture", reason="test harness")
         self.authenticity_policy = AuthenticityPolicy(self._identity_cfg())
         self.vitality_engine = VitalityEngine()
         self.dream_orchestrator = DreamOrchestrator(
@@ -164,7 +184,15 @@ class RuntimeController:
         )
         self.long_run_analyzer = LongRunAnalyzer(self.trace_store, self.identity_payload, CORE_ACTIONS)
 
-        if not self.state_path.exists():
+        if not self.state_parquet_path.exists() and self.state_path.exists():
+            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+            rewrite_snapshot(
+                self.state_parquet_path,
+                [{"payload_json": json.dumps(payload, ensure_ascii=False, sort_keys=True)}],
+                schema={"payload_json": "VARCHAR"},
+            )
+
+        if not self.state_parquet_path.exists() and not self.state_path.exists():
             initial_state = RuntimeState(
                 agents_enabled={
                     name: agent_cfg.get("enabled", True)
@@ -173,7 +201,7 @@ class RuntimeController:
             )
             self._save_state(initial_state, sync=True)
         else:
-            self._state_cache = RuntimeState(**json.loads(self.state_path.read_text(encoding="utf-8")))
+            self._state_cache = self.load_runtime_state()
 
     def _load_config(self) -> dict[str, Any]:
         def read_yaml(name: str) -> dict[str, Any]:
@@ -190,6 +218,7 @@ class RuntimeController:
             "modes": read_yaml("modes.yaml"),
             "scenarios": read_yaml("scenarios.yaml"),
             "thresholds": read_yaml("thresholds.yaml"),
+            "entropy": read_yaml("entropy.yaml"),
             "temperament": temperament_cfg,
             "resource_rules": resource_rules,
             "output_style": read_yaml("output_style.yaml"),
@@ -215,7 +244,13 @@ class RuntimeController:
         return {**payload, "temperament": normalized}
 
     def _write_state_snapshot(self, state: RuntimeState) -> None:
-        self.state_path.write_text(json.dumps(to_dict(state), ensure_ascii=False, indent=2), encoding="utf-8")
+        payload = to_dict(state)
+        rewrite_snapshot(
+            self.state_parquet_path,
+            [{"payload_json": json.dumps(payload, ensure_ascii=False, sort_keys=True)}],
+            schema={"payload_json": "VARCHAR"},
+        )
+        self.state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _save_state(self, state: RuntimeState, *, sync: bool = False) -> None:
         snapshot = RuntimeState(**to_dict(state))
@@ -234,7 +269,11 @@ class RuntimeController:
 
     def load_runtime_state(self) -> RuntimeState:
         if self._state_cache is None:
-            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+            rows = read_snapshot_rows(self.state_parquet_path, "select payload_json from read_parquet(?)")
+            if rows:
+                payload = json.loads(rows[0]["payload_json"])
+            else:
+                payload = json.loads(self.state_path.read_text(encoding="utf-8"))
             self._state_cache = RuntimeState(**payload)
         return RuntimeState(**to_dict(self._state_cache))
 
@@ -305,6 +344,7 @@ class RuntimeController:
             0.0,
             1.0,
         )
+        smooth_bias = smooth_resource_biases(scarcity_index)
         if scarcity_index >= 0.75:
             resource_mode = "starvation"
         elif scarcity_index >= 0.50:
@@ -320,11 +360,12 @@ class RuntimeController:
             "latency_pressure": round(latency_pressure, 4),
             "scarcity_index": round(scarcity_index, 4),
             "resource_mode": resource_mode,
-            "body_hunger_bias": round(0.10 + 0.55 * scarcity_index, 4),
-            "effort_avoidance_bias": round(0.05 + 0.45 * scarcity_index, 4),
-            "deliberation_compress": round(1.00 - 0.50 * scarcity_index, 4),
-            "rumination_bias": round(0.05 + 0.35 * scarcity_index, 4),
-            "action_shrink_scale": round(1.00 - 0.40 * scarcity_index, 4),
+            "scarcity_pressure": float(smooth_bias["scarcity_pressure"]),
+            "body_hunger_bias": float(smooth_bias["body_hunger_bias"]),
+            "effort_avoidance_bias": float(smooth_bias["effort_avoidance_bias"]),
+            "deliberation_compress": float(smooth_bias["deliberation_compress"]),
+            "rumination_bias": float(smooth_bias["rumination_bias"]),
+            "action_shrink_scale": float(smooth_bias["action_shrink_scale"]),
             "queue_depth": queue_depth,
             "average_latency_ms": round(avg_latency_ms, 2),
         }
@@ -375,22 +416,23 @@ class RuntimeController:
         return self.snapshot_dir / snapshot_id
 
     def _create_command_snapshot(self, state: RuntimeState, envelope: CommandEnvelope) -> str:
+        self.flush_pending_io(raise_on_error=True)
         snapshot_id = f"snap-{uuid4().hex[:12]}"
         snapshot_path = self._command_snapshot_path(snapshot_id)
         snapshot_path.mkdir(parents=True, exist_ok=True)
-        (snapshot_path / "persona_state.json").write_text(
-            json.dumps(to_dict(state), ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        rewrite_snapshot(
+            snapshot_path / "state.parquet",
+            [{"payload_json": json.dumps(to_dict(state), ensure_ascii=False, sort_keys=True)}],
+            schema={"payload_json": "VARCHAR"},
         )
         memory_snapshot = snapshot_path / "memory"
         if self.memory_store.memory_dir.exists():
             shutil.copytree(self.memory_store.memory_dir, memory_snapshot, dirs_exist_ok=True)
-        meta = {
-            "snapshot_id": snapshot_id,
-            "command_id": envelope.command_id,
-            "canonical": envelope.canonical,
-        }
-        (snapshot_path / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        rewrite_snapshot(
+            snapshot_path / "snapshot_meta.parquet",
+            [{"payload_json": json.dumps({"snapshot_id": snapshot_id, "command_id": envelope.command_id, "canonical": envelope.canonical}, ensure_ascii=False, sort_keys=True)}],
+            schema={"payload_json": "VARCHAR"},
+        )
         return snapshot_id
 
     def _apply_snapshot_restore(self, snapshot_id: str, envelope: CommandEnvelope) -> CommandResult:
@@ -415,7 +457,7 @@ class RuntimeController:
         before_hash = self._state_hash(before_state)
         rollback_snapshot_id = self._create_command_snapshot(before_state, envelope)
         self.flush_pending_io(raise_on_error=True)
-        shutil.copyfile(snapshot_path / "persona_state.json", self.state_path)
+        shutil.copyfile(snapshot_path / "state.parquet", self.state_parquet_path)
         memory_snapshot = snapshot_path / "memory"
         if self.memory_store.memory_dir.exists():
             shutil.rmtree(self.memory_store.memory_dir)
@@ -423,7 +465,8 @@ class RuntimeController:
             shutil.copytree(memory_snapshot, self.memory_store.memory_dir, dirs_exist_ok=True)
         self.memory_store = MemoryStore(self.home_path)
         self.dream_orchestrator.memory_store = self.memory_store
-        self._state_cache = RuntimeState(**json.loads(self.state_path.read_text(encoding="utf-8")))
+        rows = read_snapshot_rows(self.state_parquet_path, "select payload_json from read_parquet(?)")
+        self._state_cache = RuntimeState(**json.loads(rows[0]["payload_json"]))
         restored_state = self.load_runtime_state()
         after_hash = self._state_hash(restored_state)
         rollback = {
@@ -1223,6 +1266,7 @@ class RuntimeController:
             "queue_pressure": float(telemetry["queue_pressure"]),
             "latency_pressure": float(telemetry["latency_pressure"]),
             "resource_mode": str(telemetry["resource_mode"]),
+            "scarcity_pressure": float(telemetry["scarcity_pressure"]),
             "body_hunger_bias": float(telemetry["body_hunger_bias"]),
             "effort_avoidance_bias": float(telemetry["effort_avoidance_bias"]),
             "deliberation_compress": float(telemetry["deliberation_compress"]),
@@ -1248,7 +1292,20 @@ class RuntimeController:
             "correction_window": dict(structured.get("correction_window", {})),
             "freeze_until_round": dict(structured.get("freeze_until_round", {})),
             "last_correction_events": list(structured.get("last_correction_events", [])),
+            "drift_diagnostics": dict(structured.get("drift_diagnostics", {})),
         }
+
+    def _record_entropy_failure(self, state: RuntimeState, exc: QuantumEntropyUnavailableError) -> None:
+        state.entropy_health_state = self.entropy_pool.health_snapshot()
+        state.last_entropy_failure = {
+            "node_name": exc.node_name,
+            "purpose": exc.purpose,
+            "failure_class": exc.failure_class,
+            "detail": exc.detail,
+            "blocked_by_entropy": True,
+            "recorded_at": utc_now_iso(),
+        }
+        self._save_state(state)
 
     def _build_base_distribution(self, state: RuntimeState, scenario_cfg: dict[str, Any], mode_cfg: dict[str, Any], relation_state: dict[str, float]) -> dict[str, float]:
         scarcity_index = float(state.resource_state.get("scarcity_index", _clip(1.0 - state.budget_remaining)))
@@ -1530,8 +1587,50 @@ class RuntimeController:
         if adjustment.triggered:
             state.last_post_error_adjustment = adjustment
 
-        ledger_append_payload = repair_output.get("repair_ledger_append", {})
+        ledger_append_payload = dict(repair_output.get("repair_ledger_append", {}))
+        conflict_context = dict(repair_output.get("conflict_learning_context", {}))
         if ledger_append_payload:
+            learning_state = dict(state.conflict_learning_state or {})
+            reason_counts = dict(learning_state.get("adjustment_reasons", {}))
+            template_counts = dict(learning_state.get("template_counts", {}))
+            blocked_action_counts = dict(learning_state.get("blocked_action_counts", {}))
+            reason = str(ledger_append_payload.get("reason") or "idle")
+            template = str(ledger_append_payload.get("template") or "none")
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+            template_counts[template] = template_counts.get(template, 0) + 1
+            for action_name in ledger_append_payload.get("blocked_actions", []):
+                blocked_action_counts[action_name] = blocked_action_counts.get(action_name, 0) + 1
+            total_adjustments = sum(reason_counts.values()) or 1
+            learning_signal = {
+                "resample_budget_bias": round(min(0.20, reason_counts[reason] * 0.02), 4),
+                "template_preference_bias": round(template_counts[template] / total_adjustments, 4),
+                "blocked_action_persistence": round(min(0.50, max(blocked_action_counts.values(), default=0) * 0.05), 4),
+                "cooldown_length": int(2 + min(3, reason_counts[reason] // 2)),
+            }
+            ledger_append_payload.update(
+                {
+                    "conflict_score": round(float(conflict_context.get("conflict_score", 0.0)), 4),
+                    "dominant_conflicts": list(conflict_context.get("dominant_conflicts", [])),
+                    "pass_count": int(conflict_context.get("pass_count", 0)),
+                    "resample_count": int(conflict_context.get("resample_count", 0)),
+                    "safe_mode_owned": bool(conflict_context.get("safe_mode_owned", False)),
+                    "action_delta_summary": {
+                        "top_action_before": ledger_append_payload.get("top_action_before"),
+                        "top_action_after": ledger_append_payload.get("top_action_after"),
+                        "blocked_actions_added": len(ledger_append_payload.get("blocked_actions", [])),
+                    },
+                    "learning_signal": learning_signal,
+                    "stage_before": str(conflict_context.get("stage_before", state.repair_state.stage)),
+                    "stage_after": str(ledger_append_payload.get("repair_stage_after", state.repair_state.stage)),
+                }
+            )
+            state.conflict_learning_state = {
+                "adjustment_reasons": reason_counts,
+                "template_counts": template_counts,
+                "blocked_action_counts": blocked_action_counts,
+                "last_learning_signal": learning_signal,
+                "last_stage": ledger_append_payload["stage_after"],
+            }
             state.repair_ledger.append(ConflictRepairLedgerEntry(**ledger_append_payload))
 
         state.repair_state = ConflictRepairState(
@@ -1774,7 +1873,17 @@ class RuntimeController:
         )
         post_error_adjustment, repair_transition, repair_state_snapshot, repair_ledger_tail = self._apply_conflict_repair_output(
             state,
-            repair_output=repair_output,
+            repair_output={
+                **repair_output,
+                "conflict_learning_context": {
+                    "conflict_score": effective_assessment.get("score", 0.0),
+                    "dominant_conflicts": list(effective_assessment.get("dominant_conflicts", [])),
+                    "pass_count": len(pass_records),
+                    "resample_count": distribution_state.resample_idx,
+                    "safe_mode_owned": state.conflict_safe_mode_owner == "conflict",
+                    "stage_before": state.repair_state.stage,
+                },
+            },
         )
         resolution["repair_mode"] = repair_output.get("repair_mode")
         resolution["post_error_adjustment"] = post_error_adjustment
@@ -1863,21 +1972,63 @@ class RuntimeController:
         base_stochastic = self._softmax(distribution_state.u_shifted or {action: math.log(max(value, 1e-9)) for action, value in deterministic.items()})
         distribution_state.p_base_stochastic = dict(base_stochastic)
         emo_channel = self._stochastic_channel(base_stochastic)
-        sigma_emo = 0.08 + scenario_cfg.get("output_warmth_variance", 0.1) * 0.12
-        sigma_mood = 0.06 + distribution_state.ci.get("respond", 0.25) * 0.12
+        novelty = _clip(1.0 - max(base_stochastic.values(), default=0.0), 0.0, 1.0)
+        emotion_volatility = _clip(abs(event.valence - (state.mood - 0.5)), 0.0, 1.0)
+        fatigue = _clip(1.0 - state.body_energy, 0.0, 1.0)
+        privacy_shift = _clip(
+            abs(relation_state["privacy_level"] - float(state.session_metadata.get("last_privacy_level", relation_state["privacy_level"]))),
+            0.0,
+            1.0,
+        )
+        location_shift = _clip(1.0 if event.target and event.target != state.session_metadata.get("last_target") else 0.0, 0.0, 1.0)
+        circadian_hour = time.localtime().tm_hour
+        circadian_offset = _clip(abs(circadian_hour - 14) / 14.0, 0.0, 1.0)
+        resource_scarcity = _clip(float(state.resource_state.get("scarcity_index", 1.0 - state.budget_remaining)), 0.0, 1.0)
+        salience_lock = _clip(state.focus_lock_count / 6.0, 0.0, 1.0)
+        habit_strength = _clip(1.0 - (sum(distribution_state.ci.values()) / max(len(distribution_state.ci), 1)) / 0.55, 0.0, 1.0)
+        v_t_components = {
+            "novelty": round(novelty, 4),
+            "emotion_volatility": round(emotion_volatility, 4),
+            "fatigue": round(fatigue, 4),
+            "privacy_shift": round(privacy_shift, 4),
+            "location_shift": round(location_shift, 4),
+            "circadian_offset": round(circadian_offset, 4),
+            "resource_scarcity": round(resource_scarcity, 4),
+            "salience_lock": round(salience_lock, 4),
+            "habit_strength": round(habit_strength, 4),
+        }
+        V_t = _clip(
+            0.25 * novelty
+            + 0.20 * emotion_volatility
+            + 0.15 * fatigue
+            + 0.10 * privacy_shift
+            + 0.10 * location_shift
+            + 0.10 * circadian_offset
+            + 0.10 * resource_scarcity
+            - 0.10 * salience_lock
+            - 0.10 * habit_strength,
+            0.0,
+            1.0,
+        )
+        sigma_emo = 0.03 + (0.18 - 0.03) * V_t
+        sigma_mood = 0.015 + (0.09 - 0.015) * V_t
+        entropy_refs_by_node: dict[str, Any] = {}
         xi_emo, entropy_ref = self.entropy_pool.truncated_normal(
             sigma=sigma_emo,
             low=-2 * sigma_emo,
             high=2 * sigma_emo,
             purpose=f"round-{round_seed}-xi-emo",
+            node_name="xi_emo",
         )
-        xi_mood, _ = self.entropy_pool.truncated_normal(
+        entropy_refs_by_node["xi_emo"] = to_dict(entropy_ref)
+        xi_mood, mood_entropy_ref = self.entropy_pool.truncated_normal(
             sigma=sigma_mood,
             low=-sigma_mood,
             high=sigma_mood,
             purpose=f"round-{round_seed}-xi-mood",
+            node_name="xi_mood",
         )
-        V_t = _clip(sum(distribution_state.ci.values()) / max(len(distribution_state.ci), 1), 0.0, 1.0)
+        entropy_refs_by_node["xi_mood"] = to_dict(mood_entropy_ref)
         control_strength = _clip(
             0.35
             + max(0.0, scenario_cfg.get("pfc_base_share", 0.2) - 0.2) * 1.2
@@ -1887,25 +2038,36 @@ class RuntimeController:
             0.0,
             1.0,
         )
-        lambda_noise = _clip(
+        lambda_noise_pre_guard = _clip(
             0.10 + 0.25 * V_t - 0.12 * control_strength - relation_state["relationship_risk"] * 0.08,
             0.0,
             0.60,
         )
+        lambda_noise = lambda_noise_pre_guard
 
         modifiers: dict[str, float] = {}
+        log_m_guard_triggered = False
         for action in base_stochastic:
             emo_weight = 1.0 if action in {"connect", "respond"} else -0.5 if action in {"rest", "wander"} else 0.4
             mood_weight = 0.6 if action in {"plan", "clarify", "recall"} else 0.2
-            log_m = _clip(emo_weight * xi_emo + mood_weight * xi_mood, -0.35, 0.35)
+            raw_log_m = emo_weight * xi_emo + mood_weight * xi_mood
+            if abs(raw_log_m) > 0.35:
+                log_m_guard_triggered = True
+            log_m = _clip(raw_log_m, -0.35, 0.35)
             modifiers[action] = math.exp(log_m)
 
         q_noise = self._normalize({action: base_stochastic[action] * modifiers[action] for action in base_stochastic})
+        q_noise_pre_guard = dict(q_noise)
         kl = self._kl_divergence(q_noise, base_stochastic)
         noise_guard_triggered = False
+        guard_reason = ""
+        if log_m_guard_triggered:
+            lambda_noise = max(0.0, lambda_noise * 0.85)
+            guard_reason = "log_m_guard"
         if kl > 0.15:
             noise_guard_triggered = True
             lambda_noise = max(0.0, lambda_noise * 0.5)
+            guard_reason = f"{guard_reason}+kl_guard" if guard_reason else "kl_guard"
             q_noise = dict(base_stochastic)
         distribution_state.q_noise = dict(q_noise)
         mixed = {action: (1 - lambda_noise) * base_stochastic[action] + lambda_noise * q_noise[action] for action in base_stochastic}
@@ -1934,13 +2096,27 @@ class RuntimeController:
             0.95,
         )
         kappa = _clip(16 - 10 * V_t, 4, 16)
-        r_intensity, _ = self.entropy_pool.beta_like(
+        r_intensity, intensity_ref = self.entropy_pool.beta_like(
             mu=mu_int,
             kappa=kappa,
             purpose=f"round-{round_seed}-intensity",
+            node_name="r_intensity",
         )
-        timing_jitter, _ = self.entropy_pool.uniform_range(-0.08, 0.12, purpose=f"round-{round_seed}-timing-jitter")
-        fragmentation_jitter, _ = self.entropy_pool.uniform_range(-0.05, 0.10, purpose=f"round-{round_seed}-fragment-jitter")
+        entropy_refs_by_node["r_intensity"] = to_dict(intensity_ref)
+        timing_jitter, timing_ref = self.entropy_pool.uniform_range(
+            -0.08,
+            0.12,
+            purpose=f"round-{round_seed}-timing-jitter",
+            node_name="timing_jitter",
+        )
+        fragmentation_jitter, fragmentation_ref = self.entropy_pool.uniform_range(
+            -0.05,
+            0.10,
+            purpose=f"round-{round_seed}-fragment-jitter",
+            node_name="fragmentation_jitter",
+        )
+        entropy_refs_by_node["timing_jitter"] = to_dict(timing_ref)
+        entropy_refs_by_node["fragmentation_jitter"] = to_dict(fragmentation_ref)
 
         stochastic = StochasticState(
             emo_channel=emo_channel,
@@ -1953,6 +2129,15 @@ class RuntimeController:
             kl_divergence=round(kl, 6),
             timing_jitter=round(timing_jitter, 6),
             fragmentation_jitter=round(fragmentation_jitter, 6),
+            v_t=round(V_t, 6),
+            v_t_components=v_t_components,
+            sigma_emo=round(sigma_emo, 6),
+            sigma_mood=round(sigma_mood, 6),
+            lambda_noise_pre_guard=round(lambda_noise_pre_guard, 6),
+            log_m_guard_triggered=log_m_guard_triggered,
+            guard_reason=guard_reason,
+            q_noise_pre_guard_summary={key: round(value, 6) for key, value in q_noise_pre_guard.items()},
+            entropy_refs_by_node=entropy_refs_by_node,
             entropy_ref=entropy_ref,
         )
         return self._normalize(mixed), stochastic
@@ -2028,7 +2213,7 @@ class RuntimeController:
         self._update_affect_residue(state, event, requested_mode)
         state.budget_remaining = _clip(state.budget_remaining - 0.001 + (0.01 if requested_mode in {"idle", "sleep"} else 0.0))
 
-        cue = event.cue
+        cue = _derive_cue(event)
         memory_retrieval_budget = self._memory_retrieval_budget(event, scenario_cfg)
         resource_telemetry = self._compute_resource_telemetry(state)
         state.resource_state = {**state.resource_state, **resource_telemetry}
@@ -2050,7 +2235,6 @@ class RuntimeController:
         }
         if cue:
             recall_payload = self.memory_store.recall(cue, tier_budget=memory_retrieval_budget)
-            context["recall_strength"] = recall_payload.get("strength", context["recall_strength"])
             context["interference"] = recall_payload.get("interference", 0.0)
         relation_state = self._relation_state(event, context)
         round_seed = self._round_seed(state, event)
@@ -2235,6 +2419,166 @@ class RuntimeController:
             "chat_mass": chat_mass,
         }
 
+    def _terminal_route_scenario_hint(self, text: str) -> str:
+        normalized = text.strip().lower()
+        if not normalized:
+            return "chat"
+        task_tokens = (
+            ".py",
+            ".ts",
+            ".tsx",
+            ".js",
+            ".jsx",
+            "repo",
+            "trace",
+            "bug",
+            "debug",
+            "fix",
+            "test",
+            "tests",
+            "file",
+            "files",
+            "code",
+            "worker",
+            "planner",
+            "app.py",
+            "仓库",
+            "代码",
+            "文件",
+            "目录",
+            "测试",
+            "修复",
+            "检查",
+            "总结",
+            "规划",
+            "实现",
+            "重构",
+        )
+        return "task" if any(token in normalized for token in task_tokens) else "chat"
+
+    def _turn_reason(self, route: str, probe: dict[str, Any], scenario: str) -> str:
+        task_mass = float(probe.get("task_mass", 0.0))
+        chat_mass = float(probe.get("chat_mass", 0.0))
+        if route == "task_run":
+            return f"{scenario}_probe task_mass={task_mass:.3f} chat_mass={chat_mass:.3f}"
+        return f"{scenario}_probe chat_mass={chat_mass:.3f} task_mass={task_mass:.3f}"
+
+    def _build_task_bootstrap(
+        self,
+        goal: str,
+        *,
+        allow_commit: bool,
+        operator_level: str,
+    ) -> tuple[RunState, dict[str, Any], dict[str, Any]]:
+        state = self.load_runtime_state()
+        request = RunRequest(
+            goal=goal.strip(),
+            scenario="task",
+            mode=state.mode or "interactive",
+            allow_commit=allow_commit,
+            operator_level=operator_level,
+        )
+        supervisor = SupervisorLoop(project_root=self.project_root, planner=self._plan_run_via_model)
+        return supervisor.bootstrap(
+            request,
+            session_id=state.session_id,
+            recorded_at=utc_now_iso(),
+        )
+
+    def plan_turn(
+        self,
+        text: str,
+        *,
+        target: str = "user",
+        mode: str = "interactive",
+        allow_commit: bool = False,
+        operator_level: str = "read_only",
+    ) -> TurnPlan:
+        normalized = text.strip()
+        if not normalized:
+            return TurnPlan(
+                text=normalized,
+                route="direct_chat",
+                scenario="chat",
+                mode=mode,
+                target=target,
+                reason="empty_input",
+            )
+
+        scenario = self._terminal_route_scenario_hint(normalized)
+        event = RoundEvent(source="user", content=normalized, target=target)
+        probe = self._probe_distribution_for_scenario(event, scenario=scenario, mode=mode)
+        task_selected = (
+            probe["task_mass"] >= 0.55
+            and probe["task_mass"] - probe["chat_mass"] >= 0.10
+        )
+        route = "task_run" if task_selected else "direct_chat"
+        task_bootstrap = None
+        if route == "task_run":
+            task_bootstrap = self._build_task_bootstrap(
+                normalized,
+                allow_commit=allow_commit,
+                operator_level=operator_level,
+            )
+        return TurnPlan(
+            text=normalized,
+            route=route,
+            scenario=scenario,
+            mode=mode,
+            target=target,
+            reason=self._turn_reason(route, probe, scenario),
+            top_action=str(probe.get("top_action", "")),
+            precomputed_distribution={
+                "action_distribution": dict(probe.get("action_distribution", {})),
+                "task_mass": float(probe.get("task_mass", 0.0)),
+                "chat_mass": float(probe.get("chat_mass", 0.0)),
+            },
+            task_bootstrap=task_bootstrap,
+        )
+
+    def execute_turn(
+        self,
+        plan: TurnPlan,
+        *,
+        allow_commit: bool = False,
+        operator_level: str = "read_only",
+        replace_active: bool = False,
+        interrupt_reason: str = "interrupted_by_user",
+    ) -> TurnExecution:
+        if plan.route == "direct_chat":
+            result = self.tick(
+                RoundEvent(source="user", content=plan.text, target=plan.target),
+                scenario="chat",
+                mode=plan.mode,
+            )
+            final_message = result.rendered_expression.text.strip() or "你好，我在。你想让我帮你做什么？"
+            return TurnExecution(
+                route="direct_chat",
+                assistant_final=final_message,
+                payload={"reason": plan.reason, "top_action": plan.top_action},
+            )
+
+        run_details = self.start_run(
+            plan.text,
+            allow_commit=allow_commit,
+            operator_level=operator_level,
+            replace_active=replace_active,
+            interrupt_reason=interrupt_reason,
+            bootstrap=plan.task_bootstrap,
+            include_details=True,
+            sync_hot_path=False,
+        )
+        return TurnExecution(
+            route="task_run",
+            assistant_preamble=self._task_turn_message(run_details["run"]),
+            assistant_final=self._task_turn_message(run_details["run"]),
+            run=run_details["run"],
+            explain=run_details["explain"],
+            steps=run_details["steps"],
+            tools=run_details["tools"],
+            payload={"reason": plan.reason, "top_action": plan.top_action},
+        )
+
     def probe_terminal_route(
         self,
         text: str,
@@ -2242,23 +2586,16 @@ class RuntimeController:
         target: str = "user",
         mode: str = "interactive",
     ) -> dict[str, Any]:
-        event = RoundEvent(source="user", content=text.strip(), target=target)
-        chat_probe = self._probe_distribution_for_scenario(event, scenario="chat", mode=mode)
-        task_probe = self._probe_distribution_for_scenario(event, scenario="task", mode=mode)
-
-        task_selected = (
-            task_probe["task_mass"] >= 0.55
-            and task_probe["task_mass"] - task_probe["chat_mass"] >= 0.10
-        )
-        selected = task_probe if task_selected else chat_probe
+        plan = self.plan_turn(text, target=target, mode=mode)
+        selected = plan.precomputed_distribution
         return {
-            "route": "task_run" if task_selected else "direct_chat",
-            "top_action": selected["top_action"],
+            "route": plan.route,
+            "top_action": plan.top_action,
             "action_distribution": selected["action_distribution"],
             "task_mass": selected["task_mass"],
             "chat_mass": selected["chat_mass"],
-            "chat_probe": chat_probe,
-            "task_probe": task_probe,
+            "reason": plan.reason,
+            "scenario": plan.scenario,
         }
 
     def _memory_retrieval_budget(self, event: RoundEvent, scenario_cfg: dict[str, Any]) -> tuple[str, ...]:
@@ -2268,7 +2605,7 @@ class RuntimeController:
             return ("hot",)
         return ("hot", "warm", "archive")
 
-    def tick(self, event: RoundEvent, scenario: str, mode: str) -> RoundResult:
+    def _tick_impl(self, event: RoundEvent, scenario: str, mode: str) -> RoundResult:
         state = self.load_runtime_state()
         self._normalize_temperament_runtime_state(state)
         requested_mode = "safe" if state.safe_mode else mode
@@ -2315,7 +2652,6 @@ class RuntimeController:
         }
         if cue:
             recall_payload = self.memory_store.recall(cue, tier_budget=memory_retrieval_budget)
-            context["recall_strength"] = recall_payload.get("strength", context["recall_strength"])
             context["interference"] = recall_payload.get("interference", 0.0)
         relation_state = self._relation_state(event, context)
         shaping_events, dream_payload = self._apply_noninteractive_shaping(state, requested_mode, cue, relation_state)
@@ -2586,7 +2922,10 @@ class RuntimeController:
                 }
             )
 
-        sample_value, action_entropy_ref = self.entropy_pool.uniform(purpose=f"round-{round_seed}-action-sample")
+        sample_value, action_entropy_ref = self.entropy_pool.uniform(
+            purpose=f"round-{round_seed}-action-sample",
+            node_name="action_sample",
+        )
         sampled_action = self._execute_skill(
             round_id=state.round_count,
             skill_name="sample_action",
@@ -2598,6 +2937,7 @@ class RuntimeController:
         )["action"]
         sampled_action = self._collapse_internal_sampled_action(sampled_action)
         stochastic_state.entropy_ref = action_entropy_ref if not stochastic_state.entropy_ref.source else stochastic_state.entropy_ref
+        stochastic_state.entropy_refs_by_node["action_sample"] = to_dict(action_entropy_ref)
 
         plausibility_guard = self.agent_map["BehaviorPlausibilityGuard"]
         plausibility_by_action: dict[str, dict[str, Any]] = {}
@@ -2670,7 +3010,11 @@ class RuntimeController:
                 for action in distribution_state.p_final
             }
             distribution_state.p_final = self._normalize(filtered)
-            resample_value, _ = self.entropy_pool.uniform(purpose=f"round-{round_seed}-action-resample")
+            resample_value, resample_ref = self.entropy_pool.uniform(
+                purpose=f"round-{round_seed}-action-resample",
+                node_name="action_resample",
+            )
+            stochastic_state.entropy_refs_by_node["action_resample"] = to_dict(resample_ref)
             sampled_action = thalamus.run_skill("sample_action", distribution_state.p_final, resample_value)["action"]
             sampled_action = self._collapse_internal_sampled_action(sampled_action)
         gate_decisions.append(
@@ -2731,7 +3075,11 @@ class RuntimeController:
                 for action in distribution_state.p_final
             }
             distribution_state.p_final = self._normalize(filtered)
-            regated_value, _ = self.entropy_pool.uniform(purpose=f"round-{round_seed}-action-regate")
+            regated_value, regate_ref = self.entropy_pool.uniform(
+                purpose=f"round-{round_seed}-action-regate",
+                node_name="action_regate",
+            )
+            stochastic_state.entropy_refs_by_node["action_regate"] = to_dict(regate_ref)
             sampled_action = thalamus.run_skill("sample_action", distribution_state.p_final, regated_value)["action"]
             sampled_action = self._collapse_internal_sampled_action(sampled_action)
         gate_decisions.append({"stage": "output_gate", "owner": "OutputGate", "allowed": gate > 0, "requires_resample": gate == 0.0, "reason": f"gate={gate:.2f}"})
@@ -3007,6 +3355,8 @@ class RuntimeController:
         )
 
         health = HealthEvent(event="tick", status="ok", detail=f"budget={state.budget_remaining:.2f}")
+        state.entropy_health_state = self.entropy_pool.health_snapshot()
+        state.last_entropy_failure = {}
         self._save_state(state)
         self.trace_store.write_round(trace)
         if distribution_state.conflict.get("post_error_adjustment", {}).get("triggered") and state.repair_ledger:
@@ -3027,6 +3377,14 @@ class RuntimeController:
             health=health,
             rendered_expression=rendered_expression,
         )
+
+    def tick(self, event: RoundEvent, scenario: str, mode: str) -> RoundResult:
+        try:
+            return self._tick_impl(event, scenario, mode)
+        except QuantumEntropyUnavailableError as exc:
+            state = self.load_runtime_state()
+            self._record_entropy_failure(state, exc)
+            raise
 
     def execute_command(self, envelope: CommandEnvelope) -> CommandResult:
         if envelope.domain == "snapshot" and envelope.verb == "restore" and envelope.target:
@@ -3123,19 +3481,20 @@ class RuntimeController:
         elif envelope.domain == "checkpoint" and envelope.verb == "create":
             self.flush_pending_io(raise_on_error=True)
             checkpoint_id = f"ckpt-{state.round_count:04d}"
-            path = self.checkpoint_dir / f"{checkpoint_id}.json"
-            shutil.copyfile(self.state_path, path)
+            path = self.checkpoint_dir / f"{checkpoint_id}.parquet"
+            shutil.copyfile(self.state_parquet_path, path)
             state.last_checkpoint_id = checkpoint_id
             result = CommandResult(applied=True, scope="checkpoint", delta={"checkpoint_id": checkpoint_id, "created": True}, operator_level=operator_level, rollback_available=True)
         elif envelope.domain == "checkpoint" and envelope.verb == "rewind":
             checkpoint_id = str(envelope.parsed_args.get("checkpoint_id", envelope.target or parts[2]))
-            checkpoint_path = self.checkpoint_dir / f"{checkpoint_id}.json"
+            checkpoint_path = self.checkpoint_dir / f"{checkpoint_id}.parquet"
             if not checkpoint_path.exists():
                 result = CommandResult(applied=False, scope="checkpoint", delta={"checkpoint_id": checkpoint_id, "restored": False}, risk_note="checkpoint not found", operator_level=operator_level, rollback_available=False)
             else:
                 self.flush_pending_io(raise_on_error=True)
-                shutil.copyfile(checkpoint_path, self.state_path)
-                self._state_cache = RuntimeState(**json.loads(self.state_path.read_text(encoding="utf-8")))
+                shutil.copyfile(checkpoint_path, self.state_parquet_path)
+                rows = read_snapshot_rows(self.state_parquet_path, "select payload_json from read_parquet(?)")
+                self._state_cache = RuntimeState(**json.loads(rows[0]["payload_json"]))
                 state = self.load_runtime_state()
                 result = CommandResult(applied=True, scope="checkpoint", delta={"checkpoint_id": checkpoint_id, "restored": True, "safe_mode": state.safe_mode, "mode": state.mode}, operator_level=operator_level, rollback_available=True)
         else:
@@ -3170,8 +3529,8 @@ class RuntimeController:
         before_hash = self._state_hash(state)
         self.flush_pending_io(raise_on_error=True)
         checkpoint_id = f"ckpt-{state.round_count:04d}"
-        path = self.checkpoint_dir / f"{checkpoint_id}.json"
-        shutil.copyfile(self.state_path, path)
+        path = self.checkpoint_dir / f"{checkpoint_id}.parquet"
+        shutil.copyfile(self.state_parquet_path, path)
         state.last_checkpoint_id = checkpoint_id
         self._save_state(state, sync=True)
         after_hash = self._state_hash(state)
@@ -3194,14 +3553,15 @@ class RuntimeController:
         return CheckpointRef(checkpoint_id=checkpoint_id, path=path)
 
     def rewind(self, checkpoint_id: str) -> CommandResult:
-        checkpoint_path = self.checkpoint_dir / f"{checkpoint_id}.json"
+        checkpoint_path = self.checkpoint_dir / f"{checkpoint_id}.parquet"
         if not checkpoint_path.exists():
             return CommandResult(applied=False, scope="checkpoint", delta={"checkpoint_id": checkpoint_id, "restored": False}, risk_note="checkpoint not found", operator_level="ops_admin", rollback_available=False)
         before_state = self.load_runtime_state()
         before_hash = self._state_hash(before_state)
         self.flush_pending_io(raise_on_error=True)
-        shutil.copyfile(checkpoint_path, self.state_path)
-        self._state_cache = RuntimeState(**json.loads(self.state_path.read_text(encoding="utf-8")))
+        shutil.copyfile(checkpoint_path, self.state_parquet_path)
+        rows = read_snapshot_rows(self.state_parquet_path, "select payload_json from read_parquet(?)")
+        self._state_cache = RuntimeState(**json.loads(rows[0]["payload_json"]))
         restored_state = self.load_runtime_state()
         after_hash = self._state_hash(restored_state)
         result = CommandResult(applied=True, scope="checkpoint", delta={"checkpoint_id": checkpoint_id, "restored": True, "safe_mode": restored_state.safe_mode, "mode": restored_state.mode}, rollback_hint="create a fresh checkpoint before further changes", operator_level="ops_admin", rollback_available=True)
@@ -3245,12 +3605,26 @@ class RuntimeController:
         return payload
 
     def state_payload(self) -> dict[str, Any]:
+        self.flush_pending_io(raise_on_error=False)
         state = self.load_runtime_state()
         payload = to_dict(state)
         payload["trace_storage"] = self._trace_storage_payload()
+        payload["memory_storage"] = self.memory_store.storage_status()
+        payload["runtime_storage"] = self.runtime_storage_status()
+        payload["entropy"] = self.entropy_pool.health_snapshot()
         payload["dream"] = self.dream_status()
         payload["cognitive_snapshot"] = self.cognitive_snapshot(state=state)
         return payload
+
+    def runtime_storage_status(self) -> dict[str, Any]:
+        parquet_ready = self.state_parquet_path.exists()
+        return {
+            "read_source_default": "parquet",
+            "storage_state": "healthy",
+            "parquet_live_ready": parquet_ready,
+            "degraded_reason": None,
+            "last_sync_at": None,
+        }
 
     def _latest_why_payload(self, state: RuntimeState) -> dict[str, Any] | None:
         if state.round_count <= 0:
@@ -3469,6 +3843,45 @@ class RuntimeController:
             raise RuntimeError("dream run did not produce a sidecar result")
         return self.dream_trace(outcome["run_id"])
 
+    def _task_turn_message(self, run_payload: dict[str, Any]) -> str:
+        if run_payload.get("status") == "paused" and run_payload.get("dirty_worktree_detected"):
+            return "任务已建立，但当前处于暂停状态。可用 /status /why 查看原因。"
+        return "已进入只读任务处理。可用 /status /why /steps /tools 查看进度。"
+
+    def _run_status_payload(self, run_state: RunState) -> dict[str, Any]:
+        current_step = self._current_task_node(run_state)
+        return {
+            "run_id": run_state.run_id,
+            "status": run_state.status,
+            "goal": run_state.goal,
+            "goal_summary": run_state.goal_summary,
+            "current_step_id": run_state.current_step_id,
+            "current_step": to_dict(current_step) if current_step else None,
+            "dirty_worktree_detected": run_state.dirty_worktree_detected,
+            "commit_permission_required": run_state.commit_permission_required,
+            "stop_reason": to_dict(run_state.stop_reason) if run_state.stop_reason else {},
+            "pending_steps": len(run_state.pending_steps),
+            "completed_steps": len(run_state.completed_steps),
+            "last_tool_result": to_dict(run_state.last_tool_result) if run_state.last_tool_result else {},
+            "created_at": run_state.created_at,
+            "updated_at": run_state.updated_at,
+        }
+
+    def _run_explain_payload(self, run_state: RunState) -> dict[str, Any]:
+        current_step = self._current_task_node(run_state)
+        return {
+            "run_id": run_state.run_id,
+            "status": run_state.status,
+            "goal": run_state.goal,
+            "goal_summary": run_state.goal_summary,
+            "current_step": to_dict(current_step) if current_step else None,
+            "last_tool_result": to_dict(run_state.last_tool_result) if run_state.last_tool_result else {},
+            "policy": to_dict(run_state.policy),
+            "budget": to_dict(run_state.budget),
+            "dirty_worktree_detected": run_state.dirty_worktree_detected,
+            "stop_reason": to_dict(run_state.stop_reason) if run_state.stop_reason else {},
+        }
+
     def start_run(
         self,
         goal: str,
@@ -3477,6 +3890,9 @@ class RuntimeController:
         operator_level: str = "read_only",
         replace_active: bool = False,
         interrupt_reason: str = "interrupted_by_user",
+        bootstrap: tuple[RunState, dict[str, Any], dict[str, Any]] | None = None,
+        include_details: bool = False,
+        sync_hot_path: bool = False,
     ) -> dict[str, Any]:
         state = self.load_runtime_state()
         if state.active_run_id and state.run_status in {"running", "paused"}:
@@ -3500,12 +3916,24 @@ class RuntimeController:
             allow_commit=allow_commit,
             operator_level=operator_level,
         )
-        supervisor = SupervisorLoop(project_root=self.project_root, planner=self._plan_run_via_model)
-        run_state, step_trace, tool_trace = supervisor.bootstrap(
-            request,
-            session_id=state.session_id,
-            recorded_at=recorded_at,
-        )
+        if bootstrap is None:
+            supervisor = SupervisorLoop(project_root=self.project_root, planner=self._plan_run_via_model)
+            run_state, step_trace, tool_trace = supervisor.bootstrap(
+                request,
+                session_id=state.session_id,
+                recorded_at=recorded_at,
+            )
+        else:
+            run_state, step_trace, tool_trace = bootstrap
+            run_state = RunState(**to_dict(run_state))
+            step_trace = dict(step_trace)
+            tool_trace = dict(tool_trace)
+            run_state.goal = request.goal
+            run_state.policy = self._run_policy(allow_commit=allow_commit, operator_level=operator_level)
+            run_state.budget = self._run_budget()
+            run_state.session_id = state.session_id
+            run_state.created_at = run_state.created_at or recorded_at
+            run_state.updated_at = recorded_at
         if dirty["detected"]:
             run_state.status = "paused"
             run_state.dirty_worktree_detected = True
@@ -3519,21 +3947,30 @@ class RuntimeController:
             step_trace["pause_reason"] = run_state.stop_reason.code
             tool_trace["dirty_entries"] = dirty["entries"]
         self._sync_run_state_to_runtime(state, run_state)
-        self._save_state(state, sync=True)
+        self._save_state(state, sync=sync_hot_path)
         after_hash = self._state_hash(state)
-        self.trace_store.write_run(to_dict(run_state), session_id=state.session_id, recorded_at=recorded_at, sync=True)
-        self.trace_store.append_step_trace(step_trace, session_id=state.session_id, recorded_at=recorded_at, sync=True)
+        tool_payload = {
+            **tool_trace,
+            "before_state_hash": before_hash,
+            "after_state_hash": after_hash,
+        }
+        self.trace_store.write_run(to_dict(run_state), session_id=state.session_id, recorded_at=recorded_at, sync=sync_hot_path)
+        self.trace_store.append_step_trace(step_trace, session_id=state.session_id, recorded_at=recorded_at, sync=sync_hot_path)
         self.trace_store.append_tool_trace(
-            {
-                **tool_trace,
-                "before_state_hash": before_hash,
-                "after_state_hash": after_hash,
-            },
+            tool_payload,
             session_id=state.session_id,
             recorded_at=recorded_at,
-            sync=True,
+            sync=sync_hot_path,
         )
-        return self.run_status(run_state.run_id)
+        run_payload = self._run_status_payload(run_state)
+        if not include_details:
+            return run_payload
+        return {
+            "run": run_payload,
+            "explain": self._run_explain_payload(run_state),
+            "steps": [step_trace],
+            "tools": [tool_payload],
+        }
 
     def interrupt_run(
         self,
@@ -3573,23 +4010,7 @@ class RuntimeController:
 
     def run_status(self, run_id: str | None = None) -> dict[str, Any]:
         run_state = self._load_run_state(run_id)
-        current_step = self._current_task_node(run_state)
-        return {
-            "run_id": run_state.run_id,
-            "status": run_state.status,
-            "goal": run_state.goal,
-            "goal_summary": run_state.goal_summary,
-            "current_step_id": run_state.current_step_id,
-            "current_step": to_dict(current_step) if current_step else None,
-            "dirty_worktree_detected": run_state.dirty_worktree_detected,
-            "commit_permission_required": run_state.commit_permission_required,
-            "stop_reason": to_dict(run_state.stop_reason) if run_state.stop_reason else {},
-            "pending_steps": len(run_state.pending_steps),
-            "completed_steps": len(run_state.completed_steps),
-            "last_tool_result": to_dict(run_state.last_tool_result) if run_state.last_tool_result else {},
-            "created_at": run_state.created_at,
-            "updated_at": run_state.updated_at,
-        }
+        return self._run_status_payload(run_state)
 
     def pause_run(self, run_id: str | None = None) -> dict[str, Any]:
         run_state = self._load_run_state(run_id)
@@ -3640,19 +4061,7 @@ class RuntimeController:
 
     def explain_run(self, run_id: str | None = None) -> dict[str, Any]:
         run_state = self._load_run_state(run_id)
-        current_step = self._current_task_node(run_state)
-        return {
-            "run_id": run_state.run_id,
-            "status": run_state.status,
-            "goal": run_state.goal,
-            "goal_summary": run_state.goal_summary,
-            "current_step": to_dict(current_step) if current_step else None,
-            "last_tool_result": to_dict(run_state.last_tool_result) if run_state.last_tool_result else {},
-            "policy": to_dict(run_state.policy),
-            "budget": to_dict(run_state.budget),
-            "dirty_worktree_detected": run_state.dirty_worktree_detected,
-            "stop_reason": to_dict(run_state.stop_reason) if run_state.stop_reason else {},
-        }
+        return self._run_explain_payload(run_state)
 
     def run_steps(self, run_id: str | None = None) -> dict[str, Any]:
         effective_run_id = self._resolve_run_id(run_id)
@@ -3676,6 +4085,7 @@ class RuntimeController:
             raise ValueError(f"invalid round reference: {round_ref}") from exc
 
     def trace_round(self, round_ref: int | str) -> dict[str, Any]:
+        self.trace_store.flush(raise_on_error=False)
         payload, read_source = self.trace_store.read_round_record(self.resolve_round_ref(round_ref))
         enriched = dict(payload)
         enriched["storage"] = self._trace_storage_payload(read_source=read_source)
@@ -4063,10 +4473,23 @@ class RuntimeController:
                         "entries": len(ledger_tail),
                         "latest_reason": ledger_tail[-1]["reason"] if ledger_tail else "",
                     },
+                    "repair_learning": {
+                        "adjustment_reasons": trace.get("state_snapshot", {}).get("conflict_learning_state", {}).get("adjustment_reasons", {}),
+                        "last_learning_signal": trace.get("state_snapshot", {}).get("conflict_learning_state", {}).get("last_learning_signal", {}),
+                    },
                     "conflict_safe_mode_owned": conflict.get("conflict_safe_mode_owned", False),
                 }
             )
         return {"points": points, "storage": self._trace_storage_payload()}
+
+    def entropy_metrics(self) -> dict[str, Any]:
+        state = self.load_runtime_state()
+        health = self.entropy_pool.health_snapshot()
+        return {
+            **health,
+            "last_runtime_failure": dict(state.last_entropy_failure),
+            "storage": self._trace_storage_payload(),
+        }
 
     def mode_switch_timeline(self) -> dict[str, Any]:
         points = []

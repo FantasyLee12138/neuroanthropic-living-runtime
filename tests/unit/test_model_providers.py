@@ -183,3 +183,28 @@ def test_doubao_backend_parses_structured_json_from_output_text():
     assert response.payload["action_preferences"]["plan"] == 0.85
     assert response.payload["confidence"] == 0.88
     assert response.payload["reason"] == "structured"
+
+
+def test_doubao_backend_reuses_persistent_client_for_same_route_settings():
+    stub_client = _StubClient()
+    factory_calls: list[dict] = []
+    backend = DoubaoBackend(client_factory=lambda **kwargs: factory_calls.append(kwargs) or stub_client)
+    route = ModelRouteConfig(
+        name="renderer",
+        backend="doubao",
+        model="doubao-seed-2-0-pro-260215",
+        timeout_ms=300,
+        retries=0,
+        enabled=True,
+    )
+    request = ModelRequest(
+        system_prompt="You are a renderer.",
+        user_prompt="Return JSON only.",
+        response_schema={"text": "str"},
+    )
+
+    backend.generate(route=route, request=request, api_key="test-key")
+    backend.generate(route=route, request=request, api_key="test-key")
+
+    assert len(factory_calls) == 1
+    assert len(stub_client.post_calls) == 2

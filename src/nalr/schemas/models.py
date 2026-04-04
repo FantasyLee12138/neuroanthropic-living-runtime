@@ -385,6 +385,32 @@ class RunState:
 
 
 @dataclass
+class TurnPlan:
+    text: str
+    route: str
+    scenario: str
+    mode: str = "interactive"
+    target: str | None = "user"
+    reason: str = ""
+    top_action: str = ""
+    precomputed_context: dict[str, Any] = field(default_factory=dict)
+    precomputed_distribution: dict[str, Any] = field(default_factory=dict)
+    task_bootstrap: Any = None
+
+
+@dataclass
+class TurnExecution:
+    route: str
+    assistant_preamble: str = ""
+    assistant_final: str = ""
+    run: dict[str, Any] = field(default_factory=dict)
+    explain: dict[str, Any] = field(default_factory=dict)
+    steps: list[dict[str, Any]] = field(default_factory=list)
+    tools: list[dict[str, Any]] = field(default_factory=list)
+    payload: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class ConflictPostErrorAdjustment:
     triggered: bool = False
     reason: str = ""

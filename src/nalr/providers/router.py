@@ -114,6 +114,7 @@ class FakeBackend:
 class DoubaoBackend:
     def __init__(self, client_factory: Callable[..., Any] | None = None) -> None:
         self.client_factory = client_factory
+        self._client_cache: dict[tuple[str, str, int], Any] = {}
 
     def _build_client(self, *, api_key: str, base_url: str, timeout_ms: int):
         timeout_s = max(timeout_ms / 1000.0, 1.0)
@@ -127,6 +128,14 @@ class DoubaoBackend:
             },
             timeout=timeout_s,
         )
+
+    def _client_for(self, *, api_key: str, base_url: str, timeout_ms: int):
+        cache_key = (api_key, base_url, timeout_ms)
+        client = self._client_cache.get(cache_key)
+        if client is None:
+            client = self._build_client(api_key=api_key, base_url=base_url, timeout_ms=timeout_ms)
+            self._client_cache[cache_key] = client
+        return client
 
     def _extract_response_text(self, raw_payload: dict[str, Any]) -> str:
         if not isinstance(raw_payload, dict):
@@ -192,7 +201,7 @@ class DoubaoBackend:
         if not effective_key:
             raise MissingModelCredentialError("ARK_API_KEY is required for Doubao backend")
 
-        client = self._build_client(
+        client = self._client_for(
             api_key=effective_key,
             base_url=route.base_url,
             timeout_ms=route.timeout_ms,
@@ -218,9 +227,7 @@ class DoubaoBackend:
             payload = self._extract_payload(raw_payload, request)
             return ModelResponse(route=route.name, model=route.model, payload=payload, raw_text=raw_text)
         finally:
-            close = getattr(client, "close", None)
-            if callable(close):
-                close()
+            pass
 
 
 class ModelRouter:

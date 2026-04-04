@@ -5,4 +5,4 @@ entropy:
   prefetch_bytes: 256
   min_batch_bytes: 32
   max_batch_bytes: 1024
-  hard_block_on_unavailable: true
+  hard_block_on_unavailable: false

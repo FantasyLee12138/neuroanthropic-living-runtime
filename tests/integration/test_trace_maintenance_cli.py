@@ -139,11 +139,13 @@ def test_cli_trace_export_parquet_includes_repair_ledger_table(tmp_path, monkeyp
     try:
         repair_count = conn.execute("select count(*) from read_parquet(?)", [str(repair_path)]).fetchone()[0]
         reason = conn.execute("select reason from read_parquet(?) limit 1", [str(repair_path)]).fetchone()[0]
+        conflict_score = conn.execute("select conflict_score from read_parquet(?) limit 1", [str(repair_path)]).fetchone()[0]
     finally:
         conn.close()
 
     assert repair_count == 1
     assert reason == "top_action_shift"
+    assert conflict_score > 0.0
 
 
 def test_cli_memory_compact_and_sample_use_compacted_artifacts(tmp_path, monkeypatch):
