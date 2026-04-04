@@ -59,6 +59,7 @@ def test_cil_command_trace_records_operator_level_and_rollback(tmp_path):
     cil = CommandInterfaceLayer(controller)
 
     payload = cil.execute("safe on")
+    controller.flush_pending_io(raise_on_error=True)
 
     trace_path = tmp_path / ".alive" / "traces" / "command_traces.json"
     traces = json.loads(trace_path.read_text(encoding="utf-8"))
@@ -90,6 +91,7 @@ def test_cil_mutation_records_snapshot_and_can_restore_it(tmp_path):
 
     restored = cil.execute(rollback["command"])
     state = controller.load_runtime_state()
+    controller.flush_pending_io(raise_on_error=True)
     traces = json.loads((tmp_path / ".alive" / "traces" / "command_traces.json").read_text(encoding="utf-8"))
 
     assert restored.applied is True
@@ -171,6 +173,7 @@ def test_cil_supports_identity_show_and_set_name(tmp_path):
 
     payload = cil.execute("identity set-name 阿澜")
     identity = cil.execute("identity show")
+    controller.flush_pending_io(raise_on_error=True)
     traces = json.loads((tmp_path / ".alive" / "traces" / "command_traces.json").read_text(encoding="utf-8"))
 
     assert payload.applied is True

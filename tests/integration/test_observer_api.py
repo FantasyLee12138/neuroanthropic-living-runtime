@@ -1,3 +1,4 @@
+import inspect
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -19,6 +20,7 @@ def test_observer_reads_state_and_trace(tmp_path):
         scenario="chat",
         mode="interactive",
     )
+    controller.flush_pending_io(raise_on_error=True)
 
     client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
 
@@ -51,11 +53,21 @@ def test_default_observer_app_is_available():
     assert default_app.title == "NALR Observer"
 
 
+def test_observer_core_routes_are_async_handlers(tmp_path):
+    observer_app = create_app(project_root=tmp_path, config_root=CONFIG_ROOT)
+    route_map = {route.path: route.endpoint for route in observer_app.routes if hasattr(route, "path")}
+
+    assert inspect.iscoroutinefunction(route_map["/state"])
+    assert inspect.iscoroutinefunction(route_map["/identity"])
+    assert inspect.iscoroutinefunction(route_map["/metrics/summary"])
+
+
 def test_observer_exposes_current_run_and_step_views(tmp_path):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "planner.py").write_text("VALUE = 1\n", encoding="utf-8")
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     run_payload = controller.start_run("检查 planner.py 并规划下一步")
+    controller.flush_pending_io(raise_on_error=True)
 
     client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
 
@@ -104,6 +116,7 @@ def test_observer_prefers_parquet_round_mirror_when_json_round_files_are_missing
         scenario="task",
         mode="interactive",
     )
+    controller.flush_pending_io(raise_on_error=True)
 
     round_json = tmp_path / ".alive" / "traces" / "rounds" / "round_1.json"
     round_jsonl = tmp_path / ".alive" / "traces" / "round_traces.jsonl"
@@ -146,6 +159,7 @@ def test_observer_exposes_dream_status_runs_and_metrics(tmp_path):
         scenario="companion",
         mode="sleep",
     )
+    controller.flush_pending_io(raise_on_error=True)
 
     client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
 

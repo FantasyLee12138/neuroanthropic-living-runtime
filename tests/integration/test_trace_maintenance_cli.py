@@ -27,6 +27,7 @@ def test_trace_rows_include_session_and_recorded_fields(tmp_path):
         mode="interactive",
     )
     controller.apply_command("safe on")
+    controller.flush_pending_io(raise_on_error=True)
 
     state = controller.load_runtime_state()
     round_payload = controller.trace_round(1)
@@ -62,6 +63,7 @@ def test_cli_trace_export_parquet_writes_three_tables(tmp_path, monkeypatch):
         scenario="task",
         mode="interactive",
     )
+    controller.flush_pending_io(raise_on_error=True)
     controller.apply_command("safe on")
 
     monkeypatch.setenv("NALR_HOME", str(tmp_path / ".alive"))
@@ -116,6 +118,7 @@ def test_cli_trace_export_parquet_includes_repair_ledger_table(tmp_path, monkeyp
         scenario="task",
         mode="interactive",
     )
+    controller.flush_pending_io(raise_on_error=True)
 
     monkeypatch.setenv("NALR_HOME", str(tmp_path / ".alive"))
     monkeypatch.setenv("NALR_CONFIG_DIR", str(CONFIG_ROOT))
@@ -140,7 +143,7 @@ def test_cli_trace_export_parquet_includes_repair_ledger_table(tmp_path, monkeyp
         conn.close()
 
     assert repair_count == 1
-    assert reason == "forced_compromise"
+    assert reason == "top_action_shift"
 
 
 def test_cli_memory_compact_and_sample_use_compacted_artifacts(tmp_path, monkeypatch):
@@ -157,6 +160,7 @@ def test_cli_memory_compact_and_sample_use_compacted_artifacts(tmp_path, monkeyp
             scenario="task",
             mode="interactive",
         )
+    controller.flush_pending_io(raise_on_error=True)
 
     monkeypatch.setenv("NALR_HOME", str(tmp_path / ".alive"))
     monkeypatch.setenv("NALR_CONFIG_DIR", str(CONFIG_ROOT))

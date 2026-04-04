@@ -20,6 +20,7 @@ function makeState(overrides: Partial<UiState> = {}): UiState {
     promptHistoryByCwd: {},
     pendingApprovals: [],
     permissionMode: "ask",
+    assistantStreamActive: false,
     ...overrides
   };
 }

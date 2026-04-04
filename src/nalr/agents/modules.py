@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from nalr.runtime.dynamics import bounded_drift_delta, smooth_resource_biases
 from nalr.schemas.models import (
     ActionCandidate,
     ActionDistributionState,
@@ -86,6 +87,27 @@ TEMPLATE_ACTION_SCALES = {
     "budget_first": {"respond": 1.15, "recall": 1.05, "rest": 1.10, "plan": 0.35, "connect": 0.0, "wander": 0.0},
 }
 
+SALIENCE_TASK_TOKENS = (
+    "help",
+    "remember",
+    "urgent",
+    "总结",
+    "检查",
+    "规划",
+    "仓库",
+    "代码",
+    "文件",
+    "测试",
+    "修复",
+    "分析",
+    "summarize",
+    "code",
+    "file",
+    "test",
+    "fix",
+    "analyze",
+)
+
 
 def _clip(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return max(low, min(high, value))
@@ -106,6 +128,16 @@ def _top_reason(action_preferences: dict[str, float], reason: str) -> str:
         return reason
     action = max(action_preferences, key=action_preferences.get)
     return f"{reason}; top_action={action}"
+
+
+def compute_salience_signal(event: RoundEvent, scenario: dict | None = None) -> float:
+    scenario = scenario or {}
+    content = event.content.lower()
+    task_signal = 0.0
+    if any(token in content for token in SALIENCE_TASK_TOKENS):
+        task_signal = 0.70 + min(float(scenario.get("pfc_base_share", 0.2)), 1.0) * 0.18
+    affect_signal = abs(event.valence) * 0.18
+    return round(_clip(0.10 + task_signal + affect_signal), 4)
 
 
 def _bundle(
@@ -414,20 +446,37 @@ class UnconsciousAgent(BaseAgent):
         updated_drift: dict[str, float] = {}
         updated_current: dict[str, float] = {}
         correction_events: list[dict[str, float | str | int]] = []
+        drift_diagnostics: dict[str, dict[str, float]] = {}
         for key, baseline_value in baseline.items():
             old_drift = float(drift.get(key, 0.0))
             if state.round_count < freeze_until_round.get(key, 0):
                 new_drift = old_drift
+                drift_diagnostics[key] = {
+                    "stress_push": 0.0,
+                    "experience_push": 0.0,
+                    "relation_push": 0.0,
+                    "recover_rate": 0.0,
+                    "effective_push": 0.0,
+                }
             else:
                 stress_push = stress_load * direction_map.get(key, 0.0)
                 experience_push = experience_shift * 0.03
                 relation_push = relation_shift * (0.03 if key in {"attachment_need", "boundary_softness"} else 0.015)
                 recover_rate = recover_rates.get(key, 0.02)
-                new_drift = _clip(
-                    old_drift * (1 - recover_rate) + stress_push + experience_push + relation_push,
-                    -0.25,
-                    0.25,
+                effective_push = stress_push + experience_push + relation_push
+                new_drift = bounded_drift_delta(
+                    previous_drift=old_drift,
+                    push=effective_push,
+                    recover_rate=recover_rate,
+                    max_abs=0.25,
                 )
+                drift_diagnostics[key] = {
+                    "stress_push": round(stress_push, 4),
+                    "experience_push": round(experience_push, 4),
+                    "relation_push": round(relation_push, 4),
+                    "recover_rate": round(recover_rate, 4),
+                    "effective_push": round(effective_push, 4),
+                }
             raw_value = float(baseline_value) + new_drift
             clipped_value = _clip(raw_value)
             updated_drift[key] = round(new_drift, 4)
@@ -448,6 +497,7 @@ class UnconsciousAgent(BaseAgent):
                     "correction_window": correction_window,
                     "freeze_until_round": freeze_until_round,
                     "last_correction_events": correction_events,
+                    "drift_diagnostics": drift_diagnostics,
                 }
             }
         }
@@ -492,18 +542,21 @@ class SalienceAgent(BaseAgent):
         super().__init__(name="SalienceAgent")
 
     def score_salience(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
-        content = event.content.lower()
+        salience_signal = compute_salience_signal(event, scenario)
         prefs = {}
-        if any(
-            token in content
-            for token in ("help", "remember", "urgent", "总结", "检查", "规划", "仓库", "代码", "文件", "测试", "修复", "分析")
-        ):
+        if salience_signal >= 0.55:
             prefs["plan"] = 0.10 + scenario.get("pfc_base_share", 0.2) * 0.22
         if abs(event.valence) >= 0.3:
             prefs["clarify"] = max(prefs.get("clarify", 0.0), 0.08 + abs(event.valence) * 0.10)
         if not prefs:
             prefs["respond"] = 0.08
-        return _bundle(self.name, prefs, confidence=0.64, reason="salience promotion", trace_tags=["salience"])
+        return _bundle(
+            self.name,
+            prefs,
+            confidence=0.64,
+            reason=f"salience={salience_signal:.2f}",
+            trace_tags=["salience"],
+        )
 
     def switch_mode(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> dict:
         if abs(event.valence) >= 0.6:
@@ -596,11 +649,12 @@ class ResourceAgent(BaseAgent):
 
     def map_budget_to_bias(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
         scarcity = self.compute_scarcity_index(event, state, scenario, context)["scalar"]
-        body_hunger_bias = 0.10 + 0.55 * scarcity
-        effort_avoidance_bias = 0.05 + 0.45 * scarcity
-        deliberation_compress = 1.00 - 0.50 * scarcity
-        rumination_bias = 0.05 + 0.35 * scarcity
-        action_shrink_scale = 1.00 - 0.40 * scarcity
+        bias = smooth_resource_biases(scarcity)
+        body_hunger_bias = bias["body_hunger_bias"]
+        effort_avoidance_bias = bias["effort_avoidance_bias"]
+        deliberation_compress = bias["deliberation_compress"]
+        rumination_bias = bias["rumination_bias"]
+        action_shrink_scale = bias["action_shrink_scale"]
         prefs = {
             "respond": 0.05 + 0.08 * effort_avoidance_bias,
             "recall": 0.04 * effort_avoidance_bias,
@@ -618,6 +672,7 @@ class ResourceAgent(BaseAgent):
             reason=f"budget={state.budget_remaining:.2f}",
             trace_tags=["resource"],
             risk_hints={
+                "scarcity_pressure": bias["scarcity_pressure"],
                 "body_hunger_bias": round(body_hunger_bias, 4),
                 "effort_avoidance_bias": round(effort_avoidance_bias, 4),
                 "deliberation_compress": round(deliberation_compress, 4),
@@ -697,8 +752,17 @@ class PerspectiveModel(BaseAgent):
 
 
 class ConflictMonitorAgent(BaseAgent):
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        conflict_high: float = 0.75,
+        conflict_critical: float = 0.82,
+        max_resample_rounds: int = 1,
+    ) -> None:
         super().__init__(name="ConflictMonitorAgent")
+        self.conflict_high = _clip(conflict_high)
+        self.conflict_critical = _clip(conflict_critical)
+        self.max_resample_rounds = max(0, int(max_resample_rounds))
 
     def _coerce_runtime_state(self, state: RuntimeState | dict) -> RuntimeState:
         return state if isinstance(state, RuntimeState) else RuntimeState(**state)
@@ -833,7 +897,7 @@ class ConflictMonitorAgent(BaseAgent):
             components=components,
             priority_signals={key: round(value, 4) for key, value in priority_signals.items()},
             dominant_conflicts=dominant_conflicts,
-            critical_conflict=score >= 0.82,
+            critical_conflict=score >= self.conflict_critical,
         )
         payload = to_dict(assessment)
         payload["total_score"] = payload["score"]
@@ -849,11 +913,11 @@ class ConflictMonitorAgent(BaseAgent):
         if not isinstance(assessment, dict):
             assessment = {
                 "score": float(assessment),
-                "critical_conflict": float(assessment) >= 0.82,
+                "critical_conflict": float(assessment) >= self.conflict_critical,
                 "priority_signals": {name: 0.0 for name in PRIORITY_ORDER},
             }
         score = float(assessment.get("score", 0.0))
-        if score < 0.65:
+        if score < self.conflict_high:
             return to_dict(ConflictResolution(flag=False, reason="below_conflict_threshold"))
 
         signals = {name: float(assessment.get("priority_signals", {}).get(name, 0.0)) for name in PRIORITY_ORDER}
@@ -905,14 +969,14 @@ class ConflictMonitorAgent(BaseAgent):
     def request_resample(self, assessment: dict | float, attempts: int) -> dict:
         if isinstance(assessment, dict):
             score = float(assessment.get("score", 0.0))
-            critical = bool(assessment.get("critical_conflict", score >= 0.82))
+            critical = bool(assessment.get("critical_conflict", score >= self.conflict_critical))
         else:
             score = float(assessment)
-            critical = score >= 0.82
+            critical = score >= self.conflict_critical
         allowed_resamples = 0
-        if 0.65 <= score < 0.82:
-            allowed_resamples = 1
-        elif score >= 0.82:
+        if score >= self.conflict_high:
+            allowed_resamples = self.max_resample_rounds
+        if critical:
             allowed_resamples = 2
         return {
             "flag": attempts < allowed_resamples,
@@ -1132,7 +1196,12 @@ class OutputGate(BaseAgent):
         return {"delay_params": {"reply_delay": expression_profile.reply_delay, "latency_style": expression_profile.latency_style}}
 
 
-def build_agents() -> list[BaseAgent]:
+def build_agents(
+    *,
+    conflict_high: float = 0.75,
+    conflict_critical: float = 0.82,
+    max_resample_rounds: int = 1,
+) -> list[BaseAgent]:
     return [
         SalienceAgent(),
         BodyStateAgent(),
@@ -1146,7 +1215,11 @@ def build_agents() -> list[BaseAgent]:
         HippocampusAgent(),
         PerspectiveModel(),
         ValueAgent(),
-        ConflictMonitorAgent(),
+        ConflictMonitorAgent(
+            conflict_high=conflict_high,
+            conflict_critical=conflict_critical,
+            max_resample_rounds=max_resample_rounds,
+        ),
         ThalamusAttentionAgent(),
         UnconsciousAgent(),
         CerebellarPredictor(),

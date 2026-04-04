@@ -191,24 +191,40 @@ def test_conflict_resolution_prefers_body_before_task_and_roaming():
     assert resolution["applied_template"] in {None, "body_first"}
 
 
-def test_request_resample_uses_v056_thresholds_and_compromise_gate():
+def test_request_resample_uses_configured_thresholds_and_critical_override():
     agent = ConflictMonitorAgent()
 
     low = agent.request_resample({"score": 0.40, "critical_conflict": False}, 0)
-    medium = agent.request_resample({"score": 0.70, "critical_conflict": False}, 0)
+    below_high = agent.request_resample({"score": 0.70, "critical_conflict": False}, 0)
+    high = agent.request_resample({"score": 0.75, "critical_conflict": False}, 0)
+    high_exhausted = agent.request_resample({"score": 0.79, "critical_conflict": False}, 1)
     critical = agent.request_resample({"score": 0.91, "critical_conflict": True}, 1)
     exhausted = agent.request_resample({"score": 0.91, "critical_conflict": True}, 2)
 
     assert low["flag"] is False
     assert low["allowed_resamples"] == 0
-    assert medium["flag"] is True
-    assert medium["allowed_resamples"] == 1
-    assert medium["force_compromise"] is False
+    assert below_high["flag"] is False
+    assert below_high["allowed_resamples"] == 0
+    assert high["flag"] is True
+    assert high["allowed_resamples"] == 1
+    assert high["force_compromise"] is False
+    assert high_exhausted["flag"] is False
+    assert high_exhausted["allowed_resamples"] == 1
     assert critical["flag"] is True
     assert critical["allowed_resamples"] == 2
     assert critical["force_compromise"] is True
     assert exhausted["flag"] is False
     assert exhausted["force_compromise"] is True
+
+
+def test_runtime_controller_builds_conflict_agent_with_threshold_config(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    agent = controller.agent_map["ConflictMonitorAgent"]
+
+    assert agent.conflict_high == 0.75
+    assert agent.conflict_critical == 0.82
+    assert agent.max_resample_rounds == 1
 
 
 def test_mark_post_error_adjustment_returns_shift_adjustment_contract():
@@ -291,6 +307,7 @@ def test_mark_post_error_adjustment_returns_deadlock_fuse_contract():
 
 def test_runtime_sets_conflict_hot_after_three_critical_rounds_and_recovers(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.entropy_pool.ingest_bytes(bytes(range(256)) * 20, source="fixture_qrng", reason="critical conflict")
     _prime_conflict_state(controller)
 
     critical_event = RoundEvent(
@@ -316,6 +333,7 @@ def test_runtime_sets_conflict_hot_after_three_critical_rounds_and_recovers(tmp_
     assert hot_state.repair_state.stage == "repairing"
     assert hot_state.conflict_safe_mode_owner == "conflict"
     assert hot_state.repair_ledger
+    assert hot_state.conflict_learning_state["adjustment_reasons"]
     assert result.trace.render_plan["safety_constraints"]["conflict_hot"] is True
 
     calm_event = RoundEvent(
@@ -337,6 +355,36 @@ def test_runtime_sets_conflict_hot_after_three_critical_rounds_and_recovers(tmp_
     assert recovered_state.repair_mode is None
     assert recovered_state.conflict_safe_mode_owner is None
     assert recovered_state.repair_state.stage == "recovered"
+
+
+def test_repair_ledger_entry_records_learning_and_conflict_context(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.entropy_pool.ingest_bytes(bytes(range(256)) * 12, source="fixture_qrng", reason="repair ledger")
+    _prime_conflict_state(controller)
+
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="I need a quick easy break, but help me plan carefully, reply to Alex, and let me drift.",
+            target="alex",
+            cue="break",
+            valence=-0.40,
+            energy_delta=-0.18,
+        ),
+        scenario="task",
+        mode="interactive",
+    )
+
+    state = controller.load_runtime_state()
+    latest = state.repair_ledger[-1]
+
+    assert latest.conflict_score > 0.0
+    assert latest.pass_count >= 1
+    assert latest.resample_count >= 0
+    assert isinstance(latest.dominant_conflicts, list)
+    assert latest.action_delta_summary
+    assert latest.learning_signal
+    assert latest.stage_before in {"idle", "adjusting", "repairing", "cooling", "recovered"}
 
 
 def test_deadlock_fuse_triggers_safe_mode_and_repair_mode(tmp_path):
@@ -372,7 +420,7 @@ def test_deadlock_fuse_triggers_safe_mode_and_repair_mode(tmp_path):
         assert action in blocked, f"{action} should be blocked by deadlock fuse"
 
 
-def test_forced_compromise_records_post_error_adjustment_and_ledger_entry(tmp_path):
+def test_high_conflict_records_shift_adjustment_and_ledger_entry(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     _prime_conflict_state(controller)
 
@@ -393,18 +441,18 @@ def test_forced_compromise_records_post_error_adjustment_and_ledger_entry(tmp_pa
     conflict = result.trace.distribution_state["conflict"]
     adjustment = conflict["post_error_adjustment"]
 
-    assert conflict["compromise"]["triggered"] is True
+    assert conflict["compromise"]["triggered"] is False
     assert adjustment["triggered"] is True
-    assert adjustment["reason"] == "forced_compromise"
+    assert adjustment["reason"] == "top_action_shift"
     assert adjustment["top_action_before"] != adjustment["top_action_after"]
     assert conflict["repair_transition"]["to_stage"] == "adjusting"
     assert conflict["repair_state_snapshot"]["stage"] == "adjusting"
     assert state.repair_state.stage == "adjusting"
-    assert state.last_post_error_adjustment.reason == "forced_compromise"
+    assert state.last_post_error_adjustment.reason == "top_action_shift"
     assert len(state.repair_ledger) == 1
 
 
-def test_forced_compromise_appends_repair_trace_entry(tmp_path):
+def test_high_conflict_appends_shift_repair_trace_entry(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     _prime_conflict_state(controller)
 
@@ -425,7 +473,7 @@ def test_forced_compromise_appends_repair_trace_entry(tmp_path):
 
     assert len(repair_entries) == 1
     assert repair_entries[0]["round_id"] == 1
-    assert repair_entries[0]["reason"] == "forced_compromise"
+    assert repair_entries[0]["reason"] == "top_action_shift"
     assert repair_entries[0]["top_action_before"] != repair_entries[0]["top_action_after"]
     assert repair_entries[0]["session_id"] == controller.load_runtime_state().session_id
 

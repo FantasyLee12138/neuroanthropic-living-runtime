@@ -3,6 +3,7 @@ from pathlib import Path
 from nalr.providers.router import ModelResponse
 from nalr.runtime.controller import RuntimeController
 from nalr.schemas.models import RenderPlan, RoundEvent
+from nalr.trace.store import TraceStore
 
 
 CONFIG_ROOT = Path(__file__).resolve().parents[2] / "config"
@@ -162,6 +163,94 @@ def test_terminal_route_probe_prefers_task_run_for_repo_task_without_writes(tmp_
     assert probe["task_mass"] - probe["chat_mass"] >= 0.10
     assert before_state_hash == after_state_hash
     assert before_rounds == after_rounds
+
+
+def test_hot_only_budget_for_low_salience(tmp_path, monkeypatch):
+    monkeypatch.setattr(TraceStore, "mark_trace_sync_healthy", lambda self: None)
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    calls: list[tuple[str, str | None, tuple[str, ...]]] = []
+
+    def fake_ingest_event(event, **kwargs):
+        return event.cue
+
+    def fake_recall_strength(cue, tier_budget=("hot", "warm", "archive")):
+        calls.append(("recall_strength", cue, tuple(tier_budget)))
+        return 0.12
+
+    def fake_recall(cue, *, tier_budget=("hot", "warm", "archive")):
+        calls.append(("recall", cue, tuple(tier_budget)))
+        return {
+            "cue": cue,
+            "tier": "hot",
+            "strength": 0.12,
+            "detail": False,
+            "found": True,
+            "interference": 0.0,
+            "evidence": [],
+        }
+
+    monkeypatch.setattr(controller.memory_store, "ingest_event", fake_ingest_event)
+    monkeypatch.setattr(controller.memory_store, "recall_strength", fake_recall_strength)
+    monkeypatch.setattr(controller.memory_store, "recall", fake_recall)
+
+    event = RoundEvent(source="user", content="hello there", target="user", cue="tea", valence=0.05)
+
+    controller._probe_context(event, scenario="chat", mode="interactive")
+    controller.tick(event, scenario="chat", mode="interactive")
+
+    assert calls == [
+        ("recall_strength", "tea", ("hot",)),
+        ("recall", "tea", ("hot",)),
+        ("recall_strength", "tea", ("hot",)),
+        ("recall", "tea", ("hot",)),
+    ]
+
+
+def test_full_budget_for_high_salience(tmp_path, monkeypatch):
+    monkeypatch.setattr(TraceStore, "mark_trace_sync_healthy", lambda self: None)
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    calls: list[tuple[str, str | None, tuple[str, ...]]] = []
+
+    def fake_ingest_event(event, **kwargs):
+        return event.cue
+
+    def fake_recall_strength(cue, tier_budget=("hot", "warm", "archive")):
+        calls.append(("recall_strength", cue, tuple(tier_budget)))
+        return 0.66
+
+    def fake_recall(cue, *, tier_budget=("hot", "warm", "archive")):
+        calls.append(("recall", cue, tuple(tier_budget)))
+        return {
+            "cue": cue,
+            "tier": "warm",
+            "strength": 0.66,
+            "detail": True,
+            "found": True,
+            "interference": 0.0,
+            "evidence": ["warm memory"],
+        }
+
+    monkeypatch.setattr(controller.memory_store, "ingest_event", fake_ingest_event)
+    monkeypatch.setattr(controller.memory_store, "recall_strength", fake_recall_strength)
+    monkeypatch.setattr(controller.memory_store, "recall", fake_recall)
+
+    event = RoundEvent(
+        source="user",
+        content="Help me remember this code fix and summarize the failing test.",
+        target="user",
+        cue="tea",
+        valence=0.1,
+    )
+
+    controller._probe_context(event, scenario="task", mode="interactive")
+    controller.tick(event, scenario="task", mode="interactive")
+
+    assert calls == [
+        ("recall_strength", "tea", ("hot", "warm", "archive")),
+        ("recall", "tea", ("hot", "warm", "archive")),
+        ("recall_strength", "tea", ("hot", "warm", "archive")),
+        ("recall", "tea", ("hot", "warm", "archive")),
+    ]
 
 
 def test_tick_degrades_to_json_fallback_when_parquet_sync_fails(tmp_path):

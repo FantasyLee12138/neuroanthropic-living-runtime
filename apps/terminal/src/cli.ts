@@ -5,7 +5,7 @@ import { render } from "ink";
 
 import { App } from "./app.js";
 import { PythonBridgeClient, createSessionId, resolveRepoRoot } from "./bridge/client.js";
-import type { OutboundBridgeEvent } from "./types.js";
+import { createOneShotPrinter } from "./oneShotPrinter.js";
 
 const DEFAULT_ONE_SHOT_TIMEOUT_MS = 70_000;
 
@@ -29,31 +29,14 @@ function printHelp(): void {
   console.log("  /help /status /why /steps /tools /state /dream [cue] /pause /resume /abort /clear /compact /mode [value] /permissions [value] /model /exit");
 }
 
-function formatOneShotEvent(event: OutboundBridgeEvent): string[] {
-  if (event.type === "assistant_final") {
-    return [`NALR: ${event.message}`];
-  }
-  if (event.type === "error") {
-    return [`Error: ${event.message}`];
-  }
-  return [];
-}
-
 async function runOneShot(prompt: string): Promise<number> {
   const launchCwd = process.env.NALR_LAUNCH_CWD ?? process.cwd();
   const repoRoot = resolveRepoRoot(launchCwd);
   const bridge = new PythonBridgeClient({ repoRoot, cwd: launchCwd });
   const sessionId = createSessionId();
-  const printed = new Set<string>();
+  const printEvent = createOneShotPrinter({ write: (text) => process.stdout.write(text) });
   const dispose = bridge.onEvent((event) => {
-    for (const line of formatOneShotEvent(event)) {
-      const dedupeKey = `${event.type}:${line}`;
-      if (printed.has(dedupeKey) && event.type === "assistant_final") {
-        continue;
-      }
-      printed.add(dedupeKey);
-      console.log(line);
-    }
+    printEvent(event);
   });
   try {
     await bridge.startSession(sessionId, launchCwd);
@@ -76,16 +59,9 @@ async function runOneShotControlCommand(command: "dream", value?: string): Promi
   const repoRoot = resolveRepoRoot(launchCwd);
   const bridge = new PythonBridgeClient({ repoRoot, cwd: launchCwd });
   const sessionId = createSessionId();
-  const printed = new Set<string>();
+  const printEvent = createOneShotPrinter({ write: (text) => process.stdout.write(text) });
   const dispose = bridge.onEvent((event) => {
-    for (const line of formatOneShotEvent(event)) {
-      const dedupeKey = `${event.type}:${line}`;
-      if (printed.has(dedupeKey) && event.type === "assistant_final") {
-        continue;
-      }
-      printed.add(dedupeKey);
-      console.log(line);
-    }
+    printEvent(event);
   });
   try {
     await bridge.startSession(sessionId, launchCwd);

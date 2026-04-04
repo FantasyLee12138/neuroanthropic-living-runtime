@@ -159,4 +159,5 @@ export interface UiState {
   promptHistoryByCwd: Record<string, string[]>;
   pendingApprovals: PendingApproval[];
   permissionMode: string;
+  assistantStreamActive: boolean;
 }

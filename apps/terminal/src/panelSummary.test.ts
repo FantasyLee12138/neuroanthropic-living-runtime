@@ -20,6 +20,7 @@ function makeState(overrides: Partial<UiState> = {}): UiState {
     promptHistoryByCwd: {},
     pendingApprovals: [],
     permissionMode: "plan",
+    assistantStreamActive: false,
     ...overrides
   };
 }
@@ -117,6 +118,8 @@ describe("formatPanelBody", () => {
     expect(summary).toContain("心境：较开心 (0.58)");
     expect(summary).toContain("能量：状态不错 (0.71)");
     expect(summary).toContain("情感余波：轻微波动 (0.12)");
+    expect(summary).toContain("焦点：正在专心处理眼前的事");
+    expect(summary).toContain("模式：正常交流中");
     expect(summary).toContain("身份：阿澜");
     expect(summary).toContain("连续性：名称与身份连续性稳定");
     expect(summary).toContain("真实性");

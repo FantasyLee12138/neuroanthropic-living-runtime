@@ -58,6 +58,7 @@ def normalize_temperament_state(value: Any) -> dict[str, Any]:
             "correction_window": dict(value.get("correction_window", {})),
             "freeze_until_round": dict(value.get("freeze_until_round", {})),
             "last_correction_events": list(value.get("last_correction_events", [])),
+            "drift_diagnostics": dict(value.get("drift_diagnostics", {})),
         }
 
     baseline = _normalize_temperament_map(value)
@@ -406,6 +407,15 @@ class ConflictRepairLedgerEntry:
     top_action_after: str | None = None
     safe_mode_delta: str = "unchanged"
     repair_stage_after: str = "idle"
+    conflict_score: float = 0.0
+    dominant_conflicts: list[str] = field(default_factory=list)
+    pass_count: int = 0
+    resample_count: int = 0
+    safe_mode_owned: bool = False
+    action_delta_summary: dict[str, Any] = field(default_factory=dict)
+    learning_signal: dict[str, Any] = field(default_factory=dict)
+    stage_before: str = "idle"
+    stage_after: str = "idle"
 
 
 @dataclass
@@ -450,6 +460,9 @@ class RuntimeState:
     repair_ledger: list[ConflictRepairLedgerEntry] = field(default_factory=list)
     conflict_safe_mode_owner: str | None = None
     last_post_error_adjustment: ConflictPostErrorAdjustment | None = None
+    conflict_learning_state: dict[str, Any] = field(default_factory=dict)
+    entropy_health_state: dict[str, Any] = field(default_factory=dict)
+    last_entropy_failure: dict[str, Any] = field(default_factory=dict)
     session_metadata: dict[str, Any] = field(default_factory=dict)
     identity_state: IdentityState = field(default_factory=IdentityState)
     active_run_id: str | None = None
@@ -833,6 +846,13 @@ class QuantumEntropyRef:
     batch_id: str = ""
     byte_start: int = 0
     byte_length: int = 0
+    purpose: str = ""
+    node_name: str = ""
+    provider_class: str = ""
+    endpoint: str = ""
+    health_state: str = "ready"
+    hard_block_triggered: bool = False
+    failure_class: str = ""
     degraded: bool = False
     reason: str = ""
 
@@ -844,6 +864,10 @@ class QuantumEntropyBatch:
     batch_id: str = ""
     total_bytes: int = 0
     available_bytes: int = 0
+    provider_class: str = ""
+    endpoint: str = ""
+    health_state: str = "ready"
+    failure_class: str = ""
     degraded: bool = False
     reason: str = ""
 
@@ -860,6 +884,15 @@ class StochasticState:
     kl_divergence: float = 0.0
     timing_jitter: float = 0.0
     fragmentation_jitter: float = 0.0
+    v_t: float = 0.0
+    v_t_components: dict[str, float] = field(default_factory=dict)
+    sigma_emo: float = 0.0
+    sigma_mood: float = 0.0
+    lambda_noise_pre_guard: float = 0.0
+    log_m_guard_triggered: bool = False
+    guard_reason: str = ""
+    q_noise_pre_guard_summary: dict[str, float] = field(default_factory=dict)
+    entropy_refs_by_node: dict[str, Any] = field(default_factory=dict)
     entropy_ref: QuantumEntropyRef = field(default_factory=QuantumEntropyRef)
 
 

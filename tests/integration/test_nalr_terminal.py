@@ -43,6 +43,7 @@ def test_nalr_one_shot_runs_read_only_planning_session(tmp_path):
 
     assert result.returncode == 0
     assert "NALR:" in result.stdout
+    assert result.stdout.count("NALR:") == 1
     assert "Run " not in result.stdout
     assert "Step:" not in result.stdout
     assert "Tool " not in result.stdout

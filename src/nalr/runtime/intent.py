@@ -239,6 +239,13 @@ class IntentRuntime:
             delta["plan"] += 0.10
             delta["recall"] += 0.04
             delta["wander"] -= 0.04
+        elif top_query == "general_exchange":
+            delta["respond"] += 0.08
+            delta["connect"] += 0.02
+            delta["plan"] -= 0.04
+            delta["recall"] -= 0.06
+            delta["clarify"] -= 0.03
+            delta["wander"] -= 0.03
 
         if top_disclosure == "provider_origin":
             delta["clarify"] += 0.04

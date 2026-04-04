@@ -9,6 +9,7 @@ CONFIG_ROOT = Path(__file__).resolve().parents[2] / "config"
 
 def test_tick_records_formula_distribution_state_and_richer_proposal_fields(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.entropy_pool.ingest_bytes(bytes(range(256)) * 8, source="fixture_qrng", reason="formula alignment")
 
     result = controller.tick(
         RoundEvent(
@@ -38,6 +39,13 @@ def test_tick_records_formula_distribution_state_and_richer_proposal_fields(tmp_
     assert all(0.01 <= value <= 0.85 for value in distribution["p_raw"].values())
     assert result.trace.stochastic_state["entropy_ref"]["source"]
     assert "batch_id" in result.trace.stochastic_state["entropy_ref"]
+    assert 0.0 <= result.trace.stochastic_state["v_t"] <= 1.0
+    assert "v_t_components" in result.trace.stochastic_state
+    assert "sigma_emo" in result.trace.stochastic_state
+    assert "sigma_mood" in result.trace.stochastic_state
+    assert "entropy_refs_by_node" in result.trace.stochastic_state
+    assert result.trace.stochastic_state["entropy_refs_by_node"]["xi_emo"]["source"]
+    assert result.trace.stochastic_state["entropy_refs_by_node"]["action_sample"]["source"]
 
     proposal = next(item for item in result.trace.proposal_summaries if item["stage"] == "pfc")
     assert "delta_p" in proposal
@@ -48,6 +56,7 @@ def test_tick_records_formula_distribution_state_and_richer_proposal_fields(tmp_
 
 def test_tick_executes_conflict_thalamus_and_output_skills_independently(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.entropy_pool.ingest_bytes(bytes(range(256)) * 8, source="fixture_qrng", reason="skill fanout")
 
     result = controller.tick(
         RoundEvent(
@@ -124,6 +133,7 @@ def test_distribution_state_uses_sigma_scale_and_utility_shift_in_shifted_utilit
 
 def test_task_profile_reduces_stochastic_noise_when_control_strength_is_higher(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.entropy_pool.ingest_bytes(bytes(range(256)) * 4, source="fixture_qrng", reason="stochastic test")
     state = controller.load_runtime_state()
     state.mode = "interactive"
     state.body_energy = 0.68
@@ -188,6 +198,7 @@ def test_task_profile_reduces_stochastic_noise_when_control_strength_is_higher(t
 
 def test_tick_records_resource_biases_and_temperament_drift_state(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.entropy_pool.ingest_bytes(bytes(range(256)) * 8, source="fixture_qrng", reason="slow state trace")
     state = controller.load_runtime_state()
     state.budget_remaining = 0.18
     controller._save_state(state)
@@ -214,9 +225,11 @@ def test_tick_records_resource_biases_and_temperament_drift_state(tmp_path):
     assert resource_state["effort_avoidance_bias"] > 0.05
     assert resource_state["deliberation_compress"] < 1.0
     assert resource_state["action_shrink_scale"] < 1.0
+    assert "scarcity_pressure" in resource_state
     assert "baseline" in temperament_state
     assert "drift" in temperament_state
     assert "current" in temperament_state
+    assert "drift_diagnostics" in temperament_state
     assert all(0.0 <= value <= 1.0 for value in temperament_state["current"].values())
 
 

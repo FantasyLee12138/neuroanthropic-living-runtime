@@ -16,7 +16,8 @@ export function createInitialUiState(): UiState {
     transcriptMode: "full",
     promptHistoryByCwd: {},
     pendingApprovals: [],
-    permissionMode: "plan"
+    permissionMode: "plan",
+    assistantStreamActive: false,
   };
 }
 
@@ -45,7 +46,19 @@ export function addLocalLine(state: UiState, text: string, kind: UiLine["kind"] 
 }
 
 export function clearLines(state: UiState): UiState {
-  return { ...state, lines: [] };
+  return { ...state, lines: [], assistantStreamActive: false };
+}
+
+function appendAssistantDelta(state: UiState, delta: string): UiState {
+  const last = state.lines.at(-1);
+  if (last?.kind === "assistant" && state.assistantStreamActive) {
+    return {
+      ...state,
+      lines: [...state.lines.slice(0, -1), { kind: "assistant", text: `${last.text}${delta}` }],
+      assistantStreamActive: true,
+    };
+  }
+  return appendLine({ ...state, assistantStreamActive: true }, { kind: "assistant", text: delta });
 }
 
 function appendTimeline(
@@ -102,7 +115,7 @@ export function applyBridgeEvent(state: UiState, event: OutboundBridgeEvent): Ui
     };
   }
   if (event.type === "assistant_token") {
-    return state;
+    return appendAssistantDelta(state, event.delta);
   }
   if (event.type === "run_status") {
     return {
@@ -149,13 +162,15 @@ export function applyBridgeEvent(state: UiState, event: OutboundBridgeEvent): Ui
     );
   }
   if (event.type === "assistant_final") {
-    return appendLine(
-      {
-        ...state,
-        lastWhy: event.payload && !("cognitive_snapshot" in event.payload) ? event.payload : state.lastWhy
-      },
-      { kind: "assistant", text: event.message }
-    );
+    const nextState = {
+      ...state,
+      assistantStreamActive: false,
+      lastWhy: event.payload && !("cognitive_snapshot" in event.payload) ? event.payload : state.lastWhy
+    };
+    if (state.assistantStreamActive) {
+      return nextState;
+    }
+    return appendLine(nextState, { kind: "assistant", text: event.message });
   }
   if (event.type === "error") {
     return appendLine(state, { kind: "error", text: event.message });

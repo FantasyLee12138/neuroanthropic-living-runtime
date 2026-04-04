@@ -1,0 +1,8 @@
+entropy:
+  provider: anu_qrng
+  endpoint: "https://qrng.anu.edu.au/API/jsonI.php"
+  timeout_s: 0.6
+  prefetch_bytes: 256
+  min_batch_bytes: 32
+  max_batch_bytes: 1024
+  hard_block_on_unavailable: true

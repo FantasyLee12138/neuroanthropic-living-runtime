@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import copy
 from difflib import SequenceMatcher
 import hashlib
 import json
 from pathlib import Path
+import shutil
 
+from nalr.runtime.async_io import AsyncIOWorker
+from nalr.runtime.dynamics import smooth_decay_rate, smooth_habit_recovery, smooth_interference_penalty
 from nalr.runtime.metadata import ensure_recorded_fields, iso_date, utc_now_iso
 from nalr.schemas.models import RoundEvent
+from nalr.storage.parquet_io import append_dataset, read_dataset_rows, read_snapshot_rows, rewrite_snapshot
 
 
 def _derive_cue(event: RoundEvent) -> str | None:
@@ -36,6 +41,12 @@ class MemoryStore:
         self.root = root
         self.memory_dir = self.root / "memory"
         self.memory_dir.mkdir(parents=True, exist_ok=True)
+        self.parquet_dir = self.memory_dir / "parquet"
+        self.current_dir = self.parquet_dir / "current"
+        self.raw_parquet_dir = self.parquet_dir / "raw_events"
+        self.compacted_dir = self.parquet_dir / "compacted"
+        self.storage_status_path = self.memory_dir / "memory_storage_status.json"
+        self.migration_status_path = self.memory_dir / "memory_migration_status.json"
         self.episodic_hot_dir = self.memory_dir / "episodic_hot"
         self.episodic_warm_dir = self.memory_dir / "episodic_warm"
         self.episodic_archive_dir = self.memory_dir / "episodic_archive"
@@ -51,6 +62,10 @@ class MemoryStore:
             self.habit_dir,
             self.raw_dir,
             self.schema_dir,
+            self.parquet_dir,
+            self.current_dir,
+            self.raw_parquet_dir,
+            self.compacted_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
         self.episodic_path = self.memory_dir / "episodic_hot.json"
@@ -62,6 +77,16 @@ class MemoryStore:
         self.stable_priors_path = self.memory_dir / "stable_priors.json"
         self.circuit_breaker_path = self.memory_dir / "circuit_breakers.json"
         self.raw_events_path = self.raw_dir / "episodic_events.jsonl"
+        self._snapshot_targets = {
+            self.episodic_path: self.current_dir / "episodic_hot.parquet",
+            self.episodic_warm_path: self.current_dir / "episodic_warm.parquet",
+            self.episodic_archive_path: self.current_dir / "episodic_archive.parquet",
+            self.habit_path: self.current_dir / "habit.parquet",
+            self.relation_path: self.current_dir / "relation.parquet",
+            self.relation_trace_path: self.current_dir / "relation_trace.parquet",
+            self.stable_priors_path: self.current_dir / "stable_priors.parquet",
+            self.circuit_breaker_path: self.current_dir / "circuit_breakers.parquet",
+        }
         for path in (
             self.episodic_path,
             self.episodic_warm_path,
@@ -76,15 +101,180 @@ class MemoryStore:
                 self._write_text_atomic(path, "[]")
         if not self.raw_events_path.exists():
             self._write_text_atomic(self.raw_events_path, "")
+        if not self.storage_status_path.exists():
+            self._write_storage_status(self._default_storage_status())
+        self._migrate_legacy_if_needed()
+        self._io_worker = AsyncIOWorker("nalr-memory-io")
+        self._list_cache: dict[Path, list[dict]] = {}
+        self._jsonl_cache: dict[Path, list[dict]] = {}
+        self._artifact_cache = {
+            "hot": self._load_artifacts(self.episodic_hot_dir),
+            "warm": self._load_artifacts(self.episodic_warm_dir),
+            "archive": self._load_artifacts(self.episodic_archive_dir),
+        }
+        self._recall_cache: dict[tuple[str, tuple[str, ...]], dict] = {}
+        self._path_mtimes: dict[Path, int] = {}
+        self._dirty_paths: set[Path] = set()
+        for path in (
+            self.episodic_path,
+            self.episodic_warm_path,
+            self.episodic_archive_path,
+            self.habit_path,
+            self.relation_path,
+            self.relation_trace_path,
+            self.stable_priors_path,
+            self.circuit_breaker_path,
+        ):
+            self._list_cache[path] = self._load_list_from_disk(path)
+            self._path_mtimes[path] = self._mtime_ns(path)
+        self._jsonl_cache[self.raw_events_path] = self._load_jsonl_from_disk(self.raw_events_path)
+        self._path_mtimes[self.raw_events_path] = self._mtime_ns(self.raw_events_path)
 
-    def _read_list(self, path: Path) -> list[dict]:
+    def _default_storage_status(self) -> dict:
+        parquet_live_ready = all(path.exists() for path in self._snapshot_targets.values())
+        return {
+            "read_source_default": "parquet",
+            "storage_state": "healthy",
+            "parquet_live_ready": parquet_live_ready,
+            "degraded_reason": None,
+            "last_sync_at": None,
+        }
+
+    def _write_storage_status(self, payload: dict) -> None:
+        self.storage_status_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def storage_status(self) -> dict:
+        if not self.storage_status_path.exists():
+            payload = self._default_storage_status()
+            self._write_storage_status(payload)
+            return payload
+        payload = json.loads(self.storage_status_path.read_text(encoding="utf-8"))
+        payload.setdefault("read_source_default", "parquet")
+        payload.setdefault("storage_state", "healthy")
+        payload["parquet_live_ready"] = all(path.exists() for path in self._snapshot_targets.values())
+        payload.setdefault("degraded_reason", None)
+        payload.setdefault("last_sync_at", None)
+        return payload
+
+    def _mark_storage(self, *, state: str, reason: str | None = None) -> None:
+        payload = self.storage_status()
+        payload["storage_state"] = state
+        payload["degraded_reason"] = reason
+        payload["parquet_live_ready"] = all(path.exists() for path in self._snapshot_targets.values()) if state == "healthy" else False
+        payload["last_sync_at"] = utc_now_iso()
+        self._write_storage_status(payload)
+
+    def _payload_rows(self, payload: list[dict]) -> list[dict]:
+        return [{"payload_json": json.dumps(item, ensure_ascii=False, sort_keys=True)} for item in payload]
+
+    def _read_parquet_payload_rows(self, snapshot_path: Path) -> list[dict]:
+        rows = read_snapshot_rows(snapshot_path, "select payload_json from read_parquet(?)")
+        return [json.loads(row["payload_json"]) for row in rows]
+
+    def _read_parquet_dataset(self, dataset_dir: Path) -> list[dict]:
+        rows = read_dataset_rows(dataset_dir, "select payload_json from read_parquet(?)")
+        return [ensure_recorded_fields(json.loads(row["payload_json"])) for row in rows]
+
+    def _rewrite_snapshot(self, snapshot_path: Path, payload: list[dict]) -> None:
+        rewrite_snapshot(snapshot_path, self._payload_rows(payload), schema={"payload_json": "VARCHAR"})
+
+    def _append_payload_dataset(self, dataset_dir: Path, payload: dict, *, recorded_date: str) -> None:
+        append_dataset(
+            dataset_dir,
+            [{"recorded_date": recorded_date, "payload_json": json.dumps(payload, ensure_ascii=False, sort_keys=True)}],
+            schema={"recorded_date": "VARCHAR", "payload_json": "VARCHAR"},
+            partition_keys=("recorded_date",),
+        )
+
+    def _compacted_dataset_dir(self, tier: str) -> Path:
+        return self.compacted_dir / f"tier={tier}"
+
+    def _migrate_legacy_if_needed(self) -> None:
+        if self.migration_status_path.exists():
+            return
+        has_parquet = any(path.exists() for path in self._snapshot_targets.values()) or any(self.raw_parquet_dir.rglob("*.parquet"))
+        has_legacy = any(path.exists() and path.read_text(encoding="utf-8").strip() for path in self._snapshot_targets) or (
+            self.raw_events_path.exists() and self.raw_events_path.read_text(encoding="utf-8").strip()
+        )
+        if not has_legacy or has_parquet:
+            return
+        for legacy_path, snapshot_path in self._snapshot_targets.items():
+            payload = self._load_list_from_json_legacy(legacy_path)
+            self._rewrite_snapshot(snapshot_path, payload)
+        for row in self._load_jsonl_from_legacy(self.raw_events_path):
+            self._append_payload_dataset(self.raw_parquet_dir, row, recorded_date=row.get("recorded_date", "legacy"))
+        self.migration_status_path.write_text(
+            json.dumps({"migrated_at": utc_now_iso(), "status": "completed"}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def _load_list_from_json_legacy(self, path: Path) -> list[dict]:
         if not path.exists():
-            self._write_list(path, [])
+            return []
+        raw_text = path.read_text(encoding="utf-8").strip()
+        if not raw_text:
+            return []
+        try:
+            payload = json.loads(raw_text)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(payload, list):
+            return []
+        if path in {self.episodic_path, self.episodic_warm_path, self.episodic_archive_path}:
+            return [self._normalize_memory_record(item) for item in payload]
+        if path == self.habit_path:
+            return [self._normalize_habit_record(item) for item in payload]
+        return payload
+
+    def _load_jsonl_from_legacy(self, path: Path) -> list[dict]:
+        if not path.exists():
+            return []
+        rows = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            rows.append(ensure_recorded_fields(json.loads(line)))
+        return rows
+
+    def _mtime_ns(self, path: Path) -> int:
+        if not path.exists():
+            return 0
+        return path.stat().st_mtime_ns
+
+    def _load_artifacts(self, tier_dir: Path) -> list[dict]:
+        tier = {
+            self.episodic_hot_dir: "hot",
+            self.episodic_warm_dir: "warm",
+            self.episodic_archive_dir: "archive",
+        }[tier_dir]
+        return self._read_parquet_dataset(self._compacted_dataset_dir(tier))
+
+    def _load_list_from_disk(self, path: Path) -> list[dict]:
+        snapshot_path = self._snapshot_targets.get(path)
+        if snapshot_path is not None and snapshot_path.exists():
+            legacy_is_newer = path.exists() and path.stat().st_mtime_ns > snapshot_path.stat().st_mtime_ns
+            if legacy_is_newer:
+                payload = self._load_list_from_json_legacy(path)
+                self._write_text_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2))
+                self._rewrite_snapshot(snapshot_path, payload)
+                if path in {self.episodic_path, self.episodic_warm_path, self.episodic_archive_path}:
+                    return [self._normalize_memory_record(item) for item in payload]
+                if path == self.habit_path:
+                    return [self._normalize_habit_record(item) for item in payload]
+                return payload
+            payload = self._read_parquet_payload_rows(snapshot_path)
+            if path in {self.episodic_path, self.episodic_warm_path, self.episodic_archive_path}:
+                return [self._normalize_memory_record(item) for item in payload]
+            if path == self.habit_path:
+                return [self._normalize_habit_record(item) for item in payload]
+            return payload
+        if not path.exists():
+            self._write_text_atomic(path, "[]")
             return []
 
         raw_text = path.read_text(encoding="utf-8").strip()
         if not raw_text:
-            self._write_list(path, [])
+            self._write_text_atomic(path, "[]")
             return []
 
         try:
@@ -92,19 +282,40 @@ class MemoryStore:
         except json.JSONDecodeError:
             backup_path = path.with_name(f"{path.name}.corrupt-{utc_now_iso().replace(':', '').replace('-', '')}")
             path.replace(backup_path)
-            self._write_list(path, [])
+            self._write_text_atomic(path, "[]")
             return []
 
         if not isinstance(payload, list):
             backup_path = path.with_name(f"{path.name}.corrupt-{utc_now_iso().replace(':', '').replace('-', '')}")
             path.replace(backup_path)
-            self._write_list(path, [])
+            self._write_text_atomic(path, "[]")
             return []
         if path in {self.episodic_path, self.episodic_warm_path, self.episodic_archive_path}:
             return [self._normalize_memory_record(item) for item in payload]
         if path == self.habit_path:
             return [self._normalize_habit_record(item) for item in payload]
         return payload
+
+    def _load_jsonl_from_disk(self, path: Path) -> list[dict]:
+        if path == self.raw_events_path and any(self.raw_parquet_dir.rglob("*.parquet")):
+            return self._read_parquet_dataset(self.raw_parquet_dir)
+        if not path.exists():
+            return []
+        rows = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            rows.append(ensure_recorded_fields(json.loads(line)))
+        return rows
+
+    def _read_list(self, path: Path) -> list[dict]:
+        if path not in self._list_cache:
+            self._list_cache[path] = self._load_list_from_disk(path)
+            self._path_mtimes[path] = self._mtime_ns(path)
+        elif path not in self._dirty_paths and self._mtime_ns(path) > self._path_mtimes.get(path, 0):
+            self._list_cache[path] = self._load_list_from_disk(path)
+            self._path_mtimes[path] = self._mtime_ns(path)
+        return self._list_cache[path]
 
     def _normalize_memory_record(self, item: dict) -> dict:
         normalized = {
@@ -161,29 +372,58 @@ class MemoryStore:
         tmp_path.replace(path)
 
     def _write_list(self, path: Path, payload: list[dict]) -> None:
-        self._write_text_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2))
+        snapshot = copy.deepcopy(payload)
+        self._list_cache[path] = snapshot
+        self._dirty_paths.add(path)
+        self._invalidate_recall_cache()
+
+        def write() -> None:
+            snapshot_path = self._snapshot_targets.get(path)
+            if snapshot_path is not None:
+                self._rewrite_snapshot(snapshot_path, snapshot)
+            self._write_text_atomic(path, json.dumps(snapshot, ensure_ascii=False, indent=2))
+            self._path_mtimes[path] = self._mtime_ns(path)
+            self._dirty_paths.discard(path)
+            self._mark_storage(state="healthy")
+
+        self._io_worker.submit(write, on_error=lambda exc: self._mark_storage(state="degraded", reason=str(exc)))
 
     def _append_jsonl(self, path: Path, payload: dict) -> None:
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        entry = copy.deepcopy(payload)
+        self._jsonl_cache.setdefault(path, self._load_jsonl_from_disk(path)).append(entry)
+        self._dirty_paths.add(path)
+        self._invalidate_recall_cache()
+
+        def write() -> None:
+            if path == self.raw_events_path:
+                self._append_payload_dataset(self.raw_parquet_dir, entry, recorded_date=entry.get("recorded_date", "legacy"))
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            self._path_mtimes[path] = self._mtime_ns(path)
+            self._dirty_paths.discard(path)
+            self._mark_storage(state="healthy")
+
+        self._io_worker.submit(write, on_error=lambda exc: self._mark_storage(state="degraded", reason=str(exc)))
 
     def _safe_filename(self, cue: str) -> str:
         normalized = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in cue.lower())
         return normalized or "unknown"
 
     def _read_jsonl(self, path: Path) -> list[dict]:
-        if not path.exists():
-            return []
-        rows = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            rows.append(ensure_recorded_fields(json.loads(line)))
-        return rows
+        if path not in self._jsonl_cache:
+            self._jsonl_cache[path] = self._load_jsonl_from_disk(path)
+            self._path_mtimes[path] = self._mtime_ns(path)
+        elif path not in self._dirty_paths and self._mtime_ns(path) > self._path_mtimes.get(path, 0):
+            self._jsonl_cache[path] = self._load_jsonl_from_disk(path)
+            self._path_mtimes[path] = self._mtime_ns(path)
+        return self._jsonl_cache[path]
 
     def _context_slot(self, event: RoundEvent) -> str:
         target = (event.target or "none").lower()
         return f"{event.source.lower()}::{target}"
+
+    def _invalidate_recall_cache(self) -> None:
+        self._recall_cache.clear()
 
     def _cue_similarity(self, left: str, right: str) -> float:
         left = left.lower().strip()
@@ -206,11 +446,38 @@ class MemoryStore:
         return round(max(prefix_ratio, overlap / union, ratio), 4)
 
     def _write_artifacts(self, tier_dir: Path, artifacts: list[dict]) -> int:
-        for existing in tier_dir.glob("*.json"):
-            existing.unlink()
-        for artifact in artifacts:
-            path = tier_dir / f"{self._safe_filename(artifact['cue'])}.json"
-            path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2), encoding="utf-8")
+        tier = {
+            self.episodic_hot_dir: "hot",
+            self.episodic_warm_dir: "warm",
+            self.episodic_archive_dir: "archive",
+        }[tier_dir]
+        snapshot = copy.deepcopy(artifacts)
+        self._artifact_cache[tier] = snapshot
+        self._invalidate_recall_cache()
+
+        def write() -> None:
+            dataset_dir = self._compacted_dataset_dir(tier)
+            if dataset_dir.exists():
+                shutil.rmtree(dataset_dir)
+            append_dataset(
+                dataset_dir,
+                [
+                    {
+                        "payload_json": json.dumps(artifact, ensure_ascii=False, sort_keys=True),
+                    }
+                    for artifact in snapshot
+                ],
+                schema={"payload_json": "VARCHAR"},
+                partition_keys=(),
+            )
+            for existing in tier_dir.glob("*.json"):
+                existing.unlink()
+            for artifact in snapshot:
+                path = tier_dir / f"{self._safe_filename(artifact['cue'])}.json"
+                path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._mark_storage(state="healthy")
+
+        self._io_worker.submit(write, on_error=lambda exc: self._mark_storage(state="degraded", reason=str(exc)))
         return len(artifacts)
 
     def _summarize_artifact(self, tier: str, cue: str, events: list[dict], retention_days: int | None) -> dict:
@@ -272,10 +539,10 @@ class MemoryStore:
             recalled_within_window = memory["cue"] == active_cue or (
                 round_id is not None and round_id - int(memory.get("last_recalled_round", 0) or 0) <= 3
             )
-            effective_decay = (
-                base_decay
-                * self._cue_decay_modifier(recalled_within_window)
-                * self._affect_decay_modifier(float(memory.get("last_affect_intensity", 0.0) or 0.0))
+            effective_decay = smooth_decay_rate(
+                base_decay=base_decay,
+                recalled_within_window=recalled_within_window,
+                affect_intensity=float(memory.get("last_affect_intensity", 0.0) or 0.0),
             )
             memory["gist_strength"] = max(0.0, round(memory.get("gist_strength", 0.0) * (1 - effective_decay), 4))
             memory["detail_strength"] = max(0.0, round(memory.get("detail_strength", 0.0) * (1 - effective_decay), 4))
@@ -295,7 +562,7 @@ class MemoryStore:
             old_strength = max(float(memory.get("detail_strength", 0.0)), float(memory.get("gist_strength", 0.0)))
             if old_strength > 0.45:
                 continue
-            candidate_penalty = 0.18 * similarity * (1 - old_strength)
+            candidate_penalty = smooth_interference_penalty(similarity=similarity, old_strength=old_strength)
             if candidate_penalty >= penalty:
                 penalty = candidate_penalty
                 source = memory["cue"]
@@ -383,8 +650,8 @@ class MemoryStore:
         if success_signal > 0.0 and len(habit["breakthrough_rounds"]) < 2 and round_id is not None:
             habit["breakthrough_rounds"].append(int(round_id))
         if habit.get("status") == "suppressed_recoverable":
-            recovery_rate = 0.02 + 0.03 * context_recurrence
-            delta = min(0.10, recovery_rate + max(0.0, valence) * eta_pos * 0.5)
+            recovery_rate = smooth_habit_recovery(context_recurrence=context_recurrence, valence=valence)
+            delta = min(0.10, recovery_rate)
         else:
             delta = min(
                 0.10,
@@ -532,16 +799,22 @@ class MemoryStore:
 
         return cue
 
-    def recall(self, cue: str) -> dict:
-        cue = cue.lower()
-        tier = "hot"
-        memory = next((item for item in self._read_list(self.episodic_path) if item["cue"] == cue), None)
-        if memory is None:
-            tier = "warm"
-            memory = next((item for item in self._read_list(self.episodic_warm_path) if item["cue"] == cue), None)
-        if memory is None:
-            tier = "archive"
-            memory = next((item for item in self._read_list(self.episodic_archive_path) if item["cue"] == cue), None)
+    def _lookup_tiers(self, cue: str, tier_budget: tuple[str, ...]) -> dict:
+        tier_paths = {
+            "hot": self.episodic_path,
+            "warm": self.episodic_warm_path,
+            "archive": self.episodic_archive_path,
+        }
+        tier = None
+        memory = None
+        for candidate in tier_budget:
+            path = tier_paths.get(candidate)
+            if path is None:
+                continue
+            memory = next((item for item in self._read_list(path) if item["cue"] == cue), None)
+            if memory is not None:
+                tier = candidate
+                break
         if memory is None:
             return {"cue": cue, "tier": None, "strength": 0.0, "detail": False, "found": False, "evidence": []}
         detail_strength = float(memory.get("detail_strength", 0.0))
@@ -565,6 +838,17 @@ class MemoryStore:
             "found": True,
             "evidence": [item for item in evidence if item],
         }
+
+    def recall(self, cue: str, *, tier_budget: tuple[str, ...] = ("hot", "warm", "archive")) -> dict:
+        normalized_cue = cue.lower()
+        normalized_budget = tuple(tier_budget)
+        cache_key = (normalized_cue, normalized_budget)
+        cached = self._recall_cache.get(cache_key)
+        if cached is not None:
+            return copy.deepcopy(cached)
+        payload = self._lookup_tiers(normalized_cue, normalized_budget)
+        self._recall_cache[cache_key] = copy.deepcopy(payload)
+        return payload
 
     def memory_top(self, limit: int = 5) -> list[dict]:
         memories = []
@@ -746,20 +1030,19 @@ class MemoryStore:
             "signature": signature,
         }
 
-    def recall_strength(self, cue: str | None) -> float:
+    def recall_strength(self, cue: str | None, *, tier_budget: tuple[str, ...] = ("hot", "warm", "archive")) -> float:
         if not cue:
             return 0.0
-        for item in self._read_list(self.episodic_path):
-            if item["cue"] == cue:
-                detail_strength = item.get("detail_strength", 0.0)
-                gist_strength = item.get("gist_strength", 0.0)
-                interference = item.get("interference", 0.0)
-                if detail_strength >= 0.50:
-                    return max(0.0, round(detail_strength * (1 - interference * 0.5), 4))
-                if max(detail_strength, gist_strength) >= 0.25:
-                    return max(0.0, round(gist_strength * (1 - interference * 0.3), 4))
-                return round(max(detail_strength, gist_strength), 4)
-        return 0.0
+        recall_payload = self.recall(cue, tier_budget=tier_budget)
+        if not recall_payload.get("found"):
+            return 0.0
+        strength = float(recall_payload.get("strength", 0.0))
+        interference = float(recall_payload.get("interference", 0.0))
+        if recall_payload.get("detail"):
+            return max(0.0, round(strength * (1 - interference * 0.5), 4))
+        if strength >= 0.25:
+            return max(0.0, round(strength * (1 - interference * 0.3), 4))
+        return round(strength, 4)
 
     def habit_strength(self, cue: str | None) -> float:
         if not cue:
@@ -877,15 +1160,13 @@ class MemoryStore:
         return summary
 
     def sample_compacted(self, tier: str, *, limit: int = 5, cue: str | None = None) -> list[dict]:
-        tier_map = {
-            "hot": self.episodic_hot_dir,
-            "warm": self.episodic_warm_dir,
-            "archive": self.episodic_archive_dir,
-        }
-        if tier not in tier_map:
+        if tier not in self._artifact_cache:
             raise ValueError(f"unsupported tier: {tier}")
-        rows = [json.loads(path.read_text(encoding="utf-8")) for path in sorted(tier_map[tier].glob("*.json"))]
+        rows = copy.deepcopy(self._artifact_cache[tier])
         if cue:
             rows = [row for row in rows if row.get("cue") == cue]
         rows = sorted(rows, key=lambda item: (item.get("event_count", 0), item.get("last_round_id", 0), item.get("cue", "")), reverse=True)
         return rows[:limit]
+
+    def flush(self, *, raise_on_error: bool = False) -> None:
+        self._io_worker.flush(raise_on_error=raise_on_error)

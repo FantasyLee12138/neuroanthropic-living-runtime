@@ -119,21 +119,21 @@ function describeAffectResidue(value: number): string {
 
 function describeFocus(value: string): string {
   return {
-    task: "任务聚焦",
-    respond: "回应聚焦",
-    wander: "发散游移",
-    rest: "休整恢复",
-    boot: "启动状态",
+    task: "正在专心处理眼前的事",
+    respond: "注意力放在如何回应上",
+    wander: "思绪有些发散",
+    rest: "正在慢慢回落和恢复",
+    boot: "还在慢慢进入状态",
   }[value] ?? value;
 }
 
 function describeMode(value: string): string {
   return {
-    interactive: "互动",
-    idle: "闲置",
-    sleep: "休眠",
-    safe: "保守",
-    plan: "规划",
+    interactive: "正常交流中",
+    idle: "安静待机中",
+    sleep: "在休眠整理里",
+    safe: "处于谨慎收束中",
+    plan: "正在规划整理中",
   }[value] ?? value;
 }
 

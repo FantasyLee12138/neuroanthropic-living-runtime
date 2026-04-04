@@ -30,6 +30,27 @@ def test_new_agents_emit_stage_level_proposals(tmp_path):
     assert by_stage["value"]["top_action"] is not None
 
 
+def test_salience_stage_promotes_non_fallback_action_for_clearly_salient_input(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    result = controller.tick(
+        RoundEvent(
+            source="user",
+            content="Help me check the code files, remember the failing test, and summarize the plan.",
+            target="user",
+            cue="tests",
+            valence=0.1,
+        ),
+        scenario="task",
+        mode="interactive",
+    )
+
+    by_stage = {item["stage"]: item for item in result.trace.proposal_summaries}
+
+    assert by_stage["salience"]["top_action"] == "plan"
+    assert result.sampled_action.name in {"plan", "recall", "clarify"}
+
+
 def test_plausibility_guard_blocks_wander_in_task_runtime(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
 

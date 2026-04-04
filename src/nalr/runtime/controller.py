@@ -6,6 +6,8 @@ import math
 import os
 import shutil
 import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -13,13 +15,14 @@ from uuid import uuid4
 
 import yaml
 
-from nalr.agents.modules import TEMPLATE_ACTION_SCALES, TEMPLATE_BY_PRIORITY, build_agents
+from nalr.agents.modules import TEMPLATE_ACTION_SCALES, TEMPLATE_BY_PRIORITY, build_agents, compute_salience_signal
 from nalr.dream.orchestrator import DreamOrchestrator
 from nalr.memory.store import MemoryStore
 from nalr.output.renderer import fallback_render_text
 from nalr.output.style import build_expression_profile, build_render_plan, compute_style_profile
 from nalr.providers import ModelRequest, ModelRouter
 from nalr.run import SupervisorLoop
+from nalr.runtime.async_io import AsyncIOWorker
 from nalr.runtime.entropy import QuantumEntropyPool
 from nalr.runtime.authenticity import AuthenticityPolicy
 from nalr.runtime.identity import IdentityRuntime
@@ -121,11 +124,22 @@ class RuntimeController:
         self.snapshot_dir = self.runtime_dir / "snapshots"
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.snapshot_dir.mkdir(parents=True, exist_ok=True)
+        self._state_io = AsyncIOWorker("nalr-state-io")
+        self._state_cache: RuntimeState | None = None
+        self._cold_flush_round_interval = 8
+        self._cold_flush_interval_seconds = 2.0
+        self._rounds_since_cold_flush = 0
+        self._last_cold_flush_at = time.monotonic()
 
         self.config = self._load_config()
+        thresholds = self.config["thresholds"]["thresholds"]
         self.trace_store = TraceStore(self.home_path)
         self.memory_store = MemoryStore(self.home_path)
-        self.agents = build_agents()
+        self.agents = build_agents(
+            conflict_high=thresholds["conflict_high"],
+            conflict_critical=thresholds["conflict_critical"],
+            max_resample_rounds=thresholds["max_resample_rounds"],
+        )
         self.agent_map = {agent.name: agent for agent in self.agents}
         self.skills = build_skill_registry()
         self.skill_executor = SkillExecutor(
@@ -154,7 +168,9 @@ class RuntimeController:
                     for name, agent_cfg in self.config["agents"]["agents"].items()
                 }
             )
-            self._save_state(initial_state)
+            self._save_state(initial_state, sync=True)
+        else:
+            self._state_cache = RuntimeState(**json.loads(self.state_path.read_text(encoding="utf-8")))
 
     def _load_config(self) -> dict[str, Any]:
         def read_yaml(name: str) -> dict[str, Any]:
@@ -195,8 +211,15 @@ class RuntimeController:
             normalized[key] = round(_clip(float(temperament.get(key, 0.5))), 4)
         return {**payload, "temperament": normalized}
 
-    def _save_state(self, state: RuntimeState) -> None:
+    def _write_state_snapshot(self, state: RuntimeState) -> None:
         self.state_path.write_text(json.dumps(to_dict(state), ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _save_state(self, state: RuntimeState, *, sync: bool = False) -> None:
+        snapshot = RuntimeState(**to_dict(state))
+        self._state_cache = snapshot
+        self._state_io.submit(lambda: self._write_state_snapshot(snapshot))
+        if sync:
+            self._state_io.flush(raise_on_error=True)
 
     def _breaker_environment_fingerprint(self) -> str:
         payload = {
@@ -207,8 +230,27 @@ class RuntimeController:
         return hashlib.sha1(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
     def load_runtime_state(self) -> RuntimeState:
-        payload = json.loads(self.state_path.read_text(encoding="utf-8"))
-        return RuntimeState(**payload)
+        if self._state_cache is None:
+            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+            self._state_cache = RuntimeState(**payload)
+        return RuntimeState(**to_dict(self._state_cache))
+
+    def flush_pending_io(self, *, raise_on_error: bool = False) -> None:
+        self._state_io.flush(raise_on_error=raise_on_error)
+        self.memory_store.flush(raise_on_error=raise_on_error)
+        self.trace_store.flush(raise_on_error=raise_on_error)
+        self._rounds_since_cold_flush = 0
+        self._last_cold_flush_at = time.monotonic()
+
+    def _maybe_flush_cold_path(self, *, raise_on_error: bool = False) -> bool:
+        self._rounds_since_cold_flush += 1
+        now = time.monotonic()
+        round_due = self._cold_flush_round_interval > 0 and self._rounds_since_cold_flush >= self._cold_flush_round_interval
+        time_due = self._cold_flush_interval_seconds > 0 and (now - self._last_cold_flush_at) >= self._cold_flush_interval_seconds
+        if not round_due and not time_due:
+            return False
+        self.flush_pending_io(raise_on_error=raise_on_error)
+        return True
 
     def _normalize_temperament_state(self, state: RuntimeState) -> dict[str, Any]:
         baseline = dict(state.temperament_state.get("baseline", {}))
@@ -369,12 +411,16 @@ class RuntimeController:
         before_state = self.load_runtime_state()
         before_hash = self._state_hash(before_state)
         rollback_snapshot_id = self._create_command_snapshot(before_state, envelope)
+        self.flush_pending_io(raise_on_error=True)
         shutil.copyfile(snapshot_path / "persona_state.json", self.state_path)
         memory_snapshot = snapshot_path / "memory"
         if self.memory_store.memory_dir.exists():
             shutil.rmtree(self.memory_store.memory_dir)
         if memory_snapshot.exists():
             shutil.copytree(memory_snapshot, self.memory_store.memory_dir, dirs_exist_ok=True)
+        self.memory_store = MemoryStore(self.home_path)
+        self.dream_orchestrator.memory_store = self.memory_store
+        self._state_cache = RuntimeState(**json.loads(self.state_path.read_text(encoding="utf-8")))
         restored_state = self.load_runtime_state()
         after_hash = self._state_hash(restored_state)
         rollback = {
@@ -406,6 +452,7 @@ class RuntimeController:
             after_hash,
             session_id=restored_state.session_id,
             recorded_at=utc_now_iso(),
+            sync=True,
         )
         return result
 
@@ -1979,11 +2026,13 @@ class RuntimeController:
         state.budget_remaining = _clip(state.budget_remaining - 0.001 + (0.01 if requested_mode in {"idle", "sleep"} else 0.0))
 
         cue = event.cue
+        memory_retrieval_budget = self._memory_retrieval_budget(event, scenario_cfg)
         resource_telemetry = self._compute_resource_telemetry(state)
         state.resource_state = {**state.resource_state, **resource_telemetry}
         context = {
             "cue": cue,
-            "recall_strength": self.memory_store.recall_strength(cue),
+            "memory_retrieval_budget": memory_retrieval_budget,
+            "recall_strength": self.memory_store.recall_strength(cue, tier_budget=memory_retrieval_budget),
             "habit_strength": self.memory_store.habit_strength(cue),
             "closeness": self.memory_store.closeness(event.target),
             "valence": event.valence,
@@ -1997,7 +2046,7 @@ class RuntimeController:
             "latency_pressure": resource_telemetry["latency_pressure"],
         }
         if cue:
-            recall_payload = self.memory_store.recall(cue)
+            recall_payload = self.memory_store.recall(cue, tier_budget=memory_retrieval_budget)
             context["recall_strength"] = recall_payload.get("strength", context["recall_strength"])
             context["interference"] = recall_payload.get("interference", 0.0)
         relation_state = self._relation_state(event, context)
@@ -2132,21 +2181,11 @@ class RuntimeController:
         )
         thalamus = self.agent_map["ThalamusAttentionAgent"]
         deterministic = thalamus.normalize_distribution(distribution_state.p_raw)["distribution"]
-        stochastic_distribution, _ = self._apply_stochastic_layer(
-            deterministic,
-            distribution_state,
-            state,
-            event,
-            scenario_cfg,
-            relation_state,
-            0.0,
-            round_seed,
-        )
-        distribution_state.p_mix = stochastic_distribution
+        distribution_state.p_mix = deterministic
         thresholds = self.config["thresholds"]["thresholds"]
         post_risk = {
-            action: _clip(stochastic_distribution[action], thresholds["p_floor"], thresholds["p_cap"]) * distribution_state.risk_suppressor.get(action, 1.0)
-            for action in stochastic_distribution
+            action: _clip(deterministic[action], thresholds["p_floor"], thresholds["p_cap"]) * distribution_state.risk_suppressor.get(action, 1.0)
+            for action in deterministic
         }
         distribution_state.p_final = self._normalize(
             {
@@ -2174,7 +2213,14 @@ class RuntimeController:
             gate *= float(output_gate.apply_output_gate(action_name, state, scenario, relation_state).get("gate", 1.0))
             gated_distribution[action_name] = probability * gate
         distribution_state.p_final = self._normalize(gated_distribution or distribution_state.p_final)
-        sampled_action = self._collapse_internal_sampled_action(thalamus.sample_action(distribution_state.p_final)["action"])
+        top_action = max(distribution_state.p_final, key=distribution_state.p_final.get)
+        sampled_action = self._collapse_internal_sampled_action(
+            ActionCandidate(
+                name=top_action,
+                probability=distribution_state.p_final[top_action],
+                rationale="probe argmax",
+            )
+        )
         task_mass = round(sum(distribution_state.p_final.get(action, 0.0) for action in ("plan", "recall", "clarify")), 6)
         chat_mass = round(sum(distribution_state.p_final.get(action, 0.0) for action in ("respond", "connect", "rest")), 6)
         return {
@@ -2212,6 +2258,13 @@ class RuntimeController:
             "task_probe": task_probe,
         }
 
+    def _memory_retrieval_budget(self, event: RoundEvent, scenario_cfg: dict[str, Any]) -> tuple[str, ...]:
+        salience_signal = compute_salience_signal(event, scenario_cfg)
+        salience_high = float(self.config["thresholds"]["thresholds"].get("salience_high", 0.78))
+        if salience_signal < salience_high:
+            return ("hot",)
+        return ("hot", "warm", "archive")
+
     def tick(self, event: RoundEvent, scenario: str, mode: str) -> RoundResult:
         state = self.load_runtime_state()
         self._normalize_temperament_runtime_state(state)
@@ -2238,11 +2291,13 @@ class RuntimeController:
             update_habit=False,
             cue_quality=event.cue_quality,
         )
+        memory_retrieval_budget = self._memory_retrieval_budget(event, scenario_cfg)
         resource_telemetry = self._compute_resource_telemetry(state)
         state.resource_state = {**state.resource_state, **resource_telemetry}
         context = {
             "cue": cue,
-            "recall_strength": self.memory_store.recall_strength(cue),
+            "memory_retrieval_budget": memory_retrieval_budget,
+            "recall_strength": self.memory_store.recall_strength(cue, tier_budget=memory_retrieval_budget),
             "habit_strength": self.memory_store.habit_strength(cue),
             "closeness": self.memory_store.closeness(event.target),
             "valence": event.valence,
@@ -2256,7 +2311,7 @@ class RuntimeController:
             "latency_pressure": resource_telemetry["latency_pressure"],
         }
         if cue:
-            recall_payload = self.memory_store.recall(cue)
+            recall_payload = self.memory_store.recall(cue, tier_budget=memory_retrieval_budget)
             context["recall_strength"] = recall_payload.get("strength", context["recall_strength"])
             context["interference"] = recall_payload.get("interference", 0.0)
         relation_state = self._relation_state(event, context)
@@ -2959,6 +3014,7 @@ class RuntimeController:
                     session_id=state.session_id,
                     recorded_at=recorded_at,
                 )
+        self._maybe_flush_cold_path(raise_on_error=True)
 
         return RoundResult(
             round_id=state.round_count,
@@ -3062,6 +3118,7 @@ class RuntimeController:
             ttl = str(envelope.parsed_args.get("ttl", parts[2] if len(parts) >= 3 else "temporary"))
             result = CommandResult(applied=True, scope="DMNAgent", delta={"enabled": False}, ttl=ttl, operator_level=operator_level, rollback_available=True)
         elif envelope.domain == "checkpoint" and envelope.verb == "create":
+            self.flush_pending_io(raise_on_error=True)
             checkpoint_id = f"ckpt-{state.round_count:04d}"
             path = self.checkpoint_dir / f"{checkpoint_id}.json"
             shutil.copyfile(self.state_path, path)
@@ -3073,7 +3130,9 @@ class RuntimeController:
             if not checkpoint_path.exists():
                 result = CommandResult(applied=False, scope="checkpoint", delta={"checkpoint_id": checkpoint_id, "restored": False}, risk_note="checkpoint not found", operator_level=operator_level, rollback_available=False)
             else:
+                self.flush_pending_io(raise_on_error=True)
                 shutil.copyfile(checkpoint_path, self.state_path)
+                self._state_cache = RuntimeState(**json.loads(self.state_path.read_text(encoding="utf-8")))
                 state = self.load_runtime_state()
                 result = CommandResult(applied=True, scope="checkpoint", delta={"checkpoint_id": checkpoint_id, "restored": True, "safe_mode": state.safe_mode, "mode": state.mode}, operator_level=operator_level, rollback_available=True)
         else:
@@ -3083,7 +3142,8 @@ class RuntimeController:
         result.snapshot_id = snapshot_id
         result.rollback = self._build_rollback(envelope, before_state, result, snapshot_id)
         result.rollback_hint = result.rollback["human_hint"]
-        self._save_state(state)
+        sync_disk = envelope.domain == "checkpoint"
+        self._save_state(state, sync=sync_disk)
         after_hash = self._state_hash(state)
         self.trace_store.append_command(
             envelope.canonical,
@@ -3092,6 +3152,7 @@ class RuntimeController:
             after_hash,
             session_id=state.session_id,
             recorded_at=utc_now_iso(),
+            sync=sync_disk,
         )
         return result
 
@@ -3104,11 +3165,12 @@ class RuntimeController:
     def checkpoint(self) -> CheckpointRef:
         state = self.load_runtime_state()
         before_hash = self._state_hash(state)
+        self.flush_pending_io(raise_on_error=True)
         checkpoint_id = f"ckpt-{state.round_count:04d}"
         path = self.checkpoint_dir / f"{checkpoint_id}.json"
         shutil.copyfile(self.state_path, path)
         state.last_checkpoint_id = checkpoint_id
-        self._save_state(state)
+        self._save_state(state, sync=True)
         after_hash = self._state_hash(state)
         self.trace_store.append_command(
             "checkpoint create",
@@ -3124,6 +3186,7 @@ class RuntimeController:
             after_hash,
             session_id=state.session_id,
             recorded_at=utc_now_iso(),
+            sync=True,
         )
         return CheckpointRef(checkpoint_id=checkpoint_id, path=path)
 
@@ -3133,7 +3196,9 @@ class RuntimeController:
             return CommandResult(applied=False, scope="checkpoint", delta={"checkpoint_id": checkpoint_id, "restored": False}, risk_note="checkpoint not found", operator_level="ops_admin", rollback_available=False)
         before_state = self.load_runtime_state()
         before_hash = self._state_hash(before_state)
+        self.flush_pending_io(raise_on_error=True)
         shutil.copyfile(checkpoint_path, self.state_path)
+        self._state_cache = RuntimeState(**json.loads(self.state_path.read_text(encoding="utf-8")))
         restored_state = self.load_runtime_state()
         after_hash = self._state_hash(restored_state)
         result = CommandResult(applied=True, scope="checkpoint", delta={"checkpoint_id": checkpoint_id, "restored": True, "safe_mode": restored_state.safe_mode, "mode": restored_state.mode}, rollback_hint="create a fresh checkpoint before further changes", operator_level="ops_admin", rollback_available=True)
@@ -3144,6 +3209,7 @@ class RuntimeController:
             after_hash,
             session_id=restored_state.session_id,
             recorded_at=utc_now_iso(),
+            sync=True,
         )
         return result
 
@@ -3160,6 +3226,7 @@ class RuntimeController:
         return self.memory_store.sample_compacted(tier, limit=limit, cue=cue)
 
     def export_trace_parquet(self, *, since_round: int | None = None, overwrite: bool = False) -> dict[str, Any]:
+        self.flush_pending_io(raise_on_error=True)
         exporter = TraceExporter(self.trace_store)
         payload = exporter.export_parquet(since_round=since_round, overwrite=overwrite)
         self.trace_store.mark_trace_sync_healthy()
@@ -3254,11 +3321,11 @@ class RuntimeController:
 
     def _focus_label(self, focus: str) -> str:
         return {
-            "task": "任务聚焦",
-            "respond": "回应聚焦",
-            "wander": "发散游移",
-            "rest": "休整恢复",
-            "boot": "启动状态",
+            "task": "专心处理眼前的事",
+            "respond": "把注意力放在回应上",
+            "wander": "思绪有些发散",
+            "rest": "慢慢回落和恢复",
+            "boot": "还在进入状态",
         }.get(focus, focus)
 
     def _continuity_label(self, rename_reason: str, *, has_display_name: bool) -> str:
@@ -3449,10 +3516,10 @@ class RuntimeController:
             step_trace["pause_reason"] = run_state.stop_reason.code
             tool_trace["dirty_entries"] = dirty["entries"]
         self._sync_run_state_to_runtime(state, run_state)
-        self._save_state(state)
+        self._save_state(state, sync=True)
         after_hash = self._state_hash(state)
-        self.trace_store.write_run(to_dict(run_state), session_id=state.session_id, recorded_at=recorded_at)
-        self.trace_store.append_step_trace(step_trace, session_id=state.session_id, recorded_at=recorded_at)
+        self.trace_store.write_run(to_dict(run_state), session_id=state.session_id, recorded_at=recorded_at, sync=True)
+        self.trace_store.append_step_trace(step_trace, session_id=state.session_id, recorded_at=recorded_at, sync=True)
         self.trace_store.append_tool_trace(
             {
                 **tool_trace,
@@ -3461,6 +3528,7 @@ class RuntimeController:
             },
             session_id=state.session_id,
             recorded_at=recorded_at,
+            sync=True,
         )
         return self.run_status(run_state.run_id)
 
@@ -3497,8 +3565,8 @@ class RuntimeController:
     def _persist_run_state(self, run_state: RunState) -> None:
         state = self.load_runtime_state()
         self._sync_run_state_to_runtime(state, run_state)
-        self._save_state(state)
-        self.trace_store.write_run(to_dict(run_state), session_id=state.session_id, recorded_at=utc_now_iso())
+        self._save_state(state, sync=True)
+        self.trace_store.write_run(to_dict(run_state), session_id=state.session_id, recorded_at=utc_now_iso(), sync=True)
 
     def run_status(self, run_id: str | None = None) -> dict[str, Any]:
         run_state = self._load_run_state(run_id)

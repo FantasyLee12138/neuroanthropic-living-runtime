@@ -26,7 +26,7 @@ def serve_stdio(stdin: TextIO, stdout: TextIO) -> None:
             continue
         try:
             payload = json.loads(line)
-            events = handler.handle(payload)
+            events = handler.handle_stream(payload)
         except (json.JSONDecodeError, ProtocolError, FileNotFoundError, ValueError) as exc:
             events = [build_outbound_event("error", message=str(exc))]
         for event in events:

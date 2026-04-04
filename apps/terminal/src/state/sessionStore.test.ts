@@ -155,4 +155,40 @@ describe("sessionStore", () => {
       status: "ok"
     });
   });
+
+  it("accumulates assistant tokens into one transcript line", () => {
+    const initial = createInitialUiState();
+    const withFirst = applyBridgeEvent(initial, {
+      type: "assistant_token",
+      session_id: "sess-1",
+      delta: "已进入只读任务处理。"
+    });
+    const withSecond = applyBridgeEvent(withFirst, {
+      type: "assistant_token",
+      session_id: "sess-1",
+      delta: "可用 /status /why /steps /tools 查看进度。"
+    });
+
+    expect(withSecond.lines).toEqual([
+      { kind: "assistant", text: "已进入只读任务处理。可用 /status /why /steps /tools 查看进度。" }
+    ]);
+  });
+
+  it("finalizes a streamed assistant line without duplicating the final message", () => {
+    const initial = createInitialUiState();
+    const streaming = applyBridgeEvent(initial, {
+      type: "assistant_token",
+      session_id: "sess-1",
+      delta: "已进入只读任务处理。可用 /status /why /steps /tools 查看进度。"
+    });
+    const completed = applyBridgeEvent(streaming, {
+      type: "assistant_final",
+      session_id: "sess-1",
+      message: "已进入只读任务处理。可用 /status /why /steps /tools 查看进度。"
+    });
+
+    expect(completed.lines).toEqual([
+      { kind: "assistant", text: "已进入只读任务处理。可用 /status /why /steps /tools 查看进度。" }
+    ]);
+  });
 });

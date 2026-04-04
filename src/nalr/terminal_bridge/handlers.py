@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
 from nalr.runtime.controller import RuntimeController
@@ -18,12 +19,15 @@ class TerminalEventHandler:
         self.session_store = TerminalSessionStore(controller.runtime_dir)
 
     def handle(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        return list(self.handle_stream(payload))
+
+    def handle_stream(self, payload: dict[str, Any]) -> Iterable[dict[str, Any]]:
         event = validate_inbound_event(payload)
         event_type = event["type"]
         if event_type == "start_session":
             return self._start_session(event["session_id"], event["cwd"])
         if event_type == "user_turn":
-            return self._user_turn(event["session_id"], event["text"])
+            return self._user_turn_stream(event["session_id"], event["text"])
         if event_type == "control_command":
             return self._control_command(event["session_id"], event["command"], event.get("value"))
         if event_type == "approve":
@@ -48,7 +52,7 @@ class TerminalEventHandler:
             self._build_sidebar_snapshot_event(state),
         ]
 
-    def _user_turn(self, session_id: str, text: str) -> list[dict[str, Any]]:
+    def _user_turn_stream(self, session_id: str, text: str) -> Iterable[dict[str, Any]]:
         session = self._load_session(session_id)
         if self._turn_kind(text) == "direct_chat":
             result = self.controller.tick(
@@ -58,13 +62,12 @@ class TerminalEventHandler:
             )
             session.status = "active"
             self.session_store.write(session)
-            return [
-                build_outbound_event(
-                    "assistant_final",
-                    session_id=session_id,
-                    message=result.rendered_expression.text.strip() or "你好，我在。你想让我帮你做什么？",
-                )
-            ]
+            yield build_outbound_event(
+                "assistant_final",
+                session_id=session_id,
+                message=result.rendered_expression.text.strip() or "你好，我在。你想让我帮你做什么？",
+            )
+            return
 
         run = self.controller.start_run(
             text,
@@ -72,25 +75,34 @@ class TerminalEventHandler:
             replace_active=True,
             interrupt_reason="interrupted_by_user",
         )
+        session.active_run_id = run["run_id"]
+        session.last_run_id = run["run_id"]
+        session.status = "active"
+        self.session_store.write(session)
+        task_message = self._task_run_message(run)
+        yield build_outbound_event("run_status", session_id=session_id, run=run)
+        yield build_outbound_event("assistant_token", session_id=session_id, delta=task_message)
+
         explain = self.controller.explain_run(run["run_id"])
         steps = self.controller.run_steps(run["run_id"])["steps"]
         tools = self.controller.run_tools(run["run_id"])["tools"]
-        outbound_tools: list[dict[str, Any]] = []
         pending_approvals = [item for item in session.approvals_pending if item.get("status") == "pending"]
+        session.approvals_pending = pending_approvals
+        self.session_store.write(session)
+        for step in steps:
+            yield build_outbound_event("step_update", session_id=session_id, step=step)
         for index, tool in enumerate(tools):
             call_id = f"{run['run_id']}:tool:{index}"
             tool_name = str(tool.get("tool_name") or "unknown")
-            outbound_tools.append(
-                build_outbound_event(
-                    "tool_call",
-                    session_id=session_id,
-                    call_id=call_id,
-                    run_id=run["run_id"],
-                    tool=tool_name,
-                    args=tool.get("input") or {},
-                    summary=tool.get("summary") or tool.get("status") or "",
-                    status=tool.get("status"),
-                )
+            yield build_outbound_event(
+                "tool_call",
+                session_id=session_id,
+                call_id=call_id,
+                run_id=run["run_id"],
+                tool=tool_name,
+                args=tool.get("input") or {},
+                summary=tool.get("summary") or tool.get("status") or "",
+                status=tool.get("status"),
             )
             if session.permission_mode == "ask":
                 approval_payload = {
@@ -108,44 +120,33 @@ class TerminalEventHandler:
                     "requested_at": utc_now_iso(),
                 }
                 pending_approvals.append(approval_payload)
-                outbound_tools.append(
-                    build_outbound_event(
-                        "approval_request",
-                        session_id=session_id,
-                        call_id=call_id,
-                        run_id=run["run_id"],
-                        tool=tool_name,
-                        args=tool.get("input") or {},
-                        risk_level=approval_payload["risk_level"],
-                        summary=approval_payload["summary"],
-                        action_preview=approval_payload["action_preview"],
-                        mode=approval_payload["mode"],
-                        status=approval_payload["status"],
-                        actions=approval_payload["actions"],
-                        approved=None,
-                    )
+                session.approvals_pending = pending_approvals
+                self.session_store.write(session)
+                yield build_outbound_event(
+                    "approval_request",
+                    session_id=session_id,
+                    call_id=call_id,
+                    run_id=run["run_id"],
+                    tool=tool_name,
+                    args=tool.get("input") or {},
+                    risk_level=approval_payload["risk_level"],
+                    summary=approval_payload["summary"],
+                    action_preview=approval_payload["action_preview"],
+                    mode=approval_payload["mode"],
+                    status=approval_payload["status"],
+                    actions=approval_payload["actions"],
+                    approved=None,
                 )
-            outbound_tools.append(build_outbound_event("tool_result", session_id=session_id, call_id=call_id, result=tool))
+            yield build_outbound_event("tool_result", session_id=session_id, call_id=call_id, result=tool)
 
-        session.active_run_id = run["run_id"]
-        session.last_run_id = run["run_id"]
-        session.status = "active"
-        session.approvals_pending = pending_approvals
-        self.session_store.write(session)
-        events = [
-            build_outbound_event("run_status", session_id=session_id, run=run),
-            *[build_outbound_event("step_update", session_id=session_id, step=step) for step in steps],
-            *outbound_tools,
-            self._build_sidebar_snapshot_event(session, run_id=run["run_id"], run=run, explain=explain, steps=steps, tools=tools),
-            build_outbound_event(
-                "assistant_final",
-                session_id=session_id,
-                run_id=run["run_id"],
-                message=self._task_run_message(explain),
-                payload=explain,
-            )
-        ]
-        return events
+        yield self._build_sidebar_snapshot_event(session, run_id=run["run_id"], run=run, explain=explain, steps=steps, tools=tools)
+        yield build_outbound_event(
+            "assistant_final",
+            session_id=session_id,
+            run_id=run["run_id"],
+            message=task_message,
+            payload=explain,
+        )
 
     def _control_command(self, session_id: str, command: str, value: str | None = None) -> list[dict[str, Any]]:
         session = self._load_session(session_id)
@@ -353,8 +354,8 @@ class TerminalEventHandler:
             return "direct_chat"
         return self.controller.probe_terminal_route(normalized)["route"]
 
-    def _task_run_message(self, explain_payload: dict[str, Any]) -> str:
-        if explain_payload.get("status") == "paused" and explain_payload.get("dirty_worktree_detected"):
+    def _task_run_message(self, run_payload: dict[str, Any]) -> str:
+        if run_payload.get("status") == "paused" and run_payload.get("dirty_worktree_detected"):
             return "任务已建立，但当前处于暂停状态。可用 /status /why 查看原因。"
         return "已进入只读任务处理。可用 /status /why /steps /tools 查看进度。"
 
