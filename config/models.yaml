@@ -30,6 +30,7 @@ model_routes:
     retries: 0
     enabled: true
     base_url: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
   tool_policy:
     backend: doubao
     model: doubao-seed-2-0-pro-260215
@@ -60,6 +61,47 @@ model_routes:
     timeout_ms: 60000
     retries: 0
     enabled: false
+model_tiers:
+  state_machine:
+    mode: local
+  small_model:
+    mode: remote
+    backend: doubao
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    model: ep-20260404191810-qfn7s
+    timeout_ms: 12000
+    retries: 0
+    api_key_env: ARK_SMALL_MODEL_API_KEY
+  large_model:
+    mode: remote
+    backend: doubao
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    model: doubao-seed-2-0-pro-260215
+    timeout_ms: 60000
+    retries: 0
+    api_key_env: ARK_API_KEY
+agent_model_bindings:
+  planner: large_model
+  PFCAgent: large_model
+  PerspectiveModel: large_model
+  Renderer: large_model
+  SalienceAgent: small_model
+  ValueAgent: small_model
+  BodyStateAgent: state_machine
+  RelationshipAgent: state_machine
+  DesireAgent: state_machine
+  EmotionAgent: state_machine
+  DMNAgent: state_machine
+  UnconsciousAgent: state_machine
+  HippocampusAgent: state_machine
+  ThalamusAttentionAgent: state_machine
+  HabitAgent: state_machine
+  ConflictMonitorAgent: state_machine
+  ResourceAgent: state_machine
+  CerebellarPredictor: state_machine
+  BehaviorPlausibilityGuard: state_machine
+  ForcedModeSwitch: state_machine
+  OutputGate: state_machine
 perspective:
   enabled: true
   risk_threshold: 0.33

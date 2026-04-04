@@ -137,6 +137,36 @@ function describeMode(value: string): string {
   }[value] ?? value;
 }
 
+function formatModelSection(modelStatus: Record<string, unknown> | undefined): string {
+  if (!modelStatus) {
+    return ["模型分层", "  暂无"].join("\n");
+  }
+  const tiers = (modelStatus.tiers as Record<string, Record<string, unknown>> | undefined) ?? {};
+  const bindings = (modelStatus.agent_bindings as Record<string, string> | undefined) ?? {};
+  const tierRows = ["模型分层"];
+  for (const tierName of ["state_machine", "small_model", "large_model"]) {
+    const tier = tiers[tierName] ?? {};
+    const mode = String(tier.mode ?? "unknown");
+    if (mode === "local") {
+      tierRows.push(`  ${tierName}：local`);
+      continue;
+    }
+    const backend = String(tier.backend ?? "unknown");
+    const model = String(tier.model ?? "unconfigured");
+    const credential = Boolean(tier.credential_present) ? "key:ok" : "key:missing";
+    tierRows.push(`  ${tierName}：${backend} / ${model} / ${credential}`);
+  }
+  tierRows.push("");
+  tierRows.push("主要绑定");
+  for (const agentName of ["SalienceAgent", "ValueAgent", "PFCAgent", "PerspectiveModel", "Renderer", "planner"]) {
+    const tier = bindings[agentName];
+    if (tier) {
+      tierRows.push(`  ${agentName} -> ${tier}`);
+    }
+  }
+  return tierRows.join("\n");
+}
+
 export function formatCognitiveSummary(snapshot: CognitiveSnapshotState | null | undefined): string {
   if (!snapshot) {
     return "核心目标\n  暂无";
@@ -178,7 +208,11 @@ export function formatPanelBody(state: UiState, panel: PanelKey): string {
     return toolsSummary(state);
   }
   if (panel === "state") {
-    return formatCognitiveSummary(state.sidebarSnapshot?.cognitiveSnapshot);
+    const blocks = [
+      formatCognitiveSummary(state.sidebarSnapshot?.cognitiveSnapshot),
+      formatModelSection(state.sidebarSnapshot?.modelStatus),
+    ].filter(Boolean);
+    return blocks.join("\n\n");
   }
   return "";
 }

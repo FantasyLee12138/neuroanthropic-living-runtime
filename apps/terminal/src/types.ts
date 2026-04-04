@@ -69,6 +69,7 @@ export type OutboundBridgeEvent =
       tools?: Array<Record<string, any>>;
       session?: Record<string, unknown>;
       statusline?: Record<string, unknown>;
+      model_status?: Record<string, unknown>;
     }
   | { type: "assistant_final"; session_id?: string; run_id?: string; message: string; payload?: Record<string, unknown> }
   | { type: "error"; session_id?: string; message: string }
@@ -131,6 +132,7 @@ export interface SidebarSnapshotState {
   permissionMode: string;
   pendingApprovalCount: number;
   cognitiveSnapshot: CognitiveSnapshotState;
+  modelStatus?: Record<string, unknown>;
 }
 
 export interface StatusLineState {

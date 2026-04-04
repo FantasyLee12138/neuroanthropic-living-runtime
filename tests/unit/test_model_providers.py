@@ -1,6 +1,7 @@
 import json
 
 from nalr.providers.router import (
+    FakeBackend,
     DeepSeekBackend,
     DoubaoBackend,
     ModelRequest,
@@ -107,6 +108,31 @@ def test_model_router_uses_fake_backend_for_configured_route():
     assert response.payload["text"]
 
 
+def test_model_router_supports_dynamic_route_config_generation():
+    router = ModelRouter({}, backends={"fake": FakeBackend()})
+
+    response = router.generate_config(
+        ModelRouteConfig(
+            name="small_model",
+            backend="fake",
+            model="fake-small",
+            timeout_ms=100,
+            retries=0,
+            enabled=True,
+        ),
+        ModelRequest(
+            system_prompt="You are a scoring model.",
+            user_prompt="Return JSON only.",
+            response_schema={"text": "str"},
+            metadata={"action": "respond"},
+        ),
+    )
+
+    assert response.route == "small_model"
+    assert response.model == "fake-small"
+    assert response.payload["text"]
+
+
 def test_doubao_backend_requires_ark_api_key():
     backend = DoubaoBackend(client_factory=lambda **_: _StubClient())
 
@@ -130,6 +156,45 @@ def test_doubao_backend_requires_ark_api_key():
         assert "ARK_API_KEY" in str(exc)
     else:
         raise AssertionError("expected MissingModelCredentialError")
+
+
+def test_deepseek_backend_uses_route_specific_api_key_env(monkeypatch):
+    stub_client = _StubClient(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"text":"ok"}',
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 4},
+        }
+    )
+    backend = DeepSeekBackend(client_factory=lambda **_: stub_client)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setenv("CUSTOM_SMALL_MODEL_KEY", "small-key")
+
+    response = backend.generate(
+        route=ModelRouteConfig(
+            name="small_model",
+            backend="deepseek",
+            model="deepseek-chat",
+            timeout_ms=300,
+            retries=0,
+            enabled=True,
+            base_url="https://api.deepseek.com",
+            api_key_env="CUSTOM_SMALL_MODEL_KEY",
+        ),
+        request=ModelRequest(
+            system_prompt="You are a scorer.",
+            user_prompt="Return JSON only.",
+            response_schema={"text": "str"},
+        ),
+    )
+
+    assert response.payload["text"] == "ok"
+    assert response.usage["prompt_tokens"] == 12
 
 
 def test_doubao_backend_shapes_openai_responses_request():
@@ -161,6 +226,46 @@ def test_doubao_backend_shapes_openai_responses_request():
     assert stub_client.post_calls[0]["json"]["model"] == "doubao-seed-2-0-pro-260215"
     assert stub_client.post_calls[0]["json"]["input"][0]["role"] == "system"
     assert stub_client.post_calls[0]["json"]["input"][1]["role"] == "user"
+
+
+def test_doubao_endpoint_id_uses_chat_completions_request():
+    stub_client = _StubClient(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"text":"ok"}',
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 9, "completion_tokens": 3},
+        }
+    )
+    backend = DoubaoBackend(client_factory=lambda **_: stub_client)
+
+    response = backend.generate(
+        route=ModelRouteConfig(
+            name="salience_small_model",
+            backend="doubao",
+            model="ep-20260404191810-qfn7s",
+            timeout_ms=300,
+            retries=0,
+            enabled=True,
+        ),
+        request=ModelRequest(
+            system_prompt="You are a small model scorer.",
+            user_prompt='Return {"text":"ok"} only.',
+            response_schema={"text": "str"},
+        ),
+        api_key="test-key",
+    )
+
+    assert response.payload["text"] == "ok"
+    assert response.usage["prompt_tokens"] == 9
+    assert stub_client.post_calls[0]["path"] == "/chat/completions"
+    assert stub_client.post_calls[0]["json"]["model"] == "ep-20260404191810-qfn7s"
+    assert stub_client.post_calls[0]["json"]["messages"][0]["role"] == "system"
+    assert stub_client.post_calls[0]["json"]["messages"][1]["role"] == "user"
 
 
 def test_doubao_backend_parses_structured_json_from_output_text():

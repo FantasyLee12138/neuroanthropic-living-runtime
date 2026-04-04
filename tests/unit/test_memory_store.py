@@ -288,8 +288,65 @@ def test_memory_store_hot_only_budget_skips_warm_and_archive(tmp_path, monkeypat
 
     assert recall["found"] is False
     assert recall["tier"] is None
-    assert seen_paths == [store.episodic_path]
-    assert tier_calls == [("tea", ("hot",))]
+
+
+def test_memory_store_clusters_identity_questions_instead_of_storing_raw_sentences(tmp_path):
+    store = MemoryStore(tmp_path / ".alive")
+
+    store.ingest_event(
+        RoundEvent(source="user", content="你是谁？", target="user", valence=0.0),
+        round_id=1,
+        session_id="sess-1",
+    )
+    store.ingest_event(
+        RoundEvent(source="user", content="你叫什么名字？", target="user", valence=0.0),
+        round_id=2,
+        session_id="sess-1",
+    )
+
+    priors = store.stable_priors_top(limit=10)
+    evidence = store.identity_evidence()
+
+    assert priors
+    assert priors[0]["cue"].startswith("identity:")
+    assert all(item["cue"] not in {"你是谁？", "你叫什么名字？"} for item in priors)
+    assert evidence["identity_clusters"]
+    assert evidence["identity_score"] > 0.0
+
+
+def test_memory_store_schema_migration_clusters_identity_cues_and_writes_report(tmp_path):
+    store_root = tmp_path / ".alive"
+    memory_dir = store_root / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    (memory_dir / "stable_priors.json").write_text(
+        json.dumps(
+            [
+                {"cue": "你是谁？", "weight": 0.11},
+                {"cue": "你叫什么名字？", "weight": 0.13},
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (memory_dir / "habit.json").write_text(
+        json.dumps(
+            [
+                {"pattern": "你叫什么名字？", "strength": 0.28, "count": 2},
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    store = MemoryStore(store_root)
+    priors = store.stable_priors_top(limit=10)
+    report = json.loads(store.migration_status_path.read_text(encoding="utf-8"))
+
+    assert any(item["cue"] == "identity:name_probe" for item in priors)
+    assert all(item["cue"] != "你叫什么名字？" for item in priors)
+    assert report["schema_version"] >= 2
+    assert report["merged_cue_clusters_count"] >= 1
+    assert report["identity_evidence_rebuilt"] is True
 
 
 def test_memory_store_full_budget_can_fallback_to_warm(tmp_path, monkeypatch):

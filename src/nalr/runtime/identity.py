@@ -35,6 +35,13 @@ class IdentityRuntime:
         second_stable = float(stable_priors[1].get("weight", 0.0)) if len(stable_priors) > 1 else 0.0
         top_habit = float(evidence.get("habits", [{}])[0].get("strength", 0.0)) if evidence.get("habits") else 0.0
         top_relation = float(evidence.get("relations", [{}])[0].get("closeness", 0.0)) if evidence.get("relations") else 0.0
+        identity_score = float(evidence.get("identity_score", 0.0) or 0.0)
+        naming_signal = float(evidence.get("naming_signal", 0.0) or 0.0)
+        continuity_signal = float(evidence.get("continuity_signal", 0.0) or 0.0)
+        if naming_signal >= 0.38 and continuity_signal >= 0.60 and top_relation >= 0.45:
+            return True
+        if identity_score >= 0.52 and naming_signal >= 0.28 and continuity_signal >= 0.48:
+            return True
         if top_stable < float(thresholds.get("top_stable_prior", 0.18)):
             return False
         return (

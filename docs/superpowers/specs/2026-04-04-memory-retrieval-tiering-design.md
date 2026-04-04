@@ -1,5 +1,30 @@
 # 记忆检索分层优化设计
 
+## Status
+
+- 状态：`historical_design`
+- 当前结论：主设计目标大体已落地，但这份文档不再是当前 memory 行为的唯一准绳
+
+哪些已经落地：
+
+- controller 会按显著性传入 memory retrieval budget
+- `MemoryStore.recall()` / `recall_strength()` 共享 tier-aware 检索语义
+- tier budget 已进入测试覆盖
+- 检索结果已带本地缓存，重复查询不会每次都重扫底层 tier
+
+哪些地方已经与原设计稿不完全一致：
+
+- 当前实现的缓存键和适用范围以实际代码为准，不应再机械理解为只覆盖文中举例的最小 hot-only 形态
+- 当前 memory 规格已经同时纳入 cue 清洗、identity cue 聚类和 migration 摘要，这些内容不在本文最初范围内
+
+现在如果要确认真实行为，应优先看：
+
+- `src/nalr/memory/store.py`
+- `src/nalr/runtime/controller.py`
+- `tests/unit/test_memory_store.py`
+- `tests/unit/test_runtime_controller.py`
+- `docs/specs/memory-cue-migration-and-compaction.md`
+
 ## 背景
 
 当前运行时在构建 memory context 时会直接调用 `MemoryStore.recall()` 和 `MemoryStore.recall_strength()`。这两条路径都会按 `hot -> warm -> archive` 顺序读取记忆层，且没有进程内缓存。对低显著性输入而言，这会让本可在 `hot` 层完成的查询仍然支付跨层检索成本，也会让同一 `cue` 的重复查询反复执行底层扫描。

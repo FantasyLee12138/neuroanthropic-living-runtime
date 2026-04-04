@@ -429,10 +429,16 @@ class TraceStore:
         )
         self._round_cache[int(payload["round_id"])] = copy.deepcopy(payload)
         self._skill_cache.extend(copy.deepcopy(payload.get("skill_traces", [])))
+        if payload.get("skill_traces", []):
+            with self.skill_jsonl_path.open("a", encoding="utf-8") as handle:
+                for row in payload["skill_traces"]:
+                    handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
         def write() -> None:
             path = self.rounds_dir / f"round_{trace.round_id}.json"
             path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            with self.rounds_jsonl_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
             self._append_dataset_rows(
                 self.round_canonical_dir,
                 self._round_canonical_rows(payload),

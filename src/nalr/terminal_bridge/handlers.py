@@ -308,10 +308,10 @@ class TerminalEventHandler:
                 ),
             ]
         if command_name == "model":
-            routes = self.controller.config["models"]["model_routes"]
+            model_status = self.controller.model_status()
             return [
                 self._build_sidebar_snapshot_event(session, run_id=run_id),
-                build_outbound_event("assistant_final", session_id=session_id, message=self._model_summary(routes)),
+                build_outbound_event("assistant_final", session_id=session_id, message=self._model_summary(model_status)),
             ]
         if command_name == "dream":
             cue = value_text or None
@@ -509,15 +509,27 @@ class TerminalEventHandler:
             rows.append(f"{name}: {summary}")
         return f"最近工具：{'；'.join(rows)}"
 
-    def _model_summary(self, routes: dict[str, Any]) -> str:
-        enabled = [
-            f"{name}: {route.get('model') or '未配置'}"
-            for name, route in routes.items()
-            if route.get("enabled", False)
-        ]
-        if not enabled:
-            return "当前没有启用的模型路由。"
-        return "已启用模型路由：\n" + "\n".join(enabled)
+    def _model_summary(self, model_status: dict[str, Any]) -> str:
+        tiers = dict(model_status.get("tiers", {}))
+        bindings = dict(model_status.get("agent_bindings", {}))
+        rows = ["模型分层："]
+        for tier_name in ("state_machine", "small_model", "large_model"):
+            tier = dict(tiers.get(tier_name, {}))
+            mode = str(tier.get("mode", "unknown"))
+            if mode == "local":
+                rows.append(f"{tier_name}: local")
+                continue
+            rows.append(
+                f"{tier_name}: {tier.get('backend') or 'unknown'} / "
+                f"{tier.get('model') or 'unconfigured'} / "
+                f"{'key:ok' if tier.get('credential_present') else 'key:missing'}"
+            )
+        rows.append("")
+        rows.append("主要 agent 绑定：")
+        for agent_name in ("SalienceAgent", "ValueAgent", "PFCAgent", "PerspectiveModel", "Renderer", "planner"):
+            if agent_name in bindings:
+                rows.append(f"{agent_name} -> {bindings[agent_name]}")
+        return "\n".join(rows)
 
     def _sidebar_snapshot(self, session: TerminalSessionState, *, run_id: str | None = None) -> dict[str, Any]:
         run_payload = self.controller.run_status(run_id) if run_id else None
@@ -551,6 +563,7 @@ class TerminalEventHandler:
             state=runtime_state,
             run_payload=run,
         )
+        model_status = self.controller.model_status()
         goal_summary = str((explain or {}).get("goal_summary") or (run or {}).get("goal_summary") or (run or {}).get("goal") or "暂无")
         current_step_title = str(current_step.get("title") or "暂无")
         reason_summary = str(current_step.get("expected_observation") or current_step.get("detail") or "先收集当前任务最直接的上下文。")
@@ -583,6 +596,7 @@ class TerminalEventHandler:
                 "pending_count": len(pending),
                 "pending": pending,
             },
+            "model_status": model_status,
             "statusline": self._build_statusline(session, run_id=run_id, run=run),
         }
 
@@ -604,13 +618,14 @@ class TerminalEventHandler:
         }
 
     def _model_label(self) -> str:
-        routes = self.controller.config["models"]["model_routes"]
-        enabled = [
-            f"{name}:{route.get('model') or 'unconfigured'}"
-            for name, route in routes.items()
-            if route.get("enabled", False)
-        ]
-        return enabled[0] if enabled else "default"
+        model_status = self.controller.model_status()
+        tiers = dict(model_status.get("tiers", {}))
+        small = dict(tiers.get("small_model", {}))
+        large = dict(tiers.get("large_model", {}))
+        return (
+            f"small:{small.get('model') or 'off'} "
+            f"large:{large.get('model') or 'off'}"
+        )
 
     def _build_sidebar_snapshot_event(
         self,

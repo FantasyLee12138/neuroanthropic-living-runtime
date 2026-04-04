@@ -74,6 +74,40 @@ idle / sleep
 - `alive` / observer 补齐了 counterfactual 与维护接口：`trace compact`、`why this`、`why not`、`what changed`、`eval longrun`、`/metrics/entropy`、`/metrics/timeline`、`/metrics/heatmap`、`/replay/{round_id}`、`/why-not/{round_id}/{action}`。
 - 本轮补验已重新跑通：`tests/unit/test_dream_runtime.py`、`tests/integration/test_dream_bridge_stdio.py`、`tests/longrun/test_authenticity_acceptance.py`、`tests/unit/test_terminal_bridge.py`、`tests/integration/test_nalr_terminal.py`，共 `24 passed`；同时 `npm --prefix apps/terminal test` 与 `npm --prefix apps/terminal run build` 是当前终端侧的标准验证集。
 
+### 2026-04-04（人格-生命体征-表达闭环重建补充）
+
+- 聊天态与任务执行态正式分层：`RuntimeController` 在对话回合会剥离 `active_run_id / current_goal / pending_steps`，避免 paused / stale run 持续污染 `PFCAgent` 的聊天推理。
+- 新增 appraisal layer：自然语言会被补成 `semantic_valence / semantic_arousal / fatigue_push / inferred_energy_delta / identity_salience / relation_charge`，即使用户没有显式传 `valence` 和 `energy_delta`，`mood / body_energy / affect_residue` 也会变化。
+- `RoundTrace` 和 `why` 新增诊断字段：`appraisal_snapshot`、`state_delta_before_clip`、`state_delta_after_clip`、`delta_suppression_reason`、`run_context`、`run_contamination_detected`、`identity_evidence_score`、`identity_trigger_blockers`、`temperament_window_summary`。
+- cue 归一化已重做：身份询问会聚类到 `identity:self_probe`、`identity:name_probe`、`identity:name_origin`，控制字符、终端残片、整句问话不再直接进入 stable prior / alias。
+- `IdentityRuntime` 现在会消费 `identity_score / naming_signal / continuity_signal`；多轮“你是谁 / 你叫什么 / 给自己起名字 / 为什么叫这个名字”之后可以生成稳定 `display_name`。
+- `UnconsciousAgent.apply_chronic_shift` 已改成窗口化慢变量：会综合最近 20 轮的正负情绪、关系趋近/疏离、重复否定/确认、资源压力持续时间、identity cue 重复次数，并输出 `delta_reason / window_support / suppressed_by_clip / freeze_reason`。
+- runtime / memory 都加了 schema migration：旧 `.alive` 中污染的 alias 和 identity cue 会在启动时被清洗、重聚类，并写出迁移报告。
+- observer 新增专门诊断接口：`/diagnostics/state-delta`、`/diagnostics/identity-blockers`、`/diagnostics/cue-fragmentation`、`/diagnostics/run-contamination`、`/diagnostics/why-no-change/{round_ref}`、`/diagnostics/migration`。
+- 本轮验证已补跑：`tests/unit` 全集 `164 passed`；observer 相关集成测试 `12 passed`。
+
+## 当前闭环状态
+
+当前仓库已经不再停留在“skill/agent 有没有被调用”的排查阶段。就 2026-04-04 这轮重建后的状态而言，已经形成了下面这条可观测主链：
+
+```text
+用户输入 / 事件
+-> appraisal
+-> 当前轮状态更新（mood / energy / affect）
+-> cue / memory / relation 写入
+-> chronic signal 窗口化累积
+-> identity evidence / naming signal
+-> expression plan / renderer
+-> trace / observer diagnostics
+```
+
+这意味着现在如果再出现“为什么没有变化”，默认不再需要先猜测是不是 agent 没调到，而应该先看诊断链路里到底是：
+
+- `not_called`
+- `called_neutral`
+- `updated_but_clipped`
+- `updated_but_not_expressed`
+
 ### 2026-04-03
 
 - 新增 `./alive` 启动脚本，支持自动加载仓库根目录 `.env.local` / `.env`，`config/models.yaml` 成为 PFC、Perspective、renderer 的模型路由默认入口。
@@ -285,6 +319,12 @@ GET /metrics/mode-switches
 GET /analysis/ablation
 GET /replay/{round_id}
 GET /why-not/{round_id}/{action}
+GET /diagnostics/state-delta
+GET /diagnostics/identity-blockers
+GET /diagnostics/cue-fragmentation
+GET /diagnostics/run-contamination
+GET /diagnostics/why-no-change/{round_ref}
+GET /diagnostics/migration
 GET /dashboard
 ```
 
@@ -298,6 +338,13 @@ GET /dashboard
 .venv/bin/python -m pytest -q tests/unit/test_runtime_controller.py tests/unit/test_terminal_bridge.py tests/unit/test_dream_runtime.py tests/integration/test_observer_api.py tests/integration/test_terminal_bridge_stdio.py tests/integration/test_nalr_terminal.py tests/integration/test_dream_bridge_stdio.py tests/longrun/test_authenticity_acceptance.py
 npm --prefix apps/terminal test
 npm --prefix apps/terminal run build
+```
+
+2026-04-04 闭环重建后的核心验证集：
+
+```bash
+.venv/bin/pytest tests/unit -q
+PYTHONPATH=/Users/fantasylee/类脑架构 .venv/bin/pytest tests/integration/test_observer_api.py tests/integration/test_observer_diagnostics.py -q
 ```
 
 类型化运行时 / trace / CIL 的最小验证集：
@@ -322,12 +369,27 @@ npm --prefix apps/terminal run build
 - dream 侧车已经接入 `idle/sleep` 塑形、trace 和 observer，但仍属于慢变量与长期运行链路的一部分，不是独立的对话主调度器。
 - `tests/longrun/test_longrun_smoke.py` 仍被视为单独 soak gate；当前分支的声明是“聚焦验证 + 有界长跑验收已收口”，不是“全仓长跑已重新跑完”。
 
+## 后续待做
+
+- 表达层继续增强：把 `mood band / energy band / affect residue band / identity continuity state / relation drift band` 更强地映射到 opening、pacing、disclosure、directness，让用户主观上更容易感到“现在和刚才不一样”。
+- renderer 提示词与 fallback renderer 继续分流自我回答路径，明确区分“我是谁 / 为什么这样回答 / 为什么叫这个名字”，避免退回固定模板。
+- dashboard 侧把新诊断字段可视化，至少补上 state delta timeline、identity blockers、run contamination、why-no-change 视图，不只停留在 API 可读。
+- `.alive` 迁移继续扩展到 relation / habit / legacy memory 的更细粒度清洗报告，目前已经有 schema version 和聚类/清洗统计，但还没有更细的逐类迁移清单。
+- chronic drift 还需要更长窗口和更严格验收，尤其是 warm confirmation、长期资源压力、identity cue 重复对不同 temperament 维度的差异化影响。
+- observer / CLI 诊断解释还可以继续细化，例如把 `no_appraisal_input`、`delta_clipped`、`expression_threshold_not_met` 和 `identity_evidence_insufficient` 的修复建议直接写到输出里。
+- 重型 soak 与长跑验收还没重开；当前结论仍然是“短中程验证通过”，不是“超长程演化稳定性已证明”。
+
 ## 关键文档
 
 - [开发文档 v0.56](./开发文档v0.56.md)：当前对齐的总规格文档。
+- [Specs Index](./docs/specs/README.md)：当前生效规格、历史设计稿与建议拆分点的入口。
 - [架构总览](./docs/architecture/overview.md)：运行时边界、skill 调用链和 observer 读取模型。
 - [v0.56 验收矩阵](./v056_acceptance_matrix.md)：按规格项对照代码、测试和 trace 证据的保守验收表。
 - [冲突控制器规格](./docs/specs/conflict-controller-v056.md)：冲突分项、优先级链、重采样、妥协模板和 repair FSM。
-- [Parquet / 记忆压缩说明](./docs/specs/parquet-trace-memory-compaction.md)：trace 导出和记忆压缩维护路径。
+- [Trace Canonical Storage](./docs/specs/trace-canonical-storage.md)：canonical trace、Parquet live read 和 observer 读取模型。
+- [Memory Cue / Migration / Compaction](./docs/specs/memory-cue-migration-and-compaction.md)：cue 归一化、memory compaction 与 `.alive` 迁移摘要。
+- [Runtime Appraisal / State Evolution](./docs/specs/runtime-appraisal-and-state-evolution.md)：appraisal、状态更新、identity 证据与 why-no-change 诊断闭环。
+- [Observer Diagnostics / Blockers](./docs/specs/observer-diagnostics-and-blockers.md)：diagnostics API 输出、blocker 分类与 dashboard 目标视图。
+- [Project Mindmap](./docs/architecture/project-mindmap.md)：当前项目结构与主链路的思维导图。
 - [typed skill runtime 设计决策](./docs/decisions/0002-typed-skill-runtime-validator.md)：类型化校验器、权限边界和熔断器设计。
 - [梦境侧车集成方案](./oneiroi_agent_codex_plan.md)：dream 侧车的目标、接口、预算和 proposal 设计。

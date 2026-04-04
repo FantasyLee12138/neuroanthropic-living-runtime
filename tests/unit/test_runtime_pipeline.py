@@ -37,6 +37,8 @@ def test_tick_records_v056_pipeline_stages(tmp_path):
         "hippocampus",
         "perspective",
         "value",
+        "unconscious",
+        "cerebellar",
         "conflict",
         "thalamus",
         "plausibility_guard",

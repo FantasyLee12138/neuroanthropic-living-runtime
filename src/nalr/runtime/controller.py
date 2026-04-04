@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import math
 import os
 import shutil
 import subprocess
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -20,7 +21,7 @@ from nalr.dream.orchestrator import DreamOrchestrator
 from nalr.memory.store import MemoryStore, _derive_cue
 from nalr.output.renderer import fallback_render_text
 from nalr.output.style import build_expression_profile, build_render_plan, compute_style_profile
-from nalr.providers import MissingModelCredentialError, ModelRequest, ModelRouter
+from nalr.providers import MissingModelCredentialError, ModelRequest, ModelRouteConfig, ModelRouter
 from nalr.run import SupervisorLoop
 from nalr.runtime.model_gateway import ModelGateway
 from nalr.runtime.async_io import AsyncIOWorker
@@ -59,6 +60,7 @@ from nalr.schemas.models import (
     RoundTrace,
     RuntimeState,
     QueryIntentState,
+    SkillResult,
     SkillRuntimeContext,
     StopReason,
     StochasticState,
@@ -94,6 +96,8 @@ PIPELINE_ORDER: list[tuple[str, tuple[str, ...]]] = [
     ("hippocampus", ("HippocampusAgent",)),
     ("perspective", ("PerspectiveModel",)),
     ("value", ("ValueAgent",)),
+    ("unconscious", ("UnconsciousAgent",)),
+    ("cerebellar", ("CerebellarPredictor",)),
     ("conflict", ("ConflictMonitorAgent",)),
     ("thalamus", ("ThalamusAttentionAgent",)),
     ("plausibility_guard", ("BehaviorPlausibilityGuard",)),
@@ -115,6 +119,7 @@ MODEL_ROUTE_SKILL_BINDINGS: dict[str, tuple[str, ...]] = {
 }
 
 ARCHITECTURE_CORE_GOAL = "维持生命性、真实性与连续性"
+RUNTIME_SCHEMA_VERSION = 2
 
 
 class RuntimeController:
@@ -125,6 +130,7 @@ class RuntimeController:
         self.runtime_dir = self.home_path / "runtime"
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         self.state_path = self.runtime_dir / "persona_state.json"
+        self.runtime_migration_status_path = self.runtime_dir / "runtime_migration_status.json"
         self.runtime_parquet_dir = self.runtime_dir / "parquet"
         self.state_parquet_path = self.runtime_parquet_dir / "persona_state.parquet"
         self.checkpoint_dir = self.runtime_dir / "checkpoints"
@@ -202,6 +208,7 @@ class RuntimeController:
             self._save_state(initial_state, sync=True)
         else:
             self._state_cache = self.load_runtime_state()
+        self._migrate_runtime_schema_if_needed()
 
     def _load_config(self) -> dict[str, Any]:
         def read_yaml(name: str) -> dict[str, Any]:
@@ -277,6 +284,60 @@ class RuntimeController:
             self._state_cache = RuntimeState(**payload)
         return RuntimeState(**to_dict(self._state_cache))
 
+    def _runtime_migration_status(self) -> dict[str, Any]:
+        if not self.runtime_migration_status_path.exists():
+            return {}
+        try:
+            payload = json.loads(self.runtime_migration_status_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _migrate_runtime_schema_if_needed(self) -> None:
+        status = self._runtime_migration_status()
+        if int(status.get("schema_version", 0) or 0) >= RUNTIME_SCHEMA_VERSION:
+            return
+
+        payload: dict[str, Any] = {}
+        if self.state_parquet_path.exists():
+            rows = read_snapshot_rows(self.state_parquet_path, "select payload_json from read_parquet(?)")
+            if rows:
+                payload = json.loads(rows[0]["payload_json"])
+        elif self.state_path.exists():
+            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+
+        raw_identity = dict(payload.get("identity_state", {})) if isinstance(payload.get("identity_state", {}), dict) else {}
+        raw_aliases = list(raw_identity.get("aliases", [])) if isinstance(raw_identity.get("aliases", []), list) else []
+        migrated_state = RuntimeState(**payload) if payload else self.load_runtime_state()
+        removed_aliases_count = max(0, len(raw_aliases) - len(migrated_state.identity_state.aliases))
+        if payload:
+            self._save_state(migrated_state, sync=True)
+        else:
+            self._state_cache = RuntimeState(**to_dict(migrated_state))
+        report = {
+            **status,
+            "schema_version": RUNTIME_SCHEMA_VERSION,
+            "migrated_at": utc_now_iso(),
+            "removed_aliases_count": removed_aliases_count,
+            "preserved_memory_count": self.memory_store.migration_report().get("preserved_memory_count", 0),
+            "identity_evidence_rebuilt": True,
+        }
+        self.runtime_migration_status_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def runtime_migration_report(self) -> dict[str, Any]:
+        runtime_status = self._runtime_migration_status()
+        memory_status = self.memory_store.migration_report()
+        return {
+            "runtime": {
+                "schema_version": int(runtime_status.get("schema_version", 0) or 0),
+                "removed_aliases_count": int(runtime_status.get("removed_aliases_count", 0) or 0),
+                "preserved_memory_count": int(runtime_status.get("preserved_memory_count", 0) or 0),
+                "identity_evidence_rebuilt": bool(runtime_status.get("identity_evidence_rebuilt", False)),
+                "migrated_at": runtime_status.get("migrated_at"),
+            },
+            "memory": memory_status,
+        }
+
     def flush_pending_io(self, *, raise_on_error: bool = False) -> None:
         self._state_io.flush(raise_on_error=raise_on_error)
         self.memory_store.flush(raise_on_error=raise_on_error)
@@ -316,6 +377,7 @@ class RuntimeController:
             "correction_window": dict(state.temperament_state.get("correction_window", {})),
             "freeze_until_round": dict(state.temperament_state.get("freeze_until_round", {})),
             "last_correction_events": list(state.temperament_state.get("last_correction_events", [])),
+            "drift_diagnostics": dict(state.temperament_state.get("drift_diagnostics", {})),
         }
         state.temperament_state = normalized
         return normalized
@@ -578,25 +640,39 @@ class RuntimeController:
             weight *= 1.15
         return weight
 
-    def _record_skill_trace(self, bucket: list[dict[str, Any]], round_id: int, result) -> None:
-        bucket.append(
-            {
-                "round_id": round_id,
-                "skill_name": result.skill_name,
-                "owner_module": result.owner_module,
-                "latency_ms": result.latency_ms,
-                "cost_class": result.cost_class,
-                "input_hash": result.input_hash,
-                "output_hash": result.output_hash,
-                "failure_policy_applied": result.failure_policy_applied,
-                "degraded": result.degraded,
-                "seed_ref": result.seed_ref,
-                "fallback_route": result.fallback_route,
-                "fallback_cost_class": result.fallback_cost_class,
-                "policy_rejection_reason": result.policy_rejection_reason,
-                "breaker_state": result.breaker_state,
-            }
-        )
+    def _record_skill_trace(
+        self,
+        bucket: list[dict[str, Any]],
+        round_id: int,
+        result,
+        *,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        row = {
+            "round_id": round_id,
+            "skill_name": result.skill_name,
+            "owner_module": result.owner_module,
+            "latency_ms": result.latency_ms,
+            "cost_class": result.cost_class,
+            "input_hash": result.input_hash,
+            "output_hash": result.output_hash,
+            "failure_policy_applied": result.failure_policy_applied,
+            "degraded": result.degraded,
+            "seed_ref": result.seed_ref,
+            "fallback_route": result.fallback_route,
+            "fallback_cost_class": result.fallback_cost_class,
+            "policy_rejection_reason": result.policy_rejection_reason,
+            "breaker_state": result.breaker_state,
+            "parallel_group": getattr(result, "parallel_group", None),
+            "agent_tier": getattr(result, "agent_tier", None),
+            "task_priority": getattr(result, "task_priority", None),
+            "task_outcome": getattr(result, "task_outcome", None),
+            "task_type": getattr(result, "task_type", None),
+            "timeout_ms": getattr(result, "timeout_ms", None),
+        }
+        if extra:
+            row.update(extra)
+        bucket.append(row)
 
     def _runtime_skill_inputs(
         self,
@@ -611,6 +687,210 @@ class RuntimeController:
             "scenario": scenario_cfg,
             "context": context,
         }
+
+    def _looks_like_task_followup(self, text: str) -> bool:
+        lowered = text.lower()
+        task_tokens = (
+            "repo",
+            "code",
+            "file",
+            "files",
+            "test",
+            "tests",
+            "fix",
+            "debug",
+            "implement",
+            "continue",
+            "next step",
+            "run",
+            "branch",
+            "commit",
+            "仓库",
+            "代码",
+            "文件",
+            "测试",
+            "修复",
+            "实现",
+            "继续做",
+            "下一步",
+        )
+        return any(token in lowered for token in task_tokens)
+
+    def _sanitize_execution_state(self, state: RuntimeState) -> RuntimeState:
+        sanitized = RuntimeState(**to_dict(state))
+        sanitized.active_run_id = None
+        sanitized.run_status = "idle"
+        sanitized.run_mode = None
+        sanitized.current_goal = None
+        sanitized.current_step_id = None
+        sanitized.pending_steps = []
+        sanitized.completed_steps = []
+        sanitized.last_tool_result = {}
+        sanitized.stop_reason = {}
+        sanitized.dirty_worktree_detected = False
+        return sanitized
+
+    def _state_for_reasoning(
+        self,
+        state: RuntimeState,
+        event: RoundEvent,
+        scenario: str,
+        requested_mode: str,
+    ) -> tuple[RuntimeState, dict[str, Any]]:
+        has_active_run = bool(state.active_run_id and state.run_status in {"running", "paused"})
+        if requested_mode in {"idle", "sleep"}:
+            drive_source = "noninteractive_shaping"
+        elif scenario == "task":
+            drive_source = "active_task" if has_active_run else "user_input"
+        elif has_active_run and self._looks_like_task_followup(event.content):
+            drive_source = "mixed"
+        else:
+            drive_source = "user_input"
+        contamination_detected = bool(has_active_run and scenario != "task" and drive_source == "user_input")
+        reasoning_state = self._sanitize_execution_state(state) if contamination_detected else RuntimeState(**to_dict(state))
+        run_context = {
+            "active_run_id": state.active_run_id,
+            "run_status": state.run_status,
+            "current_goal": state.current_goal,
+            "drive_source": drive_source,
+            "execution_state_visible": not contamination_detected,
+        }
+        return reasoning_state, {"run_context": run_context, "run_contamination_detected": contamination_detected}
+
+    def _infer_appraisal(
+        self,
+        event: RoundEvent,
+        state: RuntimeState,
+        *,
+        scenario: str,
+        requested_mode: str,
+        closeness: float,
+    ) -> dict[str, Any]:
+        lowered = event.content.lower()
+        negative_tokens = ("难过", "伤心", "失望", "烦", "糟", "痛苦", "sad", "upset", "hurt", "tired of")
+        positive_tokens = ("开心", "高兴", "轻松", "喜欢", "安心", "happy", "glad", "relieved")
+        fatigue_tokens = ("累", "困", "疲惫", "想睡", "睡了", "休息", "tired", "sleepy", "exhausted")
+        load_tokens = ("忙", "好多", "压力", "撑不住", "难", "复杂", "overwhelmed", "busy", "hard")
+        identity_tokens = ("你是谁", "你叫什么", "名字", "name", "who are you", "what are you")
+        relation_tokens = ("记得我", "不记得我", "在乎", "陪我", "remember me", "forget me")
+
+        semantic_valence = 0.0
+        if any(token in lowered for token in negative_tokens):
+            semantic_valence -= 0.42
+        if any(token in lowered for token in positive_tokens):
+            semantic_valence += 0.34
+        semantic_valence += (closeness - 0.5) * 0.08
+
+        fatigue_push = 0.62 if any(token in lowered for token in fatigue_tokens) else 0.0
+        cognitive_load = 0.55 if any(token in lowered for token in load_tokens) else 0.0
+        semantic_arousal = _clip(abs(semantic_valence) * 0.7 + cognitive_load * 0.35 + fatigue_push * 0.2, 0.0, 1.0)
+        social_approach_pull = _clip(0.35 + closeness * 0.4 + max(semantic_valence, 0.0) * 0.2, 0.0, 1.0)
+        inferred_energy_delta = -0.16 * fatigue_push - 0.08 * cognitive_load + max(semantic_valence, 0.0) * 0.04
+        identity_salience = 0.78 if any(token in lowered for token in identity_tokens) else 0.0
+        relation_charge = _clip((closeness - 0.5) * 0.6 + semantic_valence * 0.45, -1.0, 1.0)
+        if any(token in lowered for token in relation_tokens):
+            relation_charge = _clip(relation_charge - 0.12 if semantic_valence < 0 else relation_charge + 0.12, -1.0, 1.0)
+
+        mood_band = "low" if state.mood + semantic_valence * 0.08 < 0.42 else "high" if state.mood + semantic_valence * 0.08 > 0.68 else "steady"
+        energy_band = "low" if state.body_energy + inferred_energy_delta < 0.38 else "high" if state.body_energy + inferred_energy_delta > 0.72 else "steady"
+        appraisal_band = "charged" if semantic_arousal > 0.58 else "muted" if abs(semantic_valence) < 0.08 and fatigue_push == 0.0 else "engaged"
+        return {
+            "semantic_valence": round(semantic_valence, 4),
+            "semantic_arousal": round(semantic_arousal, 4),
+            "social_approach_pull": round(social_approach_pull, 4),
+            "cognitive_load": round(cognitive_load, 4),
+            "fatigue_push": round(fatigue_push, 4),
+            "inferred_energy_delta": round(inferred_energy_delta, 4),
+            "identity_salience": round(identity_salience, 4),
+            "relation_charge": round(relation_charge, 4),
+            "mood_band": mood_band,
+            "energy_band": energy_band,
+            "appraisal_band": appraisal_band,
+            "scenario": scenario,
+            "mode": requested_mode,
+        }
+
+    def _build_chronic_signal(
+        self,
+        event: RoundEvent,
+        *,
+        state: RuntimeState,
+        context: dict[str, Any],
+        relation_state: dict[str, Any],
+        scenario: str,
+        window: int = 20,
+    ) -> dict[str, Any]:
+        recent = self.trace_store.list_rounds()[-window:]
+        appraisal = dict(context.get("appraisal", {}))
+        valences = [
+            float(trace.get("appraisal_snapshot", {}).get("semantic_valence", 0.0) or 0.0)
+            for trace in recent
+        ]
+        valences.append(float(appraisal.get("semantic_valence", 0.0) or 0.0))
+        relation_charges = [
+            float(trace.get("appraisal_snapshot", {}).get("relation_charge", 0.0) or 0.0)
+            for trace in recent
+        ]
+        relation_charges.append(float(appraisal.get("relation_charge", 0.0) or 0.0))
+        closeness_series = [
+            float(trace.get("vitality_snapshot", {}).get("relationship_closeness", 0.5) or 0.5)
+            for trace in recent
+        ]
+        closeness_series.append(float(relation_state.get("closeness", 0.5) or 0.5))
+        resource_series = [
+            float(trace.get("vitality_snapshot", {}).get("resource_scarcity", 0.0) or 0.0)
+            for trace in recent
+        ]
+        resource_series.append(float(state.resource_state.get("scarcity_index", 0.0) or 0.0))
+        identity_salience = [
+            float(trace.get("appraisal_snapshot", {}).get("identity_salience", 0.0) or 0.0)
+            for trace in recent
+        ]
+        identity_salience.append(float(appraisal.get("identity_salience", 0.0) or 0.0))
+        recent_noninteractive = sum(
+            1
+            for trace in recent[-6:]
+            if any(item.get("non_interactive") for item in trace.get("vitality_events", []))
+        )
+        resource_stress_span = 0
+        for value in reversed(resource_series):
+            if value >= 0.45:
+                resource_stress_span += 1
+                continue
+            break
+        rejection_count = sum(1 for charge in relation_charges if charge <= -0.12)
+        confirmation_count = sum(1 for charge in relation_charges if charge >= 0.12)
+        relation_trend = (
+            round(closeness_series[-1] - closeness_series[0], 4)
+            if len(closeness_series) >= 2
+            else 0.0
+        )
+        return {
+            "window_size": len(recent) + 1,
+            "avg_positive_valence": round(sum(max(value, 0.0) for value in valences) / max(len(valences), 1), 4),
+            "avg_negative_valence": round(sum(abs(min(value, 0.0)) for value in valences) / max(len(valences), 1), 4),
+            "relation_trend": relation_trend,
+            "repeated_rejection_count": rejection_count,
+            "repeated_confirmation_count": confirmation_count,
+            "resource_stress_span": resource_stress_span,
+            "identity_cue_repeat_count": sum(1 for value in identity_salience if value >= 0.35),
+            "noninteractive_residue": recent_noninteractive,
+            "current_relation_charge": round(float(appraisal.get("relation_charge", 0.0) or 0.0), 4),
+            "scenario": scenario,
+        }
+
+    def _event_with_appraisal(self, event: RoundEvent, appraisal: dict[str, Any]) -> RoundEvent:
+        inferred_valence = float(appraisal.get("semantic_valence", 0.0))
+        inferred_energy_delta = float(appraisal.get("inferred_energy_delta", 0.0))
+        return RoundEvent(
+            source=event.source,
+            content=event.content,
+            target=event.target,
+            cue=event.cue,
+            valence=event.valence if abs(event.valence) > 1e-9 else inferred_valence,
+            energy_delta=event.energy_delta if abs(event.energy_delta) > 1e-9 else inferred_energy_delta,
+            cue_quality=event.cue_quality,
+        )
 
     def _skill_runtime_context(self, round_id: int, scenario: str, state: RuntimeState) -> SkillRuntimeContext:
         return SkillRuntimeContext(
@@ -713,19 +993,23 @@ class RuntimeController:
         return {"detected": bool(entries), "entries": entries[:20], "reason": "ok"}
 
     def _plan_run_via_model(self, goal: str, repo_metadata: dict[str, Any]) -> dict[str, Any]:
-        planner_route = "planner"
-        planner_cfg = self.config["models"]["model_routes"].get(planner_route, {})
-        route_name = planner_route if planner_cfg.get("enabled", False) else "pfc"
-        response = self.model_router.generate(
-            route_name,
-            ModelRequest(
-                system_prompt=(
-                    "你是仓库内自治编码代理的 planner。"
-                    "只返回 JSON，不要解释。"
-                    "你必须给出 goal_summary、next_step、detail、expected_observation、"
-                    "success_criteria、tool_choice、confidence。"
+        planner_cfg = self.config["models"]["model_routes"].get("planner", {})
+        route_name = "planner" if planner_cfg.get("enabled", False) else "pfc"
+        response = self._call_bound_model_route(
+            "planner",
+            route_name=route_name,
+            request=ModelRequest(
+                system_prompt="你是 planner。仅回 JSON:{goal_summary,next_step,detail,expected_observation,success_criteria,tool_choice,confidence}。",
+                user_prompt=self._json_prompt(
+                    {
+                        "goal": goal,
+                        "repo": {
+                            "cwd": repo_metadata.get("cwd"),
+                            "dirty_worktree": bool(repo_metadata.get("dirty_worktree_detected", False)),
+                            "tracked_files": int(repo_metadata.get("tracked_file_count", 0) or 0),
+                        },
+                    }
                 ),
-                user_prompt=self._json_prompt({"goal": goal, "repo_metadata": repo_metadata}),
                 response_schema={
                     "goal_summary": "str",
                     "next_step": "str",
@@ -769,6 +1053,19 @@ class RuntimeController:
 
     def _provider_descriptor_for_route(self, route_name: str = "renderer") -> tuple[str, str]:
         route_cfg = self.config["models"]["model_routes"].get(route_name, {})
+        binding_key = {
+            "planner": "planner",
+            "pfc": "PFCAgent",
+            "perspective": "PerspectiveModel",
+            "renderer": "Renderer",
+        }.get(route_name)
+        if binding_key:
+            resolved_route = self._route_config_for_binding(binding_key, route_name=route_name)
+            if resolved_route is not None:
+                route_cfg = {
+                    "backend": resolved_route.backend,
+                    "model": resolved_route.model,
+                }
         backend = str(route_cfg.get("backend", "model")).lower()
         if backend == "doubao":
             provider_label = "Doubao/Ark route"
@@ -780,6 +1077,407 @@ class RuntimeController:
 
     def _provider_descriptor(self) -> tuple[str, str]:
         return self._provider_descriptor_for_route("renderer")
+
+    def _model_tiers(self) -> dict[str, Any]:
+        return dict(self.config["models"].get("model_tiers", {}))
+
+    def _agent_model_bindings(self) -> dict[str, str]:
+        bindings = self.config["models"].get("agent_model_bindings", {})
+        return {str(key): str(value) for key, value in dict(bindings).items()}
+
+    def _agent_tier(self, binding_key: str) -> str:
+        bindings = self._agent_model_bindings()
+        return bindings.get(binding_key, "state_machine")
+
+    def _tier_config(self, tier_name: str) -> dict[str, Any]:
+        return dict(self._model_tiers().get(tier_name, {}))
+
+    def _route_config_for_binding(self, binding_key: str, *, route_name: str) -> ModelRouteConfig | None:
+        tier_name = self._agent_tier(binding_key)
+        tier_cfg = self._tier_config(tier_name)
+        if not tier_cfg:
+            return None
+        mode = str(tier_cfg.get("mode", "local")).lower()
+        if mode == "local":
+            return None
+        return ModelRouteConfig(
+            name=route_name,
+            backend=str(tier_cfg.get("backend", "")),
+            model=str(tier_cfg.get("model", "")),
+            timeout_ms=int(tier_cfg.get("timeout_ms", 12000)),
+            retries=int(tier_cfg.get("retries", 0)),
+            enabled=bool(tier_cfg.get("enabled", True)),
+            base_url=str(tier_cfg.get("base_url", self.config["models"]["models"].get("base_url", ""))),
+            api_key_env=str(tier_cfg.get("api_key_env", "")).strip() or None,
+        )
+
+    def _record_model_call(
+        self,
+        bucket: list[dict[str, Any]],
+        *,
+        skill_name: str,
+        binding_key: str,
+        route_config: ModelRouteConfig,
+        response,
+        prompt_chars: int,
+        parallel_group: str | None = None,
+    ) -> None:
+        usage = dict(getattr(response, "usage", {}) or {})
+        bucket.append(
+            {
+                "skill_name": skill_name,
+                "binding_key": binding_key,
+                "agent_tier": self._agent_tier(binding_key),
+                "route": response.route,
+                "backend": getattr(response, "backend", route_config.backend),
+                "model": response.model,
+                "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
+                "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
+                "prompt_chars": prompt_chars,
+                "latency_ms": int(getattr(response, "latency_ms", 0) or 0),
+                "parallel_group": parallel_group,
+            }
+        )
+
+    def _call_bound_model_route(
+        self,
+        binding_key: str,
+        *,
+        route_name: str,
+        request: ModelRequest,
+        model_call_traces: list[dict[str, Any]] | None = None,
+        skill_name: str | None = None,
+        parallel_group: str | None = None,
+    ):
+        route_config = self._route_config_for_binding(binding_key, route_name=route_name)
+        if route_config is None:
+            return self.model_router.generate(route_name, request)
+        try:
+            response = self.model_router.generate_config(route_config, request)
+        except MissingModelCredentialError:
+            response = self.model_router.generate(route_name, request)
+        if model_call_traces is not None:
+            self._record_model_call(
+                model_call_traces,
+                skill_name=skill_name or route_name,
+                binding_key=binding_key,
+                route_config=route_config,
+                response=response,
+                prompt_chars=len(request.system_prompt) + len(request.user_prompt),
+                parallel_group=parallel_group,
+            )
+        return response
+
+    def _compact_float(self, value: Any) -> float:
+        return round(float(value or 0.0), 4)
+
+    def _build_state_summary(self, state: RuntimeState) -> dict[str, Any]:
+        return {
+            "mode": state.mode,
+            "safe_mode": state.safe_mode,
+            "focus": state.focus,
+            "body_energy": self._compact_float(state.body_energy),
+            "mood": self._compact_float(state.mood),
+            "affect_residue": self._compact_float(state.affect_residue),
+            "budget_remaining": self._compact_float(state.budget_remaining),
+            "run_status": state.run_status,
+            "current_goal": state.current_goal,
+        }
+
+    def _build_context_summary(self, context: dict[str, Any]) -> dict[str, Any]:
+        keys = (
+            "cue",
+            "closeness",
+            "recall_strength",
+            "interference",
+            "habit_strength",
+            "burn_rate_ratio",
+            "low_balance_ratio",
+            "queue_pressure",
+            "latency_pressure",
+            "detail_threshold",
+        )
+        summary: dict[str, Any] = {}
+        for key in keys:
+            value = context.get(key)
+            if isinstance(value, float):
+                summary[key] = self._compact_float(value)
+            elif isinstance(value, int):
+                summary[key] = value
+            elif value not in {None, ""}:
+                summary[key] = value
+        return summary
+
+    def _build_relation_summary(self, relation_state: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "closeness": self._compact_float(relation_state.get("closeness", 0.0)),
+            "boundary_level": self._compact_float(relation_state.get("boundary_level", 0.0)),
+            "relationship_risk": self._compact_float(relation_state.get("relationship_risk", 0.0)),
+            "privacy_level": self._compact_float(relation_state.get("privacy_level", 0.0)),
+        }
+
+    def _build_event_summary(self, event: RoundEvent) -> dict[str, Any]:
+        return {
+            "content": event.content,
+            "target": event.target,
+            "cue": event.cue,
+            "valence": self._compact_float(event.valence),
+            "energy_delta": self._compact_float(event.energy_delta),
+        }
+
+    def _build_pfc_model_payload(
+        self,
+        event: RoundEvent,
+        state: RuntimeState,
+        scenario: dict[str, Any],
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "event": self._build_event_summary(event),
+            "state_summary": self._build_state_summary(state),
+            "scenario_summary": {
+                "name": scenario.get("name", ""),
+                "pfc_base_share": self._compact_float(scenario.get("pfc_base_share", 0.0)),
+                "delay_tolerance": self._compact_float(scenario.get("delay_tolerance", 0.0)),
+            },
+            "context_summary": self._build_context_summary(context),
+        }
+
+    def _build_perspective_model_payload(
+        self,
+        event: RoundEvent,
+        state: RuntimeState,
+        scenario: dict[str, Any],
+        context: dict[str, Any],
+        relation_state: dict[str, Any],
+        *,
+        action_name: str,
+        output_key: str,
+    ) -> dict[str, Any]:
+        return {
+            "event": self._build_event_summary(event),
+            "state_summary": self._build_state_summary(state),
+            "scenario_summary": {"name": scenario.get("name", "")},
+            "context_summary": self._build_context_summary(context),
+            "relation_state": self._build_relation_summary(relation_state),
+            output_key: action_name,
+        }
+
+    def _build_render_model_payload(self, render_plan: RenderPlan) -> dict[str, Any]:
+        identity = render_plan.identity_context
+        return {
+            "action": render_plan.action,
+            "event_summary": render_plan.event_summary,
+            "target": render_plan.target,
+            "identity": {
+                "display_label": identity.display_label,
+                "class_label": identity.class_label,
+                "query_kind": identity.query_kind,
+                "query_intent": identity.query_intent,
+                "disclosure_detail": identity.disclosure_detail,
+                "disclosure_intent": identity.disclosure_intent,
+            },
+            "relation_state": self._build_relation_summary(render_plan.relation_state),
+            "slow_variables": {
+                key: self._compact_float(value) if isinstance(value, float) else value
+                for key, value in dict(render_plan.message_plan.get("slow_variables", {})).items()
+                if key in {"resource_scarcity", "memory_activation", "relationship_heat", "identity_salience"}
+            },
+            "repair_expression": dict(render_plan.message_plan.get("repair_expression", {})),
+            "safety_constraints": {
+                "gate": self._compact_float(render_plan.safety_constraints.get("gate", 0.0)),
+                "conflict_hot": bool(render_plan.safety_constraints.get("conflict_hot", False)),
+                "winning_priority": render_plan.safety_constraints.get("winning_priority"),
+                "compromise_template": render_plan.safety_constraints.get("compromise_template"),
+                "repair_stage": render_plan.safety_constraints.get("repair_stage"),
+            },
+        }
+
+    def _execute_parallel_skills(
+        self,
+        *,
+        round_id: int,
+        tasks: list[dict[str, Any]],
+        skill_traces: list[dict[str, Any]],
+        runtime_context: SkillRuntimeContext,
+        parallel_traces: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        results: dict[str, Any] = {}
+        if not tasks:
+            return results
+        executor = ThreadPoolExecutor(max_workers=len(tasks))
+        futures: dict[Any, tuple[dict[str, Any], float]] = {}
+        try:
+            for task in tasks:
+                task_type = str(task.get("task_type", "skill" if task.get("skill_name") else "callable"))
+                started = time.perf_counter()
+                if task_type == "skill":
+                    future = executor.submit(
+                        self.skill_executor.run,
+                        round_id=round_id,
+                        skill_name=task["skill_name"],
+                        inputs=task["inputs"],
+                        provider=task["provider"],
+                        fallback_provider=task.get("fallback_provider"),
+                        fallback_value=task.get("fallback_value"),
+                        runtime_context=runtime_context,
+                        seed_ref=task.get("seed_ref"),
+                    )
+                else:
+                    future = executor.submit(
+                        self.skill_executor._invoke_callable,
+                        task["provider"],
+                        dict(task.get("inputs", {})),
+                    )
+                futures[future] = (task, started)
+
+            for future, (task, started) in futures.items():
+                task_type = str(task.get("task_type", "skill" if task.get("skill_name") else "callable"))
+                task_name = str(task["name"])
+                priority = str(task.get("priority", "required"))
+                parallel_group = task.get("parallel_group")
+                agent_tier = task.get("agent_tier")
+                timeout_ms = int(task.get("timeout_ms", 0) or 0)
+                task_outcome = "completed"
+                try:
+                    if timeout_ms > 0:
+                        raw_result = future.result(timeout=max(timeout_ms / 1000.0, 0.001))
+                    else:
+                        raw_result = future.result()
+                except FutureTimeoutError:
+                    task_outcome = "timeout"
+                    output = self._parallel_fallback_output(task)
+                    latency_ms = max(1, timeout_ms or int((time.perf_counter() - started) * 1000))
+                    if task_type == "skill":
+                        result = self._parallel_timeout_skill_result(
+                            round_id=round_id,
+                            task=task,
+                            latency_ms=latency_ms,
+                        )
+                        self._record_skill_trace(
+                            skill_traces,
+                            round_id,
+                            result,
+                            extra={
+                                "parallel_group": parallel_group,
+                                "agent_tier": agent_tier,
+                                "task_priority": priority,
+                                "task_outcome": task_outcome,
+                                "task_type": task_type,
+                                "timeout_ms": timeout_ms,
+                            },
+                        )
+                    results[task_name] = output
+                except Exception:
+                    task_outcome = "fallback"
+                    output = self._parallel_fallback_output(task)
+                    latency_ms = max(1, int((time.perf_counter() - started) * 1000))
+                    if task_type == "skill":
+                        result = self._parallel_timeout_skill_result(
+                            round_id=round_id,
+                            task=task,
+                            latency_ms=latency_ms,
+                            failure_policy="parallel_exception_fallback",
+                        )
+                        self._record_skill_trace(
+                            skill_traces,
+                            round_id,
+                            result,
+                            extra={
+                                "parallel_group": parallel_group,
+                                "agent_tier": agent_tier,
+                                "task_priority": priority,
+                                "task_outcome": task_outcome,
+                                "task_type": task_type,
+                                "timeout_ms": timeout_ms,
+                            },
+                        )
+                    results[task_name] = output
+                else:
+                    latency_ms = max(1, int((time.perf_counter() - started) * 1000))
+                    if task_type == "skill":
+                        output, result = raw_result
+                        result.parallel_group = parallel_group
+                        result.agent_tier = agent_tier
+                        setattr(result, "task_priority", priority)
+                        setattr(result, "task_outcome", "fallback" if result.degraded else "completed")
+                        setattr(result, "task_type", task_type)
+                        setattr(result, "timeout_ms", timeout_ms)
+                        self._record_skill_trace(
+                            skill_traces,
+                            round_id,
+                            result,
+                            extra={
+                                "parallel_group": parallel_group,
+                                "agent_tier": agent_tier,
+                                "task_priority": priority,
+                                "task_outcome": getattr(result, "task_outcome", "completed"),
+                                "task_type": task_type,
+                                "timeout_ms": timeout_ms,
+                            },
+                        )
+                        task_outcome = getattr(result, "task_outcome", "completed")
+                        results[task_name] = output
+                    else:
+                        results[task_name] = raw_result
+                if parallel_traces is not None:
+                    parallel_traces.append(
+                        {
+                            "task_name": task_name,
+                            "task_type": task_type,
+                            "parallel_group": parallel_group,
+                            "task_priority": priority,
+                            "task_outcome": task_outcome,
+                            "timeout_ms": timeout_ms,
+                            "latency_ms": latency_ms,
+                            "agent_tier": agent_tier,
+                        }
+                    )
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+        return results
+
+    def _parallel_fallback_output(self, task: dict[str, Any]) -> Any:
+        fallback_provider = task.get("fallback_provider")
+        if callable(fallback_provider):
+            try:
+                return self.skill_executor._invoke_callable(fallback_provider, dict(task.get("inputs", {})))
+            except Exception:
+                pass
+        if "fallback_value" in task:
+            return task.get("fallback_value")
+        return {}
+
+    def _parallel_timeout_skill_result(
+        self,
+        *,
+        round_id: int,
+        task: dict[str, Any],
+        latency_ms: int,
+        failure_policy: str = "parallel_timeout",
+    ) -> SkillResult:
+        spec = self.skill_executor.registry[str(task["skill_name"])]
+        fallback_output = self._parallel_fallback_output(task)
+        normalized_output = to_dict(fallback_output)
+        return SkillResult(
+            skill_name=str(task["skill_name"]),
+            owner_module=spec.owner_module,
+            output=normalized_output if isinstance(normalized_output, dict) else {"value": normalized_output},
+            latency_ms=max(1, latency_ms),
+            cost_class=spec.cost_class,
+            degraded=True,
+            failure_policy_applied=failure_policy,
+            seed_ref=task.get("seed_ref"),
+            fallback_route=spec.fallback_route.target if spec.fallback_route else None,
+            fallback_cost_class=spec.fallback_route.cost_class if spec.fallback_route else None,
+            breaker_state={},
+            parallel_group=task.get("parallel_group"),
+            agent_tier=task.get("agent_tier"),
+            task_priority=str(task.get("priority", "required")),
+            task_outcome="timeout" if failure_policy == "parallel_timeout" else "fallback",
+            task_type=str(task.get("task_type", "skill")),
+            timeout_ms=int(task.get("timeout_ms", 0) or 0),
+        )
 
     def _unnamed_label(self) -> str:
         return self.identity_runtime.unnamed_label()
@@ -893,6 +1591,37 @@ class RuntimeController:
             relation_state=relation_state,
             prior_closeness=prior_closeness,
         )
+
+    def _build_grounding_capsule(
+        self,
+        *,
+        state: RuntimeState,
+        context: dict[str, Any],
+        relation_state: dict[str, float],
+        slow_variables: dict[str, Any],
+        shaping_events: list[dict[str, Any]],
+        rename_event: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        compact_slow_variables = {
+            key: self._compact_float(value)
+            for key, value in slow_variables.items()
+            if key in {"resource_scarcity", "memory_activation", "relationship_heat", "identity_salience", "relationship_drift"}
+        }
+        state_sources = []
+        if context.get("cue"):
+            state_sources.append("memory_cue")
+        if state.focus:
+            state_sources.append("focus")
+        if rename_event is not None:
+            state_sources.append("identity_rename")
+        state_sources.extend(self.identity_runtime.shaping_sources(shaping_events, slow_variables))
+        return {
+            "state_sources": sorted(set(state_sources)),
+            "state_summary": self._build_state_summary(state),
+            "context_summary": self._build_context_summary(context),
+            "relation_state": self._build_relation_summary(relation_state),
+            "slow_variables": compact_slow_variables,
+        }
 
     def _build_vitality_snapshot(
         self,
@@ -1022,15 +1751,14 @@ class RuntimeController:
         slow_variables = render_plan.message_plan.get("slow_variables", {})
         repair_expression = render_plan.message_plan.get("repair_expression", {})
         lines = [
-            "你是最终表达 renderer。只返回 JSON，不要额外解释。输出 text。",
-            "你必须从当前运行体视角表达，不能把底层 provider 当成本体身份。",
-            f"当前本体标签: {identity.display_label or self._unnamed_label()} / {identity.class_label}.",
-            f"query_kind={identity.query_kind}; disclosure_detail={identity.disclosure_detail}.",
-            f"query_intent={identity.query_intent}; disclosure_intent={identity.disclosure_intent}.",
+            "你是最终表达 renderer。仅回 JSON:{text}。",
+            "必须从当前运行体视角说话；provider 不是本体。",
+            f"本体={identity.display_label or self._unnamed_label()}/{identity.class_label}。",
+            f"q={identity.query_kind};d={identity.disclosure_detail};qi={identity.query_intent};di={identity.disclosure_intent}.",
         ]
         lines.append(f"repair_expression={json.dumps(repair_expression, ensure_ascii=False, sort_keys=True)}。")
         lines.append(
-            "你必须按 repair_expression 组织表达，"
+            "按 repair 组织表达，"
             f"stage={repair_expression.get('stage')}; "
             f"opening_mode={repair_expression.get('opening_mode')}; "
             f"advance_mode={repair_expression.get('advance_mode')}; "
@@ -1097,30 +1825,29 @@ class RuntimeController:
         state: RuntimeState,
         scenario: dict[str, Any],
         context: dict[str, Any],
+        *,
+        model_call_traces: list[dict[str, Any]] | None = None,
     ) -> ProposalBundle:
-        response = self.model_router.generate(
-            "pfc",
-            ModelRequest(
-                system_prompt="你是 PFCAgent。只返回 JSON，不要额外解释。输出 action_preferences、confidence、sigma_scale、reason。",
-                user_prompt=self._json_prompt(
-                    {
-                        "event": to_dict(event),
-                        "state": to_dict(state),
-                        "scenario": scenario,
-                        "context": context,
-                    }
-                ),
-                response_schema={
-                    "action_preferences": "dict[str, float]",
-                    "confidence": "float",
-                    "sigma_scale": "float",
-                    "reason": "str",
-                },
-                metadata={
-                    "scenario": scenario.get("name", ""),
-                    "cue": context.get("cue"),
-                },
-            ),
+        request = ModelRequest(
+            system_prompt="你是 PFCAgent。仅回 JSON:{action_preferences,confidence,sigma_scale,reason}。",
+            user_prompt=self._json_prompt(self._build_pfc_model_payload(event, state, scenario, context)),
+            response_schema={
+                "action_preferences": "dict[str, float]",
+                "confidence": "float",
+                "sigma_scale": "float",
+                "reason": "str",
+            },
+            metadata={
+                "scenario": scenario.get("name", ""),
+                "cue": context.get("cue"),
+            },
+        )
+        response = self._call_bound_model_route(
+            "PFCAgent",
+            route_name="pfc",
+            request=request,
+            model_call_traces=model_call_traces,
+            skill_name="generate_candidates",
         )
         prefs = {
             action: self._clip_delta(float(score))
@@ -1134,7 +1861,35 @@ class RuntimeController:
             sigma_scale=_clip(float(response.payload.get("sigma_scale", 0.92)), 0.60, 1.60),
             trace_tags=["pfc", "model"],
             reason=str(response.payload.get("reason", f"model route={response.route}")),
+            provider=self._provider_descriptor_for_route("pfc")[0],
+            model=response.model,
+            backend=getattr(response, "backend", ""),
+            latency_ms=int(getattr(response, "latency_ms", 0) or 0),
+            prompt_tokens=int(getattr(response, "usage", {}).get("prompt_tokens", 0) or 0),
+            completion_tokens=int(getattr(response, "usage", {}).get("completion_tokens", 0) or 0),
+            agent_tier=self._agent_tier("PFCAgent"),
         )
+
+    def _invoke_pfc_model_generator(
+        self,
+        event: RoundEvent,
+        state: RuntimeState,
+        scenario: dict[str, Any],
+        context: dict[str, Any],
+        *,
+        model_call_traces: list[dict[str, Any]] | None = None,
+    ) -> ProposalBundle:
+        generator = self._generate_pfc_candidates_via_model
+        parameters = inspect.signature(generator).parameters
+        if "model_call_traces" in parameters:
+            return generator(
+                event,
+                state,
+                scenario,
+                context,
+                model_call_traces=model_call_traces,
+            )
+        return generator(event, state, scenario, context)
 
     def _should_run_late_perspective(
         self,
@@ -1162,28 +1917,37 @@ class RuntimeController:
         context: dict[str, Any],
         sampled_action: str,
         relation_state: dict[str, Any],
+        *,
+        model_call_traces: list[dict[str, Any]] | None = None,
+        parallel_group: str | None = None,
     ) -> dict[str, Any]:
-        response = self.model_router.generate(
-            "perspective",
-            ModelRequest(
-                system_prompt="你负责推断对方当前状态。只返回 JSON，不要额外解释。输出 state_hypothesis。",
-                user_prompt=self._json_prompt(
-                    {
-                        "event": to_dict(event),
-                        "state": to_dict(state),
-                        "scenario": scenario,
-                        "context": context,
-                        "sampled_action": sampled_action,
-                        "relation_state": relation_state,
-                    }
-                ),
-                response_schema={"state_hypothesis": "dict"},
-                metadata={
-                    "sampled_action": sampled_action,
-                    "closeness": context.get("closeness", 0.5),
-                    "relationship_risk": relation_state.get("relationship_risk", 0.0),
-                },
+        request = ModelRequest(
+            system_prompt="推断对方状态。仅回 JSON:{state_hypothesis}。",
+            user_prompt=self._json_prompt(
+                self._build_perspective_model_payload(
+                    event,
+                    state,
+                    scenario,
+                    context,
+                    relation_state,
+                    action_name=sampled_action,
+                    output_key="sampled_action",
+                )
             ),
+            response_schema={"state_hypothesis": "dict"},
+            metadata={
+                "sampled_action": sampled_action,
+                "closeness": context.get("closeness", 0.5),
+                "relationship_risk": relation_state.get("relationship_risk", 0.0),
+            },
+        )
+        response = self._call_bound_model_route(
+            "PerspectiveModel",
+            route_name="perspective",
+            request=request,
+            model_call_traces=model_call_traces,
+            skill_name="infer_other_state",
+            parallel_group=parallel_group,
         )
         return {"state_hypothesis": response.payload.get("state_hypothesis", {})}
 
@@ -1195,28 +1959,37 @@ class RuntimeController:
         context: dict[str, Any],
         sampled_action: str,
         relation_state: dict[str, Any],
+        *,
+        model_call_traces: list[dict[str, Any]] | None = None,
+        parallel_group: str | None = None,
     ) -> dict[str, Any]:
-        response = self.model_router.generate(
-            "perspective",
-            ModelRequest(
-                system_prompt="你负责模拟对方对最终动作的反应。只返回 JSON，不要额外解释。输出 reaction_hypothesis。",
-                user_prompt=self._json_prompt(
-                    {
-                        "event": to_dict(event),
-                        "state": to_dict(state),
-                        "scenario": scenario,
-                        "context": context,
-                        "final_action": sampled_action,
-                        "relation_state": relation_state,
-                    }
-                ),
-                response_schema={"reaction_hypothesis": "dict"},
-                metadata={
-                    "sampled_action": sampled_action,
-                    "closeness": context.get("closeness", 0.5),
-                    "relationship_risk": relation_state.get("relationship_risk", 0.0),
-                },
+        request = ModelRequest(
+            system_prompt="模拟对方反应。仅回 JSON:{reaction_hypothesis}。",
+            user_prompt=self._json_prompt(
+                self._build_perspective_model_payload(
+                    event,
+                    state,
+                    scenario,
+                    context,
+                    relation_state,
+                    action_name=sampled_action,
+                    output_key="final_action",
+                )
             ),
+            response_schema={"reaction_hypothesis": "dict"},
+            metadata={
+                "sampled_action": sampled_action,
+                "closeness": context.get("closeness", 0.5),
+                "relationship_risk": relation_state.get("relationship_risk", 0.0),
+            },
+        )
+        response = self._call_bound_model_route(
+            "PerspectiveModel",
+            route_name="perspective",
+            request=request,
+            model_call_traces=model_call_traces,
+            skill_name="simulate_other_reaction",
+            parallel_group=parallel_group,
         )
         return {"reaction_hypothesis": response.payload.get("reaction_hypothesis", {})}
 
@@ -1226,29 +1999,128 @@ class RuntimeController:
         *,
         prompt_mode: str = "base",
         violation_types: list[str] | None = None,
+        model_call_traces: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        response = self.model_router.generate(
-            "renderer",
-            ModelRequest(
-                system_prompt=self._renderer_system_prompt(
-                    render_plan,
-                    prompt_mode=prompt_mode,
-                    violation_types=violation_types,
-                ),
-                user_prompt=self._json_prompt({"render_plan": to_dict(render_plan)}),
-                response_schema={"text": "str"},
-                metadata={
-                    "action": render_plan.action,
-                    "query_kind": render_plan.identity_context.query_kind,
-                    "disclosure_detail": render_plan.identity_context.disclosure_detail,
-                },
+        request = ModelRequest(
+            system_prompt=self._renderer_system_prompt(
+                render_plan,
+                prompt_mode=prompt_mode,
+                violation_types=violation_types,
             ),
+            user_prompt=self._json_prompt(self._build_render_model_payload(render_plan)),
+            response_schema={"text": "str"},
+            metadata={
+                "action": render_plan.action,
+                "query_kind": render_plan.identity_context.query_kind,
+                "disclosure_detail": render_plan.identity_context.disclosure_detail,
+            },
+        )
+        response = self._call_bound_model_route(
+            "Renderer",
+            route_name="renderer",
+            request=request,
+            model_call_traces=model_call_traces,
+            skill_name="render_expression",
         )
         return {
             "text": str(response.payload.get("text", "")).strip(),
             "route": response.route,
             "model": response.model,
         }
+
+    def _score_salience_via_model(
+        self,
+        event: RoundEvent,
+        state: RuntimeState,
+        scenario: dict[str, Any],
+        context: dict[str, Any],
+        *,
+        model_call_traces: list[dict[str, Any]] | None = None,
+        parallel_group: str | None = None,
+    ) -> ProposalBundle:
+        route_config = self._route_config_for_binding("SalienceAgent", route_name="salience_small_model")
+        if route_config is None:
+            return self.agent_map["SalienceAgent"].score_salience(event, state, scenario, context)
+        request = ModelRequest(
+            system_prompt="评估 salience。仅回 JSON:{action_preferences,confidence,sigma_scale,reason}。",
+            user_prompt=self._json_prompt(self._build_pfc_model_payload(event, state, scenario, context)),
+            response_schema={
+                "action_preferences": "dict[str, float]",
+                "confidence": "float",
+                "sigma_scale": "float",
+                "reason": "str",
+            },
+            metadata={"cue": context.get("cue"), "stage": "salience"},
+        )
+        try:
+            response = self.model_router.generate_config(route_config, request)
+            if model_call_traces is not None:
+                self._record_model_call(
+                    model_call_traces,
+                    skill_name="score_salience",
+                    binding_key="SalienceAgent",
+                    route_config=route_config,
+                    response=response,
+                    prompt_chars=len(request.system_prompt) + len(request.user_prompt),
+                    parallel_group=parallel_group,
+                )
+            prefs = {
+                action: self._clip_delta(float(score))
+                for action, score in self._coerce_score_map(response.payload.get("action_preferences", {})).items()
+            }
+            return ProposalBundle(
+                owner="SalienceAgent",
+                confidence=_clip(float(response.payload.get("confidence", 0.64)), 0.0, 1.0),
+                action_preferences=prefs,
+                delta_p=prefs,
+                sigma_scale=_clip(float(response.payload.get("sigma_scale", 0.92)), 0.60, 1.60),
+                trace_tags=["salience", "model"],
+                reason=str(response.payload.get("reason", "small-model salience")),
+                provider="small_model",
+                model=response.model,
+                backend=getattr(response, "backend", route_config.backend),
+                latency_ms=int(getattr(response, "latency_ms", 0) or 0),
+                prompt_tokens=int(getattr(response, "usage", {}).get("prompt_tokens", 0) or 0),
+                completion_tokens=int(getattr(response, "usage", {}).get("completion_tokens", 0) or 0),
+                agent_tier=self._agent_tier("SalienceAgent"),
+            )
+        except Exception:
+            return self.agent_map["SalienceAgent"].score_salience(event, state, scenario, context)
+
+    def _estimate_subjective_value_via_model(
+        self,
+        event: RoundEvent,
+        state: RuntimeState,
+        scenario: dict[str, Any],
+        context: dict[str, Any],
+        *,
+        model_call_traces: list[dict[str, Any]] | None = None,
+        parallel_group: str | None = None,
+    ) -> dict[str, Any]:
+        route_config = self._route_config_for_binding("ValueAgent", route_name="value_small_model")
+        if route_config is None:
+            return self.agent_map["ValueAgent"].estimate_subjective_value(event, state, scenario, context)
+        request = ModelRequest(
+            system_prompt="评估主观行动价值。仅回 JSON:{scores}。",
+            user_prompt=self._json_prompt(self._build_pfc_model_payload(event, state, scenario, context)),
+            response_schema={"scores": "dict[str, float]"},
+            metadata={"cue": context.get("cue"), "stage": "value"},
+        )
+        try:
+            response = self.model_router.generate_config(route_config, request)
+            if model_call_traces is not None:
+                self._record_model_call(
+                    model_call_traces,
+                    skill_name="estimate_subjective_value",
+                    binding_key="ValueAgent",
+                    route_config=route_config,
+                    response=response,
+                    prompt_chars=len(request.system_prompt) + len(request.user_prompt),
+                    parallel_group=parallel_group,
+                )
+            return {"scores": self._coerce_score_map(response.payload.get("scores", {}))}
+        except Exception:
+            return self.agent_map["ValueAgent"].estimate_subjective_value(event, state, scenario, context)
 
     def _relation_state(self, event: RoundEvent, context: dict[str, Any]) -> dict[str, float]:
         closeness = context.get("closeness", 0.5)
@@ -2210,6 +3082,15 @@ class RuntimeController:
         requested_mode = "safe" if state.safe_mode else mode
         mode_cfg = self.config["modes"]["modes"].get(requested_mode, self.config["modes"]["modes"]["interactive"])
         scenario_cfg = self.config["scenarios"]["scenarios"][scenario]
+        prior_closeness = self.memory_store.closeness(event.target)
+        appraisal = self._infer_appraisal(
+            event,
+            state,
+            scenario=scenario,
+            requested_mode=requested_mode,
+            closeness=prior_closeness,
+        )
+        event = self._event_with_appraisal(event, appraisal)
 
         state.mode = requested_mode
         state.mode_history = (state.mode_history + [requested_mode])[-20:]
@@ -2229,6 +3110,7 @@ class RuntimeController:
             "habit_strength": self.memory_store.habit_strength(cue),
             "closeness": self.memory_store.closeness(event.target),
             "valence": event.valence,
+            "appraisal": appraisal,
             "detail_threshold": self.config["thresholds"]["thresholds"].get("detail_threshold", 0.5),
             "round_gap": 0,
             "interference": 0.0,
@@ -2242,6 +3124,13 @@ class RuntimeController:
             recall_payload = self.memory_store.recall(cue, tier_budget=memory_retrieval_budget)
             context["interference"] = recall_payload.get("interference", 0.0)
         relation_state = self._relation_state(event, context)
+        context["chronic_signal"] = self._build_chronic_signal(
+            event,
+            state=state,
+            context=context,
+            relation_state=relation_state,
+            scenario=scenario,
+        )
         round_seed = self._round_seed(state, event)
         return state, requested_mode, mode_cfg, scenario_cfg, context, relation_state, round_seed
 
@@ -2250,6 +3139,7 @@ class RuntimeController:
         *,
         event: RoundEvent,
         state: RuntimeState,
+        scenario: str,
         scenario_cfg: dict[str, Any],
         context: dict[str, Any],
         relation_state: dict[str, float],
@@ -2313,10 +3203,12 @@ class RuntimeController:
                 continue
 
             if owner == "PFCAgent":
+                reasoning_state, reasoning_meta = self._state_for_reasoning(state, event, scenario, state.mode)
+                context = {**context, **reasoning_meta}
                 try:
-                    bundle = self._generate_pfc_candidates_via_model(event, state, scenario_cfg, context)
+                    bundle = self._generate_pfc_candidates_via_model(event, reasoning_state, scenario_cfg, context)
                 except Exception:
-                    bundle = agent.fallback_generate_candidates(event, state, scenario_cfg, context)
+                    bundle = agent.fallback_generate_candidates(event, reasoning_state, scenario_cfg, context)
                 bundles.append(self._enrich_bundle_metadata(bundle, state, relation_state, context))
                 continue
 
@@ -2336,6 +3228,7 @@ class RuntimeController:
         bundles, context, relation_state = self._collect_probe_bundles(
             event=event,
             state=state,
+            scenario=scenario,
             scenario_cfg=scenario_cfg,
             context=context,
             relation_state=relation_state,
@@ -2540,6 +3433,7 @@ class RuntimeController:
         current_state = self.load_runtime_state()
         event = RoundEvent(source="user", content=plan.text, target=plan.target)
         probe_state, _, _, _, context, relation_state, _ = self._probe_context(event, "chat", plan.mode)
+        reasoning_state, _ = self._state_for_reasoning(current_state, event, "chat", plan.mode)
         slow_variables = self._build_slow_variable_payload(
             state=probe_state,
             context=context,
@@ -2577,17 +3471,17 @@ class RuntimeController:
             "user_text": plan.text,
             "identity_context": to_dict(identity_context),
             "state_summary": {
-                "mode": current_state.mode,
-                "focus": current_state.focus,
-                "mood": round(float(current_state.mood), 4),
-                "body_energy": round(float(current_state.body_energy), 4),
-                "affect_residue": round(float(current_state.affect_residue), 4),
-                "run_status": current_state.run_status,
-                "current_goal": current_state.current_goal,
+                "mode": reasoning_state.mode,
+                "focus": reasoning_state.focus,
+                "mood": round(float(reasoning_state.mood), 4),
+                "body_energy": round(float(reasoning_state.body_energy), 4),
+                "affect_residue": round(float(reasoning_state.affect_residue), 4),
+                "run_status": reasoning_state.run_status,
+                "current_goal": reasoning_state.current_goal,
             },
             "relation_state": relation_state,
             "slow_variables": slow_variables,
-            "cognitive_snapshot": self.cognitive_snapshot(state=current_state),
+            "cognitive_snapshot": self.cognitive_snapshot(state=reasoning_state),
         }
         request = ModelRequest(
             system_prompt=self._fast_chat_system_prompt(identity_context),
@@ -2833,12 +3727,23 @@ class RuntimeController:
         return ("hot", "warm", "archive")
 
     def _tick_impl(self, event: RoundEvent, scenario: str, mode: str) -> RoundResult:
+        turn_started = time.perf_counter()
         state = self.load_runtime_state()
         self._normalize_temperament_runtime_state(state)
+        prior_state = RuntimeState(**to_dict(state))
         requested_mode = "safe" if state.safe_mode else mode
         mode_cfg = self.config["modes"]["modes"].get(requested_mode, self.config["modes"]["modes"]["interactive"])
         scenario_cfg = self.config["scenarios"]["scenarios"][scenario]
         thresholds = self.config["thresholds"]["thresholds"]
+        prior_closeness = self.memory_store.closeness(event.target)
+        appraisal = self._infer_appraisal(
+            event,
+            state,
+            scenario=scenario,
+            requested_mode=requested_mode,
+            closeness=prior_closeness,
+        )
+        event = self._event_with_appraisal(event, appraisal)
 
         state.mode = requested_mode
         state.mode_history = (state.mode_history + [requested_mode])[-20:]
@@ -2848,7 +3753,6 @@ class RuntimeController:
         state.budget_remaining = _clip(state.budget_remaining - 0.001 + (0.01 if requested_mode in {"idle", "sleep"} else 0.0))
         recorded_at = utc_now_iso()
         recorded_date = iso_date(recorded_at)
-        prior_closeness = self.memory_store.closeness(event.target)
 
         cue = self.memory_store.ingest_event(
             event,
@@ -2868,6 +3772,7 @@ class RuntimeController:
             "habit_strength": self.memory_store.habit_strength(cue),
             "closeness": self.memory_store.closeness(event.target),
             "valence": event.valence,
+            "appraisal": appraisal,
             "detail_threshold": thresholds.get("detail_threshold", 0.5),
             "round_gap": 0,
             "interference": 0.0,
@@ -2881,21 +3786,82 @@ class RuntimeController:
             recall_payload = self.memory_store.recall(cue, tier_budget=memory_retrieval_budget)
             context["interference"] = recall_payload.get("interference", 0.0)
         relation_state = self._relation_state(event, context)
+        context["chronic_signal"] = self._build_chronic_signal(
+            event,
+            state=state,
+            context=context,
+            relation_state=relation_state,
+            scenario=scenario,
+        )
         shaping_events, dream_payload = self._apply_noninteractive_shaping(state, requested_mode, cue, relation_state)
         rename_event = self._maybe_update_identity_from_evidence(state)
+        identity_evidence = self._augment_identity_evidence(state, self.memory_store.identity_evidence())
+
+        pipeline_stages: list[str] = []
+        gate_decisions: list[dict[str, Any]] = []
+        skill_traces: list[dict[str, Any]] = []
+        model_call_traces: list[dict[str, Any]] = []
+        parallel_traces: list[dict[str, Any]] = []
+        bundles: list[ProposalBundle] = []
+        previous_focus = state.focus
+        round_seed = self._round_seed(state, event)
+        reasoning_state, reasoning_meta = self._state_for_reasoning(state, event, scenario, requested_mode)
+        context = {**context, **reasoning_meta}
+        runtime_context = self._skill_runtime_context(state.round_count, scenario, state)
         slow_variables = self._build_slow_variable_payload(
             state=state,
             context=context,
             relation_state=relation_state,
             prior_closeness=prior_closeness,
         )
-        query_state = self._infer_query_intent(
-            event=event,
-            scenario=scenario,
-            state=state,
-            relation_state=relation_state,
-            slow_variables=slow_variables,
+        intent_prefetch = self._execute_parallel_skills(
+            round_id=state.round_count,
+            tasks=[
+                {
+                    "name": "query_state",
+                    "inputs": {},
+                    "provider": lambda: self._infer_query_intent(
+                        event=event,
+                        scenario=scenario,
+                        state=state,
+                        relation_state=relation_state,
+                        slow_variables=slow_variables,
+                    ),
+                    "parallel_group": "intent_prefetch",
+                    "priority": "required",
+                    "task_type": "callable",
+                    "agent_tier": "state_machine",
+                },
+                {
+                    "name": "grounding_capsule",
+                    "inputs": {},
+                    "provider": lambda: self._build_grounding_capsule(
+                        state=state,
+                        context=context,
+                        relation_state=relation_state,
+                        slow_variables=slow_variables,
+                        shaping_events=shaping_events,
+                        rename_event=rename_event,
+                    ),
+                    "parallel_group": "intent_prefetch",
+                    "priority": "speculative",
+                    "task_type": "callable",
+                    "agent_tier": "state_machine",
+                },
+            ],
+            skill_traces=skill_traces,
+            runtime_context=runtime_context,
+            parallel_traces=parallel_traces,
         )
+        query_state = intent_prefetch.get("query_state")
+        if not isinstance(query_state, QueryIntentState):
+            query_state = self._infer_query_intent(
+                event=event,
+                scenario=scenario,
+                state=state,
+                relation_state=relation_state,
+                slow_variables=slow_variables,
+            )
         disclosure_state = self._infer_disclosure_intent(
             query_state=query_state,
             scenario=scenario,
@@ -2903,15 +3869,57 @@ class RuntimeController:
             relation_state=relation_state,
             slow_variables=slow_variables,
         )
-
-        pipeline_stages: list[str] = []
-        gate_decisions: list[dict[str, Any]] = []
-        skill_traces: list[dict[str, Any]] = []
-        bundles: list[ProposalBundle] = []
-        previous_focus = state.focus
-        round_seed = self._round_seed(state, event)
-        runtime_inputs = self._runtime_skill_inputs(event, state, scenario_cfg, context)
-        runtime_context = self._skill_runtime_context(state.round_count, scenario, state)
+        grounding_capsule = intent_prefetch.get("grounding_capsule")
+        if not isinstance(grounding_capsule, dict):
+            grounding_capsule = self._build_grounding_capsule(
+                state=state,
+                context=context,
+                relation_state=relation_state,
+                slow_variables=slow_variables,
+                shaping_events=shaping_events,
+                rename_event=rename_event,
+            )
+        context["grounding_capsule"] = grounding_capsule
+        runtime_inputs = self._runtime_skill_inputs(event, reasoning_state, scenario_cfg, context)
+        prefetched_outputs = self._execute_parallel_skills(
+            round_id=state.round_count,
+            tasks=[
+                {
+                    "name": "salience_bundle",
+                    "skill_name": "score_salience",
+                    "inputs": runtime_inputs,
+                    "provider": lambda event, state, scenario, context: self._score_salience_via_model(
+                        event,
+                        state,
+                        scenario,
+                        context,
+                        model_call_traces=model_call_traces,
+                        parallel_group="salience_value_prefetch",
+                    ),
+                    "fallback_value": ProposalBundle(owner="SalienceAgent", confidence=0.1, delta_p={"respond": 0.02}, action_preferences={"respond": 0.02}),
+                    "parallel_group": "salience_value_prefetch",
+                    "agent_tier": self._agent_tier("SalienceAgent"),
+                },
+                {
+                    "name": "value_scores",
+                    "skill_name": "estimate_subjective_value",
+                    "inputs": runtime_inputs,
+                    "provider": lambda event, state, scenario, context: self._estimate_subjective_value_via_model(
+                        event,
+                        state,
+                        scenario,
+                        context,
+                        model_call_traces=model_call_traces,
+                        parallel_group="salience_value_prefetch",
+                    ),
+                    "parallel_group": "salience_value_prefetch",
+                    "agent_tier": self._agent_tier("ValueAgent"),
+                },
+            ],
+            skill_traces=skill_traces,
+            runtime_context=runtime_context,
+            parallel_traces=parallel_traces,
+        )
 
         for stage_name, owners in PIPELINE_ORDER:
             pipeline_stages.append(stage_name)
@@ -2964,7 +3972,13 @@ class RuntimeController:
                     round_id=state.round_count,
                     skill_name="generate_candidates",
                     inputs=runtime_inputs,
-                    provider=self._generate_pfc_candidates_via_model,
+                    provider=lambda event, state, scenario, context: self._invoke_pfc_model_generator(
+                        event,
+                        state,
+                        scenario,
+                        context,
+                        model_call_traces=model_call_traces,
+                    ),
                     skill_traces=skill_traces,
                     runtime_context=runtime_context,
                     fallback_provider=lambda **skill_inputs: agent.fallback_generate_candidates(
@@ -3023,7 +4037,21 @@ class RuntimeController:
                 bundles.append(bundle)
                 continue
             if owner == "ValueAgent":
-                value_scores = self._execute_skill(round_id=state.round_count, skill_name="estimate_subjective_value", inputs=runtime_inputs, provider=self._agent_provider(agent, "estimate_subjective_value"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
+                value_scores = prefetched_outputs.get("value_scores") or self._execute_skill(
+                    round_id=state.round_count,
+                    skill_name="estimate_subjective_value",
+                    inputs=runtime_inputs,
+                    provider=lambda event, state, scenario, context: self._estimate_subjective_value_via_model(
+                        event,
+                        state,
+                        scenario,
+                        context,
+                        model_call_traces=model_call_traces,
+                    ),
+                    skill_traces=skill_traces,
+                    runtime_context=runtime_context,
+                    seed_ref=round_seed,
+                )
                 self._execute_skill(round_id=state.round_count, skill_name="discount_delayed_reward", inputs=runtime_inputs, provider=self._agent_provider(agent, "discount_delayed_reward"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
                 self._execute_skill(round_id=state.round_count, skill_name="price_social_cost", inputs=runtime_inputs, provider=self._agent_provider(agent, "price_social_cost"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
                 self._execute_skill(round_id=state.round_count, skill_name="score_uncertainty_penalty", inputs=runtime_inputs, provider=self._agent_provider(agent, "score_uncertainty_penalty"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
@@ -3041,7 +4069,22 @@ class RuntimeController:
                 )
                 continue
             if owner == "SalienceAgent":
-                bundle = self._execute_skill(round_id=state.round_count, skill_name="score_salience", inputs=runtime_inputs, provider=self._agent_provider(agent, "score_salience"), skill_traces=skill_traces, runtime_context=runtime_context, fallback_value=ProposalBundle(owner=owner, confidence=0.1, delta_p={"respond": 0.02}, action_preferences={"respond": 0.02}), seed_ref=round_seed)
+                bundle = prefetched_outputs.get("salience_bundle") or self._execute_skill(
+                    round_id=state.round_count,
+                    skill_name="score_salience",
+                    inputs=runtime_inputs,
+                    provider=lambda event, state, scenario, context: self._score_salience_via_model(
+                        event,
+                        state,
+                        scenario,
+                        context,
+                        model_call_traces=model_call_traces,
+                    ),
+                    skill_traces=skill_traces,
+                    runtime_context=runtime_context,
+                    fallback_value=ProposalBundle(owner=owner, confidence=0.1, delta_p={"respond": 0.02}, action_preferences={"respond": 0.02}),
+                    seed_ref=round_seed,
+                )
                 self._execute_skill(round_id=state.round_count, skill_name="switch_mode", inputs=runtime_inputs, provider=self._agent_provider(agent, "switch_mode"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
                 self._execute_skill(round_id=state.round_count, skill_name="interrupt_current_focus", inputs=runtime_inputs, provider=self._agent_provider(agent, "interrupt_current_focus"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
                 self._execute_skill(round_id=state.round_count, skill_name="promote_event_to_workspace", inputs=runtime_inputs, provider=self._agent_provider(agent, "promote_event_to_workspace"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
@@ -3324,48 +4367,82 @@ class RuntimeController:
             },
         )
         expression = self._apply_conflict_expression_adjustments(expression, distribution_state.conflict)
-        tone_params = self._execute_skill(
+        output_profiles = self._execute_parallel_skills(
             round_id=state.round_count,
-            skill_name="render_tone_profile",
-            inputs={"expression_profile": expression},
-            provider=lambda expression_profile: output_gate.run_skill("render_tone_profile", expression_profile),
+            tasks=[
+                {
+                    "name": "tone_params",
+                    "skill_name": "render_tone_profile",
+                    "inputs": {"expression_profile": expression},
+                    "provider": lambda expression_profile: output_gate.run_skill("render_tone_profile", expression_profile),
+                    "parallel_group": "output_profiles",
+                    "agent_tier": self._agent_tier("OutputGate"),
+                },
+                {
+                    "name": "delay_params",
+                    "skill_name": "compute_delay_profile",
+                    "inputs": {"expression_profile": expression},
+                    "provider": lambda expression_profile: output_gate.run_skill("compute_delay_profile", expression_profile),
+                    "parallel_group": "output_profiles",
+                    "agent_tier": self._agent_tier("OutputGate"),
+                },
+            ],
             skill_traces=skill_traces,
             runtime_context=runtime_context,
-            seed_ref=round_seed,
+            parallel_traces=parallel_traces,
         )
-        delay_params = self._execute_skill(
-            round_id=state.round_count,
-            skill_name="compute_delay_profile",
-            inputs={"expression_profile": expression},
-            provider=lambda expression_profile: output_gate.run_skill("compute_delay_profile", expression_profile),
-            skill_traces=skill_traces,
-            runtime_context=runtime_context,
-            seed_ref=round_seed,
-        )
+        tone_params = output_profiles["tone_params"]
+        delay_params = output_profiles["delay_params"]
 
         late_perspective = {"state_hypothesis": {}, "reaction_hypothesis": {}}
         if self._should_run_late_perspective(event, state, relation_state, sampled_action.name):
             perspective = self.agent_map["PerspectiveModel"]
-            late_perspective["state_hypothesis"] = self._execute_skill(
+            perspective_results = self._execute_parallel_skills(
                 round_id=state.round_count,
-                skill_name="infer_other_state",
-                inputs={**runtime_inputs, "sampled_action": sampled_action.name, "relation_state": relation_state},
-                provider=lambda event, state, scenario, context, sampled_action, relation_state: self._infer_other_state_via_model(event, state, scenario, context, sampled_action, relation_state),
+                tasks=[
+                    {
+                        "name": "state_hypothesis",
+                        "skill_name": "infer_other_state",
+                        "inputs": {**runtime_inputs, "sampled_action": sampled_action.name, "relation_state": relation_state},
+                        "provider": lambda event, state, scenario, context, sampled_action, relation_state: self._infer_other_state_via_model(
+                            event,
+                            state,
+                            scenario,
+                            context,
+                            sampled_action,
+                            relation_state,
+                            model_call_traces=model_call_traces,
+                            parallel_group="late_perspective",
+                        ),
+                        "fallback_provider": lambda event, state, scenario, context, sampled_action, relation_state: perspective.fallback_infer_other_state(event, state, scenario, context),
+                        "parallel_group": "late_perspective",
+                        "agent_tier": self._agent_tier("PerspectiveModel"),
+                    },
+                    {
+                        "name": "reaction_hypothesis",
+                        "skill_name": "simulate_other_reaction",
+                        "inputs": {**runtime_inputs, "sampled_action": sampled_action.name, "relation_state": relation_state},
+                        "provider": lambda event, state, scenario, context, sampled_action, relation_state: self._simulate_other_reaction_via_model(
+                            event,
+                            state,
+                            scenario,
+                            context,
+                            sampled_action,
+                            relation_state,
+                            model_call_traces=model_call_traces,
+                            parallel_group="late_perspective",
+                        ),
+                        "fallback_provider": lambda event, state, scenario, context, sampled_action, relation_state: perspective.fallback_simulate_other_reaction(event, state, scenario, context),
+                        "parallel_group": "late_perspective",
+                        "agent_tier": self._agent_tier("PerspectiveModel"),
+                    },
+                ],
                 skill_traces=skill_traces,
                 runtime_context=runtime_context,
-                fallback_provider=lambda event, state, scenario, context, sampled_action, relation_state: perspective.fallback_infer_other_state(event, state, scenario, context),
-                seed_ref=round_seed,
-            ).get("state_hypothesis", {})
-            late_perspective["reaction_hypothesis"] = self._execute_skill(
-                round_id=state.round_count,
-                skill_name="simulate_other_reaction",
-                inputs={**runtime_inputs, "sampled_action": sampled_action.name, "relation_state": relation_state},
-                provider=lambda event, state, scenario, context, sampled_action, relation_state: self._simulate_other_reaction_via_model(event, state, scenario, context, sampled_action, relation_state),
-                skill_traces=skill_traces,
-                runtime_context=runtime_context,
-                fallback_provider=lambda event, state, scenario, context, sampled_action, relation_state: perspective.fallback_simulate_other_reaction(event, state, scenario, context),
-                seed_ref=round_seed,
-            ).get("reaction_hypothesis", {})
+                parallel_traces=parallel_traces,
+            )
+            late_perspective["state_hypothesis"] = perspective_results["state_hypothesis"].get("state_hypothesis", {})
+            late_perspective["reaction_hypothesis"] = perspective_results["reaction_hypothesis"].get("reaction_hypothesis", {})
         else:
             gate_decisions.append(
                 {
@@ -3407,7 +4484,7 @@ class RuntimeController:
                 state=state,
                 shaping_events=shaping_events,
                 slow_variables=slow_variables,
-                state_sources=[],
+                state_sources=list(grounding_capsule.get("state_sources", [])),
                 rename_event=rename_event,
             ),
             state_focus=sampled_action.name,
@@ -3421,7 +4498,7 @@ class RuntimeController:
             round_id=state.round_count,
             skill_name="render_expression",
             inputs={"render_plan": render_plan},
-            provider=self._render_expression_via_model,
+            provider=lambda render_plan: self._render_expression_via_model(render_plan, model_call_traces=model_call_traces),
             skill_traces=skill_traces,
             runtime_context=runtime_context,
             fallback_provider=lambda render_plan: {
@@ -3444,6 +4521,7 @@ class RuntimeController:
                     render_plan,
                     prompt_mode="violation",
                     violation_types=violation_types,
+                    model_call_traces=model_call_traces,
                 )
             except Exception:
                 resampled_output = None
@@ -3547,6 +4625,31 @@ class RuntimeController:
             row["session_id"] = state.session_id
             row["recorded_at"] = recorded_at
             row["recorded_date"] = recorded_date
+        parallel_groups = sorted(
+            {
+                row.get("parallel_group")
+                for row in [*model_call_traces, *parallel_traces]
+                if row.get("parallel_group")
+            }
+        )
+        runtime_metrics = {
+            "route_type": "direct_chat",
+            "model_call_count": len(model_call_traces),
+            "parallel_task_count": len(parallel_traces),
+            "parallel_groups": parallel_groups,
+            "optional_timeout_count": sum(
+                1
+                for row in parallel_traces
+                if row.get("task_priority") == "optional" and row.get("task_outcome") == "timeout"
+            ),
+            "speculative_drop_count": sum(
+                1
+                for row in parallel_traces
+                if row.get("task_priority") == "speculative" and row.get("task_outcome") != "completed"
+            ),
+            "total_model_wait_ms": int(sum(int(row.get("latency_ms", 0) or 0) for row in model_call_traces)),
+            "total_turn_ms": max(1, int((time.perf_counter() - turn_started) * 1000)),
+        }
 
         trace = RoundTrace(
             session_id=state.session_id,
@@ -3573,11 +4676,41 @@ class RuntimeController:
             vitality_snapshot=vitality_snapshot,
             vitality_events=shaping_events,
             long_run_projection=long_run_projection,
+            appraisal_snapshot=appraisal,
+            state_delta_before_clip={
+                "mood": round(float(event.valence) * 0.08, 4),
+                "body_energy": round(float(event.energy_delta), 4),
+                "affect_residue": round(float(state.affect_residue) - float(prior_state.affect_residue), 4),
+            },
+            state_delta_after_clip={
+                "mood": round(float(state.mood) - float(prior_state.mood), 4),
+                "body_energy": round(float(state.body_energy) - float(prior_state.body_energy), 4),
+                "affect_residue": round(float(state.affect_residue) - float(prior_state.affect_residue), 4),
+            },
+            delta_suppression_reason=[
+                reason
+                for reason in (
+                    "delta_clipped"
+                    if abs(float(event.valence)) > 0.01 and round(float(state.mood) - float(prior_state.mood), 4) == 0.0
+                    else None,
+                    "expression_threshold_not_met"
+                    if abs(float(event.valence)) > 0.01 and round(float(state.affect_residue) - float(prior_state.affect_residue), 4) == 0.0
+                    else None,
+                )
+                if reason is not None
+            ],
+            run_context=context.get("run_context", {}),
+            run_contamination_detected=bool(context.get("run_contamination_detected", False)),
+            identity_evidence_score=round(float(identity_evidence.get("identity_score", 0.0)), 4),
+            identity_trigger_blockers=list(identity_evidence.get("rejection_reasons", [])),
+            temperament_window_summary=dict(state.temperament_state.get("drift_diagnostics", {})),
             dream_run_id=dream_payload.get("run_id"),
             dream_trigger=dream_payload.get("trigger"),
             dream_guard_summary=dream_payload.get("guard_summary", {}),
             dream_trace_ref=dream_payload.get("trace_ref"),
             dream_effect_summary=dream_payload.get("effect_summary", {}),
+            model_call_traces=model_call_traces,
+            runtime_metrics=runtime_metrics,
             resample_count=distribution_state.resample_idx,
         )
 
@@ -3838,9 +4971,131 @@ class RuntimeController:
         payload["trace_storage"] = self._trace_storage_payload()
         payload["memory_storage"] = self.memory_store.storage_status()
         payload["runtime_storage"] = self.runtime_storage_status()
+        payload["migration"] = self.runtime_migration_report()
         payload["entropy"] = self.entropy_pool.health_snapshot()
         payload["dream"] = self.dream_status()
         payload["cognitive_snapshot"] = self.cognitive_snapshot(state=state)
+        return payload
+
+    def state_delta_timeline(self, window: int = 20) -> dict[str, Any]:
+        rounds = self.trace_store.list_rounds()[-window:]
+        return {
+            "points": [
+                {
+                    "round_id": trace["round_id"],
+                    "sampled_action": trace.get("sampled_action"),
+                    "appraisal_snapshot": trace.get("appraisal_snapshot", {}),
+                    "state_delta_before_clip": trace.get("state_delta_before_clip", {}),
+                    "state_delta_after_clip": trace.get("state_delta_after_clip", {}),
+                    "delta_suppression_reason": trace.get("delta_suppression_reason", []),
+                }
+                for trace in rounds
+            ],
+            "storage": self._trace_storage_payload(),
+        }
+
+    def identity_blockers(self) -> dict[str, Any]:
+        state = self.load_runtime_state()
+        evidence = self._augment_identity_evidence(state, self.memory_store.identity_evidence())
+        return {
+            "display_name": state.identity_state.display_name or self._unnamed_label(),
+            "score": round(float(evidence.get("identity_score", 0.0) or 0.0), 4),
+            "naming_signal": round(float(evidence.get("naming_signal", 0.0) or 0.0), 4),
+            "continuity_signal": round(float(evidence.get("continuity_signal", 0.0) or 0.0), 4),
+            "blockers": list(evidence.get("rejection_reasons", [])),
+            "clusters": list(evidence.get("identity_clusters", [])),
+            "storage": self._trace_storage_payload(),
+        }
+
+    def cue_fragmentation_report(self) -> dict[str, Any]:
+        families: dict[str, dict[str, Any]] = {}
+        sources = [
+            ("stable_prior", self.memory_store.stable_priors_top(limit=20), "cue"),
+            ("habit", self.memory_store.habit_top(limit=20), "pattern"),
+            ("memory", self.memory_store.memory_top(limit=20), "cue"),
+        ]
+        for source_name, rows, field_name in sources:
+            for row in rows:
+                cue = str(row.get(field_name) or "").strip()
+                if not cue:
+                    continue
+                family = cue.split(":", 1)[0] if ":" in cue else cue
+                entry = families.setdefault(family, {"family": family, "members": set(), "sources": set(), "count": 0})
+                entry["members"].add(cue)
+                entry["sources"].add(source_name)
+                entry["count"] += 1
+        normalized = []
+        for family in families.values():
+            normalized.append(
+                {
+                    "family": family["family"],
+                    "members": sorted(family["members"]),
+                    "sources": sorted(family["sources"]),
+                    "count": family["count"],
+                    "fragmented": len(family["members"]) > 1,
+                }
+            )
+        normalized.sort(key=lambda item: (not item["fragmented"], -item["count"], item["family"]))
+        return {"families": normalized, "storage": self._trace_storage_payload()}
+
+    def run_contamination_report(self, window: int = 20) -> dict[str, Any]:
+        rounds = self.trace_store.list_rounds()[-window:]
+        return {
+            "points": [
+                {
+                    "round_id": trace["round_id"],
+                    "scenario": trace.get("scenario"),
+                    "run_contamination_detected": bool(trace.get("run_contamination_detected", False)),
+                    "drive_source": trace.get("run_context", {}).get("drive_source"),
+                    "current_goal": trace.get("run_context", {}).get("current_goal"),
+                }
+                for trace in rounds
+            ],
+            "storage": self._trace_storage_payload(),
+        }
+
+    def why_no_change(self, round_ref: int | str | None = None) -> dict[str, Any]:
+        trace = self.trace_round(self.resolve_round_ref(round_ref))
+        appraisal = trace.get("appraisal_snapshot", {})
+        before = trace.get("state_delta_before_clip", {})
+        after = trace.get("state_delta_after_clip", {})
+        blockers: list[str] = []
+        failure_mode = "called_neutral"
+
+        if not appraisal:
+            failure_mode = "not_called"
+            blockers.append("no_appraisal_input")
+        elif trace.get("run_contamination_detected", False):
+            failure_mode = "updated_but_not_expressed"
+            blockers.append("run_contamination")
+        elif any(trace.get("delta_suppression_reason", [])):
+            failure_mode = "updated_but_clipped"
+            blockers.extend(trace.get("delta_suppression_reason", []))
+        elif max(abs(float(value or 0.0)) for value in before.values() or [0.0]) <= 0.01:
+            failure_mode = "called_neutral"
+            blockers.append("no_appraisal_input")
+        elif max(abs(float(value or 0.0)) for value in after.values() or [0.0]) <= 0.03:
+            failure_mode = "updated_but_not_expressed"
+            blockers.append("expression_threshold_not_met")
+        if trace.get("identity_trigger_blockers"):
+            blockers.extend(trace.get("identity_trigger_blockers", []))
+        deduped = []
+        for blocker in blockers:
+            if blocker not in deduped:
+                deduped.append(blocker)
+        return {
+            "round_id": trace["round_id"],
+            "failure_mode": failure_mode,
+            "blockers": deduped,
+            "appraisal_snapshot": appraisal,
+            "state_delta_before_clip": before,
+            "state_delta_after_clip": after,
+            "storage": trace.get("storage", self._trace_storage_payload()),
+        }
+
+    def migration_report(self) -> dict[str, Any]:
+        payload = self.runtime_migration_report()
+        payload["storage"] = self._trace_storage_payload()
         return payload
 
     def runtime_storage_status(self) -> dict[str, Any]:
@@ -4341,6 +5596,15 @@ class RuntimeController:
             "vitality_snapshot": trace.get("vitality_snapshot", {}),
             "vitality_events": trace.get("vitality_events", []),
             "long_run_projection": trace.get("long_run_projection", {}),
+            "appraisal_snapshot": trace.get("appraisal_snapshot", {}),
+            "state_delta_before_clip": trace.get("state_delta_before_clip", {}),
+            "state_delta_after_clip": trace.get("state_delta_after_clip", {}),
+            "delta_suppression_reason": trace.get("delta_suppression_reason", []),
+            "run_context": trace.get("run_context", {}),
+            "run_contamination_detected": trace.get("run_contamination_detected", False),
+            "identity_evidence_score": trace.get("identity_evidence_score", 0.0),
+            "identity_trigger_blockers": trace.get("identity_trigger_blockers", []),
+            "temperament_window_summary": trace.get("temperament_window_summary", {}),
             "dream": self._dream_summary_from_trace(trace),
             "state_snapshot": {
                 "mode": trace["state_snapshot"]["mode"],
@@ -4573,6 +5837,20 @@ class RuntimeController:
         )
         routes: dict[str, Any] = {}
         credential_present = bool(os.getenv("ARK_API_KEY"))
+        tiers = {
+            tier_name: {
+                "mode": str(tier_cfg.get("mode", "local")),
+                "backend": tier_cfg.get("backend"),
+                "model": tier_cfg.get("model"),
+                "base_url": tier_cfg.get("base_url"),
+                "timeout_ms": tier_cfg.get("timeout_ms"),
+                "api_key_env": tier_cfg.get("api_key_env"),
+                "credential_present": bool(os.getenv(str(tier_cfg.get("api_key_env", "")).strip()))
+                if str(tier_cfg.get("mode", "local")).lower() == "remote"
+                else True,
+            }
+            for tier_name, tier_cfg in self._model_tiers().items()
+        }
 
         for route_name, route in self.model_router.route_configs.items():
             bound_skills = list(MODEL_ROUTE_SKILL_BINDINGS.get(route_name, ()))
@@ -4608,6 +5886,8 @@ class RuntimeController:
         return {
             "current_round": state.round_count,
             "credential_present": credential_present,
+            "tiers": tiers,
+            "agent_bindings": self._agent_model_bindings(),
             "routes": routes,
         }
 

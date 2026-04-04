@@ -26,11 +26,47 @@ def _clip_unit(value: float) -> float:
     return max(0.0, min(1.0, value))
 
 
+def _looks_like_alias(value: str) -> bool:
+    normalized = " ".join((value or "").strip().split())
+    if not normalized:
+        return False
+    if len(normalized) > 20:
+        return False
+    if any(char in normalized for char in {"\x1b", "\n", "\r", "\t"}):
+        return False
+    if normalized.startswith("/"):
+        return False
+    if any(token in normalized for token in {"？", "?", "！", "!", "。"}):
+        return False
+    return True
+
+
+def sanitize_identity_aliases(values: list[Any]) -> list[str]:
+    cleaned: list[str] = []
+    for raw in values:
+        if not isinstance(raw, str):
+            continue
+        normalized = " ".join(raw.strip().split())
+        if not _looks_like_alias(normalized):
+            continue
+        if normalized not in cleaned:
+            cleaned.append(normalized)
+    return cleaned[-5:]
+
+
 def _normalize_temperament_map(payload: dict[str, Any]) -> dict[str, float]:
     normalized: dict[str, float] = {}
     for key, raw_value in payload.items():
         if isinstance(key, str) and isinstance(raw_value, (int, float)):
             normalized[key] = round(_clip_unit(float(raw_value)), 4)
+    return normalized
+
+
+def _normalize_temperament_drift_map(payload: dict[str, Any]) -> dict[str, float]:
+    normalized: dict[str, float] = {}
+    for key, raw_value in payload.items():
+        if isinstance(key, str) and isinstance(raw_value, (int, float)):
+            normalized[key] = round(max(-0.25, min(0.25, float(raw_value))), 4)
     return normalized
 
 
@@ -42,7 +78,7 @@ def normalize_temperament_state(value: Any) -> dict[str, Any]:
 
     if {"baseline", "drift", "current"} & set(value):
         baseline = _normalize_temperament_map(dict(value.get("baseline", {})))
-        drift = _normalize_temperament_map(dict(value.get("drift", {})))
+        drift = _normalize_temperament_drift_map(dict(value.get("drift", {})))
         current = _normalize_temperament_map(dict(value.get("current", {})))
         all_keys = sorted({*baseline, *drift, *current})
         normalized_drift = {key: round(drift.get(key, 0.0), 4) for key in all_keys}
@@ -133,11 +169,22 @@ class RoundTrace:
     vitality_snapshot: dict[str, Any] = field(default_factory=dict)
     vitality_events: list[dict[str, Any]] = field(default_factory=list)
     long_run_projection: dict[str, Any] = field(default_factory=dict)
+    appraisal_snapshot: dict[str, Any] = field(default_factory=dict)
+    state_delta_before_clip: dict[str, Any] = field(default_factory=dict)
+    state_delta_after_clip: dict[str, Any] = field(default_factory=dict)
+    delta_suppression_reason: list[str] = field(default_factory=list)
+    run_context: dict[str, Any] = field(default_factory=dict)
+    run_contamination_detected: bool = False
+    identity_evidence_score: float = 0.0
+    identity_trigger_blockers: list[str] = field(default_factory=list)
+    temperament_window_summary: dict[str, Any] = field(default_factory=dict)
     dream_run_id: str | None = None
     dream_trigger: str | None = None
     dream_guard_summary: dict[str, Any] = field(default_factory=dict)
     dream_trace_ref: str | None = None
     dream_effect_summary: dict[str, Any] = field(default_factory=dict)
+    model_call_traces: list[dict[str, Any]] = field(default_factory=list)
+    runtime_metrics: dict[str, Any] = field(default_factory=dict)
     resample_count: int = 0
 
 
@@ -506,6 +553,7 @@ class RuntimeState:
     def __post_init__(self) -> None:
         if isinstance(self.identity_state, dict):
             self.identity_state = IdentityState(**self.identity_state)
+        self.identity_state.aliases = sanitize_identity_aliases(self.identity_state.aliases)
         self.temperament_state = normalize_temperament_state(self.temperament_state)
         if isinstance(self.repair_state, dict):
             self.repair_state = ConflictRepairState(**self.repair_state)
@@ -702,6 +750,12 @@ class SkillResult:
     fallback_cost_class: str | None = None
     policy_rejection_reason: str | None = None
     breaker_state: dict[str, Any] = field(default_factory=dict)
+    parallel_group: str | None = None
+    agent_tier: str | None = None
+    task_priority: str | None = None
+    task_outcome: str | None = None
+    task_type: str | None = None
+    timeout_ms: int | None = None
 
 
 @dataclass
@@ -722,6 +776,13 @@ class ProposalBundle:
     control_domain: str = "task"
     gated_actions: list[str] = field(default_factory=list)
     risk_hints: dict[str, Any] = field(default_factory=dict)
+    provider: str = ""
+    model: str = ""
+    backend: str = ""
+    latency_ms: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    agent_tier: str = ""
 
 
 @dataclass

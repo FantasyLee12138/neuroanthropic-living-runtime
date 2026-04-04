@@ -220,6 +220,24 @@ def test_control_commands_expose_run_views_without_cil(tmp_path):
     assert "最近工具：" in next(item for item in tool_events if item["type"] == "assistant_final")["message"]
 
 
+def test_model_control_command_reports_tiers_and_bindings(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    handler = TerminalEventHandler(controller)
+
+    handler.handle({"type": "start_session", "session_id": "sess-model", "cwd": str(tmp_path)})
+    events = handler.handle({"type": "control_command", "session_id": "sess-model", "command": "model"})
+
+    final_event = next(item for item in events if item["type"] == "assistant_final")
+    snapshot_event = next(item for item in events if item["type"] == "sidebar_snapshot")
+
+    assert "small_model" in final_event["message"]
+    assert "large_model" in final_event["message"]
+    assert "SalienceAgent -> small_model" in final_event["message"]
+    assert "Renderer -> large_model" in final_event["message"]
+    assert "model_status" in snapshot_event
+    assert snapshot_event["model_status"]["tiers"]["small_model"]["model"] == "ep-20260404191810-qfn7s"
+
+
 def test_control_command_mode_permissions_state_and_compact(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     handler = TerminalEventHandler(controller)

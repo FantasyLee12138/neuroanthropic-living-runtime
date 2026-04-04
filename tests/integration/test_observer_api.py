@@ -83,6 +83,18 @@ def test_observer_exposes_current_run_and_step_views(tmp_path):
     assert tool_trace.json()["tools"][0]["tool_name"] == "repo_scan"
 
 
+def test_observer_exposes_model_status(tmp_path):
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+
+    response = client.get("/models/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["tiers"]["small_model"]["model"] == "ep-20260404191810-qfn7s"
+    assert payload["agent_bindings"]["SalienceAgent"] == "small_model"
+    assert "chat_fast" in payload["routes"]
+
+
 def test_observer_exposes_terminal_session_mapping(tmp_path):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "agent.py").write_text("VALUE = 1\n", encoding="utf-8")
@@ -180,11 +192,18 @@ def test_observer_exposes_dream_status_runs_and_metrics(tmp_path):
 
 def test_observer_exposes_extended_diagnostics_endpoints(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.start_run("Inspect the repository and keep working until the task is done.")
     controller.tick(
-        RoundEvent(source="user", content="hello runtime and remember noodles", target="user", cue="noodles"),
-        scenario="task",
+        RoundEvent(source="user", content="你是谁？", target="user"),
+        scenario="chat",
         mode="interactive",
     )
+    for _ in range(5):
+        controller.tick(
+            RoundEvent(source="user", content="你是不是根本不记得我了，我有点失望。", target="user"),
+            scenario="chat",
+            mode="interactive",
+        )
     controller.flush_pending_io(raise_on_error=True)
 
     client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
@@ -195,6 +214,12 @@ def test_observer_exposes_extended_diagnostics_endpoints(tmp_path):
     why_not_response = client.get("/why-not/1/rest")
     entropy_response = client.get("/metrics/entropy")
     skill_profile_response = client.get("/skills/profile/generate_candidates")
+    state_delta_response = client.get("/diagnostics/state-delta")
+    identity_blockers_response = client.get("/diagnostics/identity-blockers")
+    contamination_response = client.get("/diagnostics/run-contamination")
+    why_no_change_response = client.get("/diagnostics/why-no-change/last")
+    cue_fragmentation_response = client.get("/diagnostics/cue-fragmentation")
+    migration_response = client.get("/diagnostics/migration")
 
     assert timeline_response.status_code == 200
     assert heatmap_response.status_code == 200
@@ -202,9 +227,51 @@ def test_observer_exposes_extended_diagnostics_endpoints(tmp_path):
     assert why_not_response.status_code == 200
     assert entropy_response.status_code == 200
     assert skill_profile_response.status_code == 200
+    assert state_delta_response.status_code == 200
+    assert identity_blockers_response.status_code == 200
+    assert contamination_response.status_code == 200
+    assert why_no_change_response.status_code == 200
+    assert cue_fragmentation_response.status_code == 200
+    assert migration_response.status_code == 200
     assert timeline_response.json()["rounds"]
     assert heatmap_response.json()["actions"]
     assert replay_response.json()["round_id"] == 1
     assert why_not_response.json()["round_id"] == 1
     assert "provider_class" in entropy_response.json()
     assert skill_profile_response.json()["name"] == "generate_candidates"
+    assert state_delta_response.json()["points"]
+    assert "blockers" in identity_blockers_response.json()
+    assert contamination_response.json()["points"]
+    assert "failure_mode" in why_no_change_response.json()
+    assert "families" in cue_fragmentation_response.json()
+    assert "runtime" in migration_response.json()
+
+
+def test_observer_state_and_metrics_expose_subjectivity_boundary_metrics(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(source="user", content="记住茶。", target="user", cue="tea"),
+        scenario="chat",
+        mode="interactive",
+    )
+    controller.apply_command("mood calm")
+    controller.run_endogenous_tick(trigger="idle")
+    controller.flush_pending_io(raise_on_error=True)
+
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+
+    state_response = client.get("/state")
+    metrics_response = client.get("/metrics/summary")
+    timeline_response = client.get("/metrics/timeline")
+    trace_response = client.get("/trace/1")
+
+    assert state_response.status_code == 200
+    assert metrics_response.status_code == 200
+    assert timeline_response.status_code == 200
+    assert trace_response.status_code == 200
+    assert state_response.json()["subjectivity"]["subject_core_integrity"] is True
+    assert "boundary_violation_count" in state_response.json()["subjectivity"]
+    assert "external_to_internal_ratio" in metrics_response.json()
+    assert "endogenous_intent_rate" in metrics_response.json()
+    assert "subjectivity" in timeline_response.json()
+    assert "subject_id" in trace_response.json()

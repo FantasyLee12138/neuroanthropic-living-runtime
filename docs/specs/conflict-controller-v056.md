@@ -1,5 +1,17 @@
 # Conflict Controller v0.56
 
+## Status
+
+- 状态：`active`
+- 角色：当前冲突闭环的生效规格，不是历史设计稿
+- 读取优先级：高于历史设计说明，低于代码中的实际回归修复
+- 文档边界：本文件主要描述 conflict scoring、priority adjudication、compromise、circuit breaker、repair FSM
+
+当前判断：
+
+- 这份文档没有过时，应该继续保留在 `docs/specs/`
+- 只有当 conflict trace / observer 侧字段继续明显膨胀时，才建议拆出单独的 repair/diagnostics 附属规格
+
 ## Scope
 
 本规范定义当前运行时内的完整 `ConflictMonitorAgent` 多 pass 冲突控制器。它覆盖：

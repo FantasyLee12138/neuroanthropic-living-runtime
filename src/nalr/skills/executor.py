@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import threading
 import time
 from dataclasses import MISSING, fields, is_dataclass
 from pathlib import Path
@@ -39,72 +40,77 @@ class SkillExecutor:
         self.circuit_breaker_path = Path(circuit_breaker_path) if circuit_breaker_path else None
         self.environment_fingerprint = environment_fingerprint
         self._breaker_cache: dict[str, CircuitBreakerState] = {}
+        self._breaker_lock = threading.RLock()
 
     def _write_text_atomic(self, path: Path, content: str) -> None:
         tmp_path = path.with_name(f"{path.name}.tmp")
+        path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path.write_text(content, encoding="utf-8")
         tmp_path.replace(path)
 
     def _load_breakers(self) -> dict[str, CircuitBreakerState]:
-        if self.circuit_breaker_path is None:
-            return self._breaker_cache
-        if not self.circuit_breaker_path.exists():
-            self._save_breakers()
-            return self._breaker_cache
+        with self._breaker_lock:
+            if self.circuit_breaker_path is None:
+                return self._breaker_cache
+            if not self.circuit_breaker_path.exists():
+                self._save_breakers()
+                return self._breaker_cache
 
-        raw_text = self.circuit_breaker_path.read_text(encoding="utf-8").strip()
-        if not raw_text:
-            self._breaker_cache = {}
-            self._save_breakers()
+            raw_text = self.circuit_breaker_path.read_text(encoding="utf-8").strip()
+            if not raw_text:
+                self._breaker_cache = {}
+                self._save_breakers()
+                return self._breaker_cache
+
+            try:
+                payload = json.loads(raw_text)
+            except json.JSONDecodeError:
+                self._breaker_cache = {}
+                self._save_breakers()
+                return self._breaker_cache
+
+            meta: dict[str, Any] = {}
+            if isinstance(payload, dict) and isinstance(payload.get("breakers"), dict):
+                meta = payload.get("__meta__", {}) if isinstance(payload.get("__meta__"), dict) else {}
+                payload = payload["breakers"]
+            elif isinstance(payload, list) or not isinstance(payload, dict):
+                payload = {}
+
+            stored_fingerprint = meta.get("environment_fingerprint")
+            if self.environment_fingerprint is not None and stored_fingerprint != self.environment_fingerprint:
+                self._breaker_cache = {}
+                self._save_breakers()
+                return self._breaker_cache
+
+            self._breaker_cache = {
+                name: CircuitBreakerState(**state)
+                for name, state in payload.items()
+                if isinstance(state, dict)
+            }
             return self._breaker_cache
-
-        try:
-            payload = json.loads(raw_text)
-        except json.JSONDecodeError:
-            self._breaker_cache = {}
-            self._save_breakers()
-            return self._breaker_cache
-
-        meta: dict[str, Any] = {}
-        if isinstance(payload, dict) and isinstance(payload.get("breakers"), dict):
-            meta = payload.get("__meta__", {}) if isinstance(payload.get("__meta__"), dict) else {}
-            payload = payload["breakers"]
-        elif isinstance(payload, list) or not isinstance(payload, dict):
-            payload = {}
-
-        stored_fingerprint = meta.get("environment_fingerprint")
-        if self.environment_fingerprint is not None and stored_fingerprint != self.environment_fingerprint:
-            self._breaker_cache = {}
-            self._save_breakers()
-            return self._breaker_cache
-
-        self._breaker_cache = {
-            name: CircuitBreakerState(**state)
-            for name, state in payload.items()
-            if isinstance(state, dict)
-        }
-        return self._breaker_cache
 
     def _save_breakers(self) -> None:
-        if self.circuit_breaker_path is None:
-            return
-        payload = {name: to_dict(state) for name, state in self._breaker_cache.items()}
-        if self.environment_fingerprint is None:
-            serialized = payload
-        else:
-            serialized = {
-                "__meta__": {
-                    "environment_fingerprint": self.environment_fingerprint,
-                },
-                "breakers": payload,
-            }
-        self._write_text_atomic(
-            self.circuit_breaker_path,
-            json.dumps(serialized, ensure_ascii=False, indent=2),
-        )
+        with self._breaker_lock:
+            if self.circuit_breaker_path is None:
+                return
+            payload = {name: to_dict(state) for name, state in self._breaker_cache.items()}
+            if self.environment_fingerprint is None:
+                serialized = payload
+            else:
+                serialized = {
+                    "__meta__": {
+                        "environment_fingerprint": self.environment_fingerprint,
+                    },
+                    "breakers": payload,
+                }
+            self._write_text_atomic(
+                self.circuit_breaker_path,
+                json.dumps(serialized, ensure_ascii=False, indent=2),
+            )
 
     def _breaker_for(self, skill_name: str) -> CircuitBreakerState:
-        return self._load_breakers().setdefault(skill_name, CircuitBreakerState())
+        with self._breaker_lock:
+            return self._load_breakers().setdefault(skill_name, CircuitBreakerState())
 
     def _breaker_is_open(self, spec: SkillSpec, state: CircuitBreakerState, round_id: int) -> bool:
         if spec.breaker_policy is None or state.open_until_round is None:
@@ -112,25 +118,27 @@ class SkillExecutor:
         return round_id <= state.open_until_round
 
     def _record_failure(self, spec: SkillSpec, skill_name: str, round_id: int, reason: str) -> CircuitBreakerState:
-        state = self._breaker_for(skill_name)
-        state.failure_count += 1
-        state.last_failure_round = round_id
-        state.last_failure_reason = reason
-        state.fallback_route = spec.fallback_route.target if spec.fallback_route else None
-        if spec.breaker_policy and state.failure_count >= spec.breaker_policy.failure_threshold:
-            state.open_until_round = round_id + spec.breaker_policy.cooldown_rounds
-        self._save_breakers()
-        return state
+        with self._breaker_lock:
+            state = self._breaker_for(skill_name)
+            state.failure_count += 1
+            state.last_failure_round = round_id
+            state.last_failure_reason = reason
+            state.fallback_route = spec.fallback_route.target if spec.fallback_route else None
+            if spec.breaker_policy and state.failure_count >= spec.breaker_policy.failure_threshold:
+                state.open_until_round = round_id + spec.breaker_policy.cooldown_rounds
+            self._save_breakers()
+            return state
 
     def _record_success(self, skill_name: str) -> CircuitBreakerState:
-        state = self._breaker_for(skill_name)
-        state.failure_count = 0
-        state.open_until_round = None
-        state.last_failure_round = None
-        state.last_failure_reason = None
-        state.fallback_route = None
-        self._save_breakers()
-        return state
+        with self._breaker_lock:
+            state = self._breaker_for(skill_name)
+            state.failure_count = 0
+            state.open_until_round = None
+            state.last_failure_round = None
+            state.last_failure_reason = None
+            state.fallback_route = None
+            self._save_breakers()
+            return state
 
     def _invoke_callable(self, provider: Any, validated_inputs: dict[str, Any]) -> Any:
         signature = inspect.signature(provider)
@@ -381,16 +389,6 @@ class SkillExecutor:
                         )
 
         latency_ms = max(1, int((time.perf_counter() - started) * 1000))
-        if latency_ms > spec.timeout_ms:
-            degraded = True
-            failure_policy_applied = spec.failure_policy
-            raw_output, fallback_route, fallback_cost_class = self._apply_fallback(
-                spec=spec,
-                validated_inputs=validated_inputs,
-                fallback_provider=fallback_provider,
-                fallback_value=fallback_value,
-            )
-
         if degraded and failure_policy_applied not in {"input_validation_failed", "trip_circuit_breaker"} and policy_rejection_reason is None:
             breaker_state = self._record_failure(spec, skill_name, round_id, failure_policy_applied or "runtime_failure")
         elif degraded and failure_policy_applied == "trip_circuit_breaker":

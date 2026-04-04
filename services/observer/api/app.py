@@ -25,6 +25,10 @@ def create_app(project_root: Path | str | None = None, config_root: Path | str |
     async def identity() -> dict:
         return controller.identity_payload()
 
+    @app.get("/models/status")
+    async def model_status() -> dict:
+        return controller.model_status()
+
     @app.get("/runs/current")
     async def current_run() -> dict:
         try:
@@ -164,6 +168,33 @@ def create_app(project_root: Path | str | None = None, config_root: Path | str |
     @app.get("/metrics/heatmap")
     async def metrics_heatmap() -> dict:
         return controller.metrics_heatmap()
+
+    @app.get("/diagnostics/state-delta")
+    async def state_delta(window: int = 20) -> dict:
+        return controller.state_delta_timeline(window=window)
+
+    @app.get("/diagnostics/identity-blockers")
+    async def identity_blockers() -> dict:
+        return controller.identity_blockers()
+
+    @app.get("/diagnostics/cue-fragmentation")
+    async def cue_fragmentation() -> dict:
+        return controller.cue_fragmentation_report()
+
+    @app.get("/diagnostics/run-contamination")
+    async def run_contamination(window: int = 20) -> dict:
+        return controller.run_contamination_report(window=window)
+
+    @app.get("/diagnostics/why-no-change/{round_ref}")
+    async def why_no_change(round_ref: str) -> dict:
+        try:
+            return controller.why_no_change(round_ref)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/diagnostics/migration")
+    async def migration() -> dict:
+        return controller.migration_report()
 
     @app.get("/replay/{round_id}")
     async def replay(round_id: int, seed: int = 0) -> dict:

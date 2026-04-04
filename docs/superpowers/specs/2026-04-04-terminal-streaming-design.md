@@ -1,5 +1,31 @@
 # Terminal Streaming Output Design
 
+## Status
+
+- 状态：`historical_design`
+- 当前结论：这份文档记录的是 2026-04-04 的设计切入点，不再是当前 source of truth
+
+哪些已经落地：
+
+- `assistant_token` 流式事件
+- `serve_stdio()` 增量写出
+- terminal reducer 对 streamed assistant line 的拼接
+- one-shot CLI 对流式 token 的即时打印
+- session 中的 `transcript_lines`、`tool_timeline`、`approvals_pending` 持久化
+
+哪些表述已经不再精确：
+
+- 文中把 direct chat 视为“可以继续非流式”的阶段性假设；当前实现里 `fast_chat` 已经有流式路径
+- 当前仓库的终端桥接语义已经扩展到比本设计稿更多的 session / approval / sidebar 细节
+
+现在如果要确认真实行为，应优先看：
+
+- `src/nalr/terminal_bridge/handlers.py`
+- `src/nalr/terminal_bridge/bridge.py`
+- `apps/terminal/src/state/sessionStore.ts`
+- `apps/terminal/src/oneShotPrinter.ts`
+- `tests/unit/test_terminal_bridge.py`
+
 ## Goal
 
 Force terminal responses onto a streaming path so the first visible assistant text is pushed to the user immediately after it is available, rather than waiting for the full run, tool trace, or final summary. This applies to both:

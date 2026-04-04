@@ -285,6 +285,7 @@ export function applyBridgeEvent(state: UiState, event: OutboundBridgeEvent): Ui
         permissionMode: event.permission_mode,
         pendingApprovalCount: event.pending_approval_count,
         cognitiveSnapshot: normalizeCognitiveSnapshot(event.cognitive_snapshot),
+        modelStatus: event.model_status,
       },
       statusline: ((event.statusline ?? undefined) as unknown as UiState["statusline"]) ?? state.statusline,
       permissionMode: event.permission_mode || state.permissionMode,

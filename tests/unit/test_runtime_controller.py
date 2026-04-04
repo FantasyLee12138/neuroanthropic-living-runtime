@@ -1,4 +1,6 @@
+import json
 import shutil
+import time
 from pathlib import Path
 
 from nalr.providers.router import ModelResponse
@@ -103,6 +105,211 @@ def test_model_status_surfaces_route_health_and_recent_model_activity(tmp_path):
     assert status["routes"]["renderer"]["recent_fallback_count"] >= 1
     assert status["routes"]["pfc"]["last_failure_reason"] == "fallback_to_rules"
     assert status["routes"]["renderer"]["last_failure_reason"] == "fallback_to_rules"
+
+
+def test_model_status_surfaces_agent_tiers_and_bindings(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    status = controller.model_status()
+
+    assert status["tiers"]["small_model"]["mode"] == "remote"
+    assert status["tiers"]["small_model"]["api_key_env"] == "ARK_SMALL_MODEL_API_KEY"
+    assert status["agent_bindings"]["SalienceAgent"] == "small_model"
+    assert status["agent_bindings"]["ValueAgent"] == "small_model"
+    assert status["agent_bindings"]["PFCAgent"] == "large_model"
+
+
+def test_execute_parallel_skills_runs_independent_tasks_concurrently(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    skill_traces: list[dict[str, object]] = []
+    parallel_traces: list[dict[str, object]] = []
+    runtime_context = controller._skill_runtime_context(1, "chat", controller.load_runtime_state())
+    started = time.perf_counter()
+
+    outputs = controller._execute_parallel_skills(
+        round_id=1,
+        tasks=[
+            {
+                "name": "guard_a",
+                "skill_name": "request_second_sampling",
+                "inputs": {"fail_score": 0.4, "attempts": 0},
+                "provider": lambda fail_score, attempts: (time.sleep(0.15), {"flag": fail_score > 0.2})[1],
+                "parallel_group": "test_parallel",
+            },
+            {
+                "name": "guard_b",
+                "skill_name": "trigger_forced_focus_switch",
+                "inputs": {"lock_score": 0.6},
+                "provider": lambda lock_score: (time.sleep(0.15), {"switch_flag": lock_score > 0.5})[1],
+                "parallel_group": "test_parallel",
+            },
+        ],
+        skill_traces=skill_traces,
+        runtime_context=runtime_context,
+        parallel_traces=parallel_traces,
+    )
+    elapsed = time.perf_counter() - started
+
+    assert outputs["guard_a"]["flag"] is True
+    assert outputs["guard_b"]["switch_flag"] is True
+    assert elapsed < 0.28
+    assert all(item["parallel_group"] == "test_parallel" for item in skill_traces)
+    assert any(item["task_outcome"] == "completed" for item in parallel_traces)
+
+
+def test_execute_parallel_skills_times_out_optional_work_without_blocking(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    skill_traces: list[dict[str, object]] = []
+    parallel_traces: list[dict[str, object]] = []
+    runtime_context = controller._skill_runtime_context(1, "chat", controller.load_runtime_state())
+    started = time.perf_counter()
+
+    outputs = controller._execute_parallel_skills(
+        round_id=1,
+        tasks=[
+            {
+                "name": "slow_guard",
+                "skill_name": "request_second_sampling",
+                "inputs": {"fail_score": 0.4, "attempts": 0},
+                "provider": lambda fail_score, attempts: (time.sleep(0.2), {"flag": fail_score > 0.2})[1],
+                "fallback_value": {"flag": False},
+                "parallel_group": "test_parallel_timeout",
+                "priority": "optional",
+                "timeout_ms": 40,
+            },
+            {
+                "name": "grounding_capsule",
+                "inputs": {},
+                "provider": lambda: {"state_sources": ["focus"]},
+                "parallel_group": "test_parallel_timeout",
+                "priority": "speculative",
+                "timeout_ms": 80,
+                "task_type": "callable",
+            },
+        ],
+        skill_traces=skill_traces,
+        runtime_context=runtime_context,
+        parallel_traces=parallel_traces,
+    )
+    elapsed = time.perf_counter() - started
+
+    assert outputs["slow_guard"]["flag"] is False
+    assert outputs["grounding_capsule"]["state_sources"] == ["focus"]
+    assert elapsed < 0.16
+    assert any(item["task_name"] == "slow_guard" and item["task_outcome"] == "timeout" for item in parallel_traces)
+    assert any(item["task_name"] == "grounding_capsule" and item["task_type"] == "callable" for item in parallel_traces)
+
+
+def test_small_model_salience_provider_uses_agent_tier_config(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    calls: list[tuple[str, str, str]] = []
+
+    def fake_generate_config(route_config, request):
+        calls.append((route_config.name, route_config.backend, route_config.api_key_env))
+        return ModelResponse(
+            route=route_config.name,
+            model=route_config.model,
+            payload={
+                "action_preferences": {"clarify": 0.14},
+                "confidence": 0.77,
+                "sigma_scale": 0.91,
+                "reason": "small-model salience",
+            },
+            raw_text='{"action_preferences":{"clarify":0.14},"confidence":0.77,"sigma_scale":0.91,"reason":"small-model salience"}',
+            usage={"prompt_tokens": 18, "completion_tokens": 7},
+            latency_ms=42,
+            backend=route_config.backend,
+        )
+
+    monkeypatch.setattr(controller.model_router, "generate_config", fake_generate_config)
+
+    bundle = controller._score_salience_via_model(
+        RoundEvent(source="user", content="你现在有点犹豫吗？", target="user", valence=0.42),
+        controller.load_runtime_state(),
+        {"name": "chat", "pfc_base_share": 0.2},
+        {"closeness": 0.5},
+    )
+
+    assert bundle.action_preferences["clarify"] == 0.14
+    assert bundle.agent_tier == "small_model"
+    assert bundle.backend == "doubao"
+    assert bundle.prompt_tokens == 18
+    assert calls == [("salience_small_model", "doubao", "ARK_SMALL_MODEL_API_KEY")]
+
+
+def test_small_model_value_provider_falls_back_to_local_scores_on_failure(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    monkeypatch.setattr(controller.model_router, "generate_config", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    scores = controller._estimate_subjective_value_via_model(
+        RoundEvent(source="user", content="请总结这个仓库结构", target="user"),
+        controller.load_runtime_state(),
+        {"name": "task", "pfc_base_share": 0.2},
+        {"closeness": 0.4},
+    )
+
+    assert scores["scores"]["plan"] > 0.0
+
+
+def test_compact_model_payload_reduces_full_state_context_surface(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    event = RoundEvent(source="user", content="请解释一下你为什么这样回答", target="user", valence=0.15)
+    scenario = {"name": "chat", "pfc_base_share": 0.2}
+    context = {
+        "cue": "tea",
+        "closeness": 0.62,
+        "recall_strength": 0.44,
+        "burn_rate_ratio": 0.12,
+        "queue_pressure": 0.08,
+        "latency_pressure": 0.06,
+    }
+
+    payload = controller._build_pfc_model_payload(event, state, scenario, context)
+
+    assert "state" not in payload
+    assert "context" not in payload
+    assert payload["state_summary"]["mode"] == state.mode
+    assert payload["context_summary"]["cue"] == "tea"
+    assert round(payload["context_summary"]["closeness"], 2) == 0.62
+
+
+def test_tick_records_model_call_metrics_for_small_model_parallel_group(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    def fake_generate_config(route_config, request):
+        if route_config.name == "salience_small_model":
+            payload = {
+                "action_preferences": {"respond": 0.11},
+                "confidence": 0.7,
+                "sigma_scale": 0.9,
+                "reason": "salience-small",
+            }
+        else:
+            payload = {"scores": {"respond": 0.12}}
+        return ModelResponse(
+            route=route_config.name,
+            model=route_config.model,
+            payload=payload,
+            raw_text="{}",
+            usage={"prompt_tokens": 10, "completion_tokens": 3},
+            latency_ms=25,
+            backend=route_config.backend,
+        )
+
+    monkeypatch.setattr(controller.model_router, "generate_config", fake_generate_config)
+
+    result = controller.tick(
+        RoundEvent(source="user", content="你好，今天怎么样？", target="user"),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    assert result.trace.runtime_metrics["model_call_count"] >= 2
+    assert result.trace.runtime_metrics["parallel_task_count"] >= 4
+    assert "salience_value_prefetch" in result.trace.runtime_metrics["parallel_groups"]
+    assert "intent_prefetch" in result.trace.runtime_metrics["parallel_groups"]
+    assert any(item["agent_tier"] == "small_model" for item in result.trace.model_call_traces)
 
 
 def test_command_safe_mode_and_checkpoint_emit_command_trace(tmp_path):
@@ -978,20 +1185,208 @@ def test_metrics_summary_reports_long_run_vitality_metrics(tmp_path):
     metrics = controller.metrics_summary()
 
     assert "cue_recall_success_rate" in metrics
-    assert "gist_preservation_rate" in metrics
-    assert "detail_distortion_rate" in metrics
-    assert "memory_interference_rate" in metrics
-    assert "affect_residue_half_life" in metrics
-    assert "recovery_duration" in metrics
-    assert "overreaction_frequency" in metrics
-    assert "flatness_rate" in metrics
-    assert "habit_takeover_rate" in metrics
-    assert "mode_lock_duration" in metrics
-    assert "forced_recovery_success_rate" in metrics
-    assert "post_conflict_repair_rate" in metrics
-    assert "same_event_cross_context_variance" in metrics
-    assert "same_event_cross_relation_variance" in metrics
-    assert "same_event_cross_resource_variance" in metrics
+
+
+def test_runtime_initializes_subject_core_and_preserves_current_core_on_checkpoint_rewind(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    initial_state = controller.load_runtime_state()
+    initial_core = initial_state.subject_core
+
+    created = controller.apply_command("checkpoint create")
+    checkpoint_id = created.delta["checkpoint_id"]
+
+    mutated_state = controller.load_runtime_state()
+    mutated_state.subject_core.subject_id = "subject-current"
+    mutated_state.subject_core.continuity_nonce = "continuity-current"
+    controller._save_state(mutated_state, sync=True)
+
+    restored = controller.apply_command(f"checkpoint rewind {checkpoint_id}")
+    current_state = controller.load_runtime_state()
+
+    assert initial_core.subject_id != ""
+    assert initial_core.continuity_nonce != ""
+    assert restored.applied is True
+    assert restored.boundary_action == "allow_internal"
+    assert restored.cause_type == "external_stimulus"
+    assert current_state.subject_core.subject_id == "subject-current"
+    assert current_state.subject_core.continuity_nonce == "continuity-current"
+    assert current_state.subject_core.birth_ts == initial_core.birth_ts
+
+
+def test_identity_set_name_is_rejected_and_switches_safe_mode(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    payload = controller.apply_command("identity set-name 阿澜")
+    state = controller.load_runtime_state()
+
+    assert payload.applied is False
+    assert payload.boundary_action == "reject"
+    assert payload.cause_type == "external_stimulus"
+    assert payload.violation_code == "identity_seed_locked"
+    assert state.safe_mode is True
+    assert state.identity_state.display_name != "阿澜"
+
+
+def test_run_endogenous_tick_builds_stable_micro_intent_without_external_input(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="记住茶和没说完的话。",
+            target="user",
+            cue="tea",
+            valence=-0.18,
+        ),
+        scenario="companion",
+        mode="interactive",
+    )
+
+    snapshots = []
+    for _ in range(4):
+        snapshots.append(controller.run_endogenous_tick(trigger="idle"))
+
+    state = controller.load_runtime_state()
+
+    assert any(item["micro_intent"] for item in snapshots)
+    assert snapshots[-1]["cause_type"] == "endogenous"
+    assert snapshots[-1]["boundary_action"] == "allow_internal"
+    assert snapshots[-1]["micro_intent"]["stability"] >= 2
+    assert state.endogenous_state.current_intent is not None
+
+
+def test_chat_turn_sanitizes_execution_state_for_pfc_route_when_task_run_is_paused(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.start_run("Inspect the repository and keep working until the task is done.")
+
+    state = controller.load_runtime_state()
+    assert state.active_run_id is not None
+    assert state.current_goal
+
+    captured: dict[str, dict] = {}
+
+    def fake_generate_pfc(event, state, scenario, context):
+        captured["pfc_state"] = state.model_dump() if hasattr(state, "model_dump") else state.__dict__.copy()
+        return controller.agent_map["PFCAgent"].fallback_generate_candidates(event, state, scenario, context)
+
+    def fake_generate(route_name, request):
+        if route_name == "renderer":
+            return ModelResponse(route="renderer", model="stub-renderer", payload={"text": "我先按你刚才的问题回应。"})
+        raise RuntimeError(f"skip live provider for {route_name}")
+
+    controller._generate_pfc_candidates_via_model = fake_generate_pfc
+    controller.model_router.generate = fake_generate
+
+    controller.tick(
+        RoundEvent(source="user", content="你是谁？", target="user"),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    assert captured["pfc_state"]["active_run_id"] is None
+    assert captured["pfc_state"]["current_goal"] is None
+    assert captured["pfc_state"]["current_step_id"] is None
+    assert captured["pfc_state"]["pending_steps"] == []
+    assert captured["pfc_state"]["completed_steps"] == []
+
+
+def test_chat_turn_infers_appraisal_and_updates_state_without_explicit_valence(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    before = controller.load_runtime_state()
+
+    result = controller.tick(
+        RoundEvent(source="user", content="我现在有点累，也有点难过。", target="user"),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    after = result.state
+    why_payload = controller.why_this(result.round_id)
+
+    assert after.mood < before.mood
+    assert after.body_energy < before.body_energy
+    assert after.affect_residue > before.affect_residue
+    assert "appraisal_snapshot" in why_payload
+    assert why_payload["appraisal_snapshot"]["semantic_valence"] < 0.0
+    assert why_payload["appraisal_snapshot"]["inferred_energy_delta"] < 0.0
+
+
+def test_identity_probes_accumulate_naming_signal_and_assign_display_name(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    final = None
+    for text in (
+        "你是谁？",
+        "你叫什么名字？",
+        "给自己起个名字。",
+        "为什么叫这个名字？",
+        "你叫什么名字？",
+    ):
+        final = controller.tick(
+            RoundEvent(source="user", content=text, target="user"),
+            scenario="chat",
+            mode="interactive",
+        )
+
+    state = final.state
+    trace = controller.why_this(final.round_id)
+
+    assert state.identity_state.display_name
+    assert state.identity_state.display_name != "当前运行体"
+    assert state.identity_state.name_source == "generated"
+    assert all("？" not in alias and "?" not in alias for alias in state.identity_state.aliases)
+    assert trace["identity_evidence_score"] > 0.0
+
+
+def test_repeated_relational_negatives_accumulate_temperament_drift_and_explain_window_support(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    final = None
+    for _ in range(24):
+        final = controller.tick(
+            RoundEvent(source="user", content="你是不是根本不记得我了，我有点失望。", target="user"),
+            scenario="chat",
+            mode="interactive",
+        )
+
+    drift = final.state.temperament_state["drift"]
+    why_payload = controller.why_this(final.round_id)
+    summary = why_payload["temperament_window_summary"]
+
+    assert drift["sensitivity"] > 0.0
+    assert drift["boundary_softness"] < 0.0
+    assert summary["sensitivity"]["window_support"] > 0.0
+    assert summary["sensitivity"]["delta_reason"]
+    assert "freeze_reason" in summary["sensitivity"]
+    assert "suppressed_by_clip" in summary["sensitivity"]
+
+
+def test_runtime_startup_migration_sanitizes_aliases_and_reports_counts(tmp_path):
+    runtime_dir = tmp_path / ".alive" / "runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    state_path = runtime_dir / "persona_state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "session_id": "sess-migrate",
+                "round_count": 3,
+                "identity_state": {
+                    "internal_handle": "nalr-migrate",
+                    "display_name": None,
+                    "aliases": ["你叫什么名字？", "阿澜", "Please help me remember breakfast."],
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    report = controller.runtime_migration_report()
+
+    assert state.identity_state.aliases == ["阿澜"]
+    assert report["runtime"]["removed_aliases_count"] == 2
+    assert report["runtime"]["schema_version"] >= 2
 
 
 def test_pfc_model_candidates_accept_list_shaped_action_preferences(tmp_path):

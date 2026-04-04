@@ -105,6 +105,10 @@
       </section>
       <section class="grid">
         <div class="card">
+          <h2>Model Tiers</h2>
+          <div class="table" id="models"></div>
+        </div>
+        <div class="card">
           <h2>Action Heat</h2>
           <div class="bars" id="actions"></div>
         </div>
@@ -191,19 +195,39 @@
         `).join("");
       }
 
+      function renderModels(modelStatus) {
+        const root = document.getElementById("models");
+        const tiers = modelStatus.tiers || {};
+        const bindings = modelStatus.agent_bindings || {};
+        const tierRows = ["state_machine", "small_model", "large_model"].map((tierName) => {
+          const tier = tiers[tierName] || {};
+          const label = tier.mode === "local"
+            ? "local"
+            : `${tier.backend || "unknown"} · ${tier.model || "unconfigured"} · ${tier.credential_present ? "key ok" : "key missing"}`;
+          return `<div class="table-row"><div>${tierName}</div><div>${label}</div></div>`;
+        }).join("");
+        const bindingRows = ["SalienceAgent", "ValueAgent", "PFCAgent", "PerspectiveModel", "Renderer", "planner"]
+          .filter((name) => bindings[name])
+          .map((name) => `<div class="table-row"><div>${name}</div><div>${bindings[name]}</div></div>`)
+          .join("");
+        root.innerHTML = `${tierRows}${bindingRows}`;
+      }
+
       Promise.all([
         loadJson("/metrics/summary"),
         loadJson("/metrics/timeline"),
         loadJson("/metrics/heatmap"),
         loadJson("/replay/1?seed=7").catch(() => ({ ablations: [] })),
         loadJson("/skills/stats"),
-      ]).then(([summary, timeline, heatmap, replay, skillStats]) => {
+        loadJson("/models/status"),
+      ]).then(([summary, timeline, heatmap, replay, skillStats, modelStatus]) => {
         renderStats(summary);
         renderActions(summary);
         renderTimeline(timeline);
         renderHeatmap(heatmap);
         renderReplay(replay);
         renderSkills(skillStats);
+        renderModels(modelStatus);
       });
     </script>
   </body>

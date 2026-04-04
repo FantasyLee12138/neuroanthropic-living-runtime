@@ -191,11 +191,15 @@ class BodyStateAgent(BaseAgent):
         super().__init__(name="BodyStateAgent")
 
     def update_body_state(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> dict:
-        next_energy = _clip(state.body_energy + event.energy_delta)
+        appraisal = dict(context.get("appraisal", {}))
+        fatigue_push = float(appraisal.get("fatigue_push", 0.0))
+        cognitive_load = float(appraisal.get("cognitive_load", 0.0))
+        repair_drag = 0.04 if state.repair_mode else 0.0
+        next_energy = _clip(state.body_energy - fatigue_push * 0.03 - cognitive_load * 0.02 - repair_drag)
         return {"state_patch": {"body_energy": next_energy}}
 
     def compute_body_bias(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
-        energy = _clip(state.body_energy + event.energy_delta)
+        energy = _clip(state.body_energy)
         prefs = {"respond": 0.10}
         sigma_scale = 1.0
         if energy < 0.45:
@@ -267,8 +271,18 @@ class EmotionAgent(BaseAgent):
         super().__init__(name="EmotionAgent")
 
     def update_affect_state(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> dict:
-        next_mood = _clip(state.mood + event.valence * 0.08)
-        return {"state_patch": {"mood": next_mood}}
+        appraisal = dict(context.get("appraisal", {}))
+        inertia = (state.mood - 0.55) * 0.08
+        residue_pull = state.affect_residue * 0.06
+        next_mood = _clip(state.mood + event.valence * 0.08 + inertia * 0.2 - residue_pull * 0.15)
+        session_metadata = dict(state.session_metadata)
+        session_metadata["last_appraisal_band"] = appraisal.get("appraisal_band", "muted")
+        return {
+            "state_patch": {
+                "mood": next_mood,
+                "session_metadata": session_metadata,
+            }
+        }
 
     def compute_affect_bias(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
         prefs = {}
@@ -431,39 +445,70 @@ class UnconsciousAgent(BaseAgent):
             "boundary_softness": 0.025,
             "desire_priority": 0.02,
         }
-        stress_load = _clip(state.affect_residue * 0.45 + max(0.0, 0.45 - state.body_energy) * 0.50 + float(state.resource_state.get("scarcity_index", 0.0)) * 0.35, 0.0, 1.0)
-        relation_shift = _clip(float(context.get("closeness", 0.5)) - 0.5, -0.5, 0.5)
-        experience_shift = _clip(event.valence, -1.0, 1.0)
-        direction_map = {
-            "attachment_need": 0.06,
-            "boundary_softness": -0.05,
-            "sensitivity": 0.05,
-            "patience": -0.06,
-            "extraversion": -0.03,
-            "cognitive_bandwidth": -0.05,
-            "desire_priority": 0.04,
-        }
+        chronic = dict(context.get("chronic_signal", {}))
+        stress_load = _clip(
+            state.affect_residue * 0.45
+            + max(0.0, 0.45 - state.body_energy) * 0.50
+            + float(state.resource_state.get("scarcity_index", 0.0)) * 0.35,
+            0.0,
+            1.0,
+        )
+        repeated_rejection = int(chronic.get("repeated_rejection_count", 0) or 0)
+        repeated_confirmation = int(chronic.get("repeated_confirmation_count", 0) or 0)
+        resource_stress_span = int(chronic.get("resource_stress_span", 0) or 0)
+        identity_repeat = int(chronic.get("identity_cue_repeat_count", 0) or 0)
+        relation_trend = float(chronic.get("relation_trend", 0.0) or 0.0)
+        avg_negative_valence = float(chronic.get("avg_negative_valence", 0.0) or 0.0)
+        avg_positive_valence = float(chronic.get("avg_positive_valence", 0.0) or 0.0)
         updated_drift: dict[str, float] = {}
         updated_current: dict[str, float] = {}
         correction_events: list[dict[str, float | str | int]] = []
-        drift_diagnostics: dict[str, dict[str, float]] = {}
+        drift_diagnostics: dict[str, dict[str, float | str | bool]] = {}
         for key, baseline_value in baseline.items():
             old_drift = float(drift.get(key, 0.0))
             if state.round_count < freeze_until_round.get(key, 0):
                 new_drift = old_drift
                 drift_diagnostics[key] = {
-                    "stress_push": 0.0,
-                    "experience_push": 0.0,
-                    "relation_push": 0.0,
+                    "window_support": 0.0,
                     "recover_rate": 0.0,
                     "effective_push": 0.0,
+                    "delta_reason": "frozen_after_clip",
+                    "suppressed_by_clip": False,
+                    "freeze_reason": "freeze_window_active",
                 }
             else:
-                stress_push = stress_load * direction_map.get(key, 0.0)
-                experience_push = experience_shift * 0.03
-                relation_push = relation_shift * (0.03 if key in {"attachment_need", "boundary_softness"} else 0.015)
+                reasons: list[str] = []
+                window_support = 0.0
+                effective_push = event.valence * 0.012
+                if key == "sensitivity":
+                    effective_push += repeated_rejection * 0.006 + avg_negative_valence * 0.04 + max(0.0, -relation_trend) * 0.05
+                    window_support = repeated_rejection * 0.04 + avg_negative_valence * 0.4
+                    reasons.append("repeated_rejection")
+                elif key == "boundary_softness":
+                    effective_push -= repeated_rejection * 0.006 + avg_negative_valence * 0.03
+                    window_support = repeated_rejection * 0.04 + avg_negative_valence * 0.3
+                    reasons.append("repeated_rejection")
+                elif key == "attachment_need":
+                    effective_push += repeated_confirmation * 0.005 + avg_positive_valence * 0.035 + identity_repeat * 0.002
+                    window_support = repeated_confirmation * 0.035 + avg_positive_valence * 0.35
+                    reasons.append("warm_confirmation")
+                elif key == "patience":
+                    effective_push -= repeated_rejection * 0.004 + stress_load * 0.02
+                    window_support = repeated_rejection * 0.025 + stress_load * 0.2
+                    reasons.append("sustained_friction")
+                elif key == "cognitive_bandwidth":
+                    effective_push -= resource_stress_span * 0.007 + stress_load * 0.025
+                    window_support = resource_stress_span * 0.045 + stress_load * 0.2
+                    reasons.append("resource_pressure")
+                elif key == "extraversion":
+                    effective_push -= resource_stress_span * 0.004 + max(0.0, -relation_trend) * 0.01
+                    window_support = resource_stress_span * 0.03 + max(0.0, -relation_trend) * 0.2
+                    reasons.append("withdrawal_pressure")
+                elif key == "desire_priority":
+                    effective_push += identity_repeat * 0.002 + avg_positive_valence * 0.01 - resource_stress_span * 0.002
+                    window_support = identity_repeat * 0.02 + avg_positive_valence * 0.1
+                    reasons.append("identity_repetition")
                 recover_rate = recover_rates.get(key, 0.02)
-                effective_push = stress_push + experience_push + relation_push
                 new_drift = bounded_drift_delta(
                     previous_drift=old_drift,
                     push=effective_push,
@@ -471,11 +516,12 @@ class UnconsciousAgent(BaseAgent):
                     max_abs=0.25,
                 )
                 drift_diagnostics[key] = {
-                    "stress_push": round(stress_push, 4),
-                    "experience_push": round(experience_push, 4),
-                    "relation_push": round(relation_push, 4),
+                    "window_support": round(window_support, 4),
                     "recover_rate": round(recover_rate, 4),
                     "effective_push": round(effective_push, 4),
+                    "delta_reason": "+".join(reasons) if reasons else "baseline_recovery",
+                    "suppressed_by_clip": False,
+                    "freeze_reason": "",
                 }
             raw_value = float(baseline_value) + new_drift
             clipped_value = _clip(raw_value)
@@ -485,8 +531,13 @@ class UnconsciousAgent(BaseAgent):
             if clipped_value != raw_value:
                 window.append(state.round_count)
                 correction_events.append({"parameter": key, "round": state.round_count, "raw": round(raw_value, 4)})
+                drift_diagnostics[key]["suppressed_by_clip"] = True
+                drift_diagnostics[key]["freeze_reason"] = "clip_guard"
                 if len(window) > 3:
                     freeze_until_round[key] = state.round_count + 10
+                    drift_diagnostics[key]["freeze_reason"] = "repeated_clip"
+            elif not drift_diagnostics[key].get("freeze_reason"):
+                drift_diagnostics[key]["freeze_reason"] = "none"
             correction_window[key] = window
         return {
             "state_patch": {

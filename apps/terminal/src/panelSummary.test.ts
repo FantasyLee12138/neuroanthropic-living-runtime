@@ -85,6 +85,31 @@ describe("formatPanelBody", () => {
         runStatus: "running",
         permissionMode: "ask",
         pendingApprovalCount: 1,
+        modelStatus: {
+          tiers: {
+            state_machine: { mode: "local", credential_present: true },
+            small_model: {
+              mode: "remote",
+              backend: "doubao",
+              model: "ep-20260404191810-qfn7s",
+              api_key_env: "ARK_SMALL_MODEL_API_KEY",
+              credential_present: true
+            },
+            large_model: {
+              mode: "remote",
+              backend: "doubao",
+              model: "doubao-seed-2-0-pro-260215",
+              api_key_env: "ARK_API_KEY",
+              credential_present: true
+            }
+          },
+          agent_bindings: {
+            SalienceAgent: "small_model",
+            ValueAgent: "small_model",
+            PFCAgent: "large_model",
+            Renderer: "large_model"
+          }
+        },
         cognitiveSnapshot: {
           coreGoal: "维持生命性、真实性与连续性",
           currentIntent: "收口终端架构态改造",
@@ -122,6 +147,10 @@ describe("formatPanelBody", () => {
     expect(summary).toContain("模式：正常交流中");
     expect(summary).toContain("身份：阿澜");
     expect(summary).toContain("连续性：名称与身份连续性稳定");
+    expect(summary).toContain("模型分层");
+    expect(summary).toContain("small_model：doubao / ep-20260404191810-qfn7s");
+    expect(summary).toContain("large_model：doubao / doubao-seed-2-0-pro-260215");
+    expect(summary).toContain("SalienceAgent -> small_model");
     expect(summary).toContain("真实性");
     expect(summary).toContain("还没有足够证据判断这轮真实感");
     expect(summary).not.toContain("权限模式：ask");

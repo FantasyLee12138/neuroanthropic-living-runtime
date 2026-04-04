@@ -130,7 +130,7 @@ def test_cil_snapshot_restore_remains_available_for_snapshot_rollback_commands(t
     assert traces[-1]["command"] == rollback["command"]
 
 
-def test_cil_supports_memory_recall_habit_reset_relation_nudge_budget_set_and_checkpoint_trace(tmp_path):
+def test_cil_legacy_mutations_are_boundary_mediated_and_traced(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     controller.tick(
         RoundEvent(
@@ -157,17 +157,29 @@ def test_cil_supports_memory_recall_habit_reset_relation_nudge_budget_set_and_ch
     assert recall["strength"] > 0.0
     assert recall["tier"] in {"hot", "warm", "archive"}
     assert reset.applied is True
+    assert reset.boundary_action == "proposal_route"
+    assert reset.cause_type == "external_stimulus"
+    assert reset.deprecation_warning
     assert controller.memory_store.habit_strength("coffee") == 0.0
     assert nudge.applied is True
+    assert nudge.boundary_action == "proposal_route"
+    assert nudge.cause_type == "external_stimulus"
+    assert nudge.deprecation_warning
     assert controller.relation_show("user")["closeness"] > before_relation["closeness"]
     assert budget.applied is True
+    assert budget.boundary_action == "downgrade_to_stimulus"
+    assert budget.cause_type == "external_stimulus"
+    assert budget.deprecation_warning
     assert controller.load_runtime_state().budget_remaining == 0.5
     assert checkpoint.applied is True
     assert checkpoint.delta["checkpoint_id"].startswith("ckpt-")
+    assert traces[-4]["boundary_action"] == "proposal_route"
+    assert traces[-3]["boundary_action"] == "proposal_route"
+    assert traces[-2]["boundary_action"] == "downgrade_to_stimulus"
     assert any(item["command"] == "checkpoint create" for item in traces)
 
 
-def test_cil_supports_identity_show_and_set_name(tmp_path):
+def test_cil_rejects_identity_set_name_after_subject_bootstrap(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     cil = CommandInterfaceLayer(controller)
 
@@ -176,12 +188,18 @@ def test_cil_supports_identity_show_and_set_name(tmp_path):
     controller.flush_pending_io(raise_on_error=True)
     traces = json.loads((tmp_path / ".alive" / "traces" / "command_traces.json").read_text(encoding="utf-8"))
 
-    assert payload.applied is True
+    assert payload.applied is False
     assert payload.scope == "identity"
     assert payload.operator_level == "soft_intervene"
-    assert identity["display_name"] == "阿澜"
+    assert payload.boundary_action == "reject"
+    assert payload.cause_type == "external_stimulus"
+    assert payload.violation_code == "identity_seed_locked"
+    assert controller.load_runtime_state().safe_mode is True
+    assert identity["display_name"] != "阿澜"
     assert identity["internal_handle"].startswith("nalr-")
     assert traces[-1]["command"] == "identity set-name 阿澜"
+    assert traces[-1]["boundary_action"] == "reject"
+    assert traces[-1]["violation_code"] == "identity_seed_locked"
 
 
 def test_cil_supports_run_lifecycle_commands(tmp_path):

@@ -1,5 +1,6 @@
 import json
 import shutil
+import time
 from pathlib import Path
 
 from nalr.runtime.controller import RuntimeController
@@ -52,6 +53,22 @@ def test_skill_executor_rejects_invalid_output_schema():
 
     assert result.degraded is True
     assert result.failure_policy_applied == "output_validation_failed"
+
+
+def test_skill_executor_keeps_successful_output_even_when_latency_exceeds_budget():
+    executor = SkillExecutor(build_skill_registry())
+
+    output, result = executor.run(
+        round_id=1,
+        skill_name="request_second_sampling",
+        inputs={"fail_score": 0.4, "attempts": 0},
+        provider=lambda fail_score, attempts: (time.sleep(0.02), {"flag": fail_score > 0.2})[1],
+    )
+
+    assert output["flag"] is True
+    assert result.degraded is False
+    assert result.output["flag"] is True
+    assert result.latency_ms >= 20
 
 
 def test_skill_executor_trips_circuit_breaker_after_repeated_failures():

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import MISSING, fields, is_dataclass
+from types import UnionType
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
 from nalr.schemas.models import (
@@ -48,6 +49,9 @@ TYPE_REF_REGISTRY: dict[str, Any] = {
 }
 
 
+UNION_ORIGINS = {Union, UnionType}
+
+
 def _split_generic_args(expr: str) -> list[str]:
     parts: list[str] = []
     depth = 0
@@ -91,7 +95,7 @@ def serialize_contract(contract: Any) -> Any:
         return "Any"
 
     origin = get_origin(contract)
-    if origin is Union:
+    if origin in UNION_ORIGINS:
         args = get_args(contract)
         non_none = [arg for arg in args if arg is not type(None)]
         if len(non_none) == 1 and len(non_none) != len(args):
@@ -144,7 +148,7 @@ def coerce_contract(value: Any, contract: Any, *, path: str = "value") -> Any:
         return {key: coerce_contract(value[key], field_contract, path=f"{path}.{key}") for key, field_contract in contract.items()}
 
     origin = get_origin(contract)
-    if origin is Union:
+    if origin in UNION_ORIGINS:
         last_error: ValueError | None = None
         for option in get_args(contract):
             if option is type(None) and value is None:
