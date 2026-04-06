@@ -1,5 +1,11 @@
 import type { CognitiveSnapshotState, PanelKey, UiState } from "./types.js";
 
+export interface SidebarSummaryItem {
+  label: string;
+  value: string;
+  tone: "normal" | "muted" | "warning" | "accent";
+}
+
 function line(label: string, value: string): string {
   return `${label}：${value}`;
 }
@@ -11,7 +17,7 @@ function statusSummary(state: UiState): string {
     line("状态", String(run.status ?? "unknown")),
     line("当前步骤", String(currentStep.title ?? "暂无")),
     line("已暂停", run.status === "paused" ? "是" : "否"),
-    line("工作区", run.dirty_worktree_detected ? "dirty" : "clean")
+    line("工作区", run.dirty_worktree_detected ? "dirty" : "clean"),
   ].join("\n");
 }
 
@@ -19,12 +25,11 @@ function whySummary(state: UiState): string {
   const why = state.lastWhy ?? {};
   const currentStep = (why.current_step as Record<string, unknown> | undefined) ?? {};
   const stopReason = (why.stop_reason as Record<string, unknown> | undefined) ?? {};
-  const reason =
-    String(currentStep.expected_observation ?? currentStep.detail ?? "先收集当前任务最直接的上下文。");
+  const reason = String(currentStep.expected_observation ?? currentStep.detail ?? "先收集当前任务最直接的上下文。");
   const rows = [
     line("当前目标", String(why.goal_summary ?? why.goal ?? "暂无")),
     line("当前选择", String(currentStep.title ?? "暂无")),
-    line("原因", reason)
+    line("原因", reason),
   ];
   if (stopReason.message) {
     rows.push(line("暂停原因", String(stopReason.message)));
@@ -36,11 +41,11 @@ function stepsSummary(state: UiState): string {
   const current =
     state.steps.find((step) => ["running", "in_progress", "active"].includes(String(step.status ?? ""))) ?? state.steps[0] ?? {};
   const remaining = state.steps.filter(
-    (step) => !["running", "in_progress", "active", "completed", "done"].includes(String(step.status ?? ""))
+    (step) => !["running", "in_progress", "active", "completed", "done"].includes(String(step.status ?? "")),
   );
   const rows = [
     line("当前步骤", String(current.title ?? current.step_id ?? "暂无")),
-    line("剩余步骤", String(remaining.length))
+    line("剩余步骤", String(remaining.length)),
   ];
   if (remaining.length > 0) {
     rows.push(line("后续", remaining.slice(0, 3).map((step) => String(step.title ?? step.step_id ?? "未命名步骤")).join("；")));
@@ -55,16 +60,47 @@ function toolsSummary(state: UiState): string {
   }
   return line(
     "最近工具",
-    recent.map((tool) => `${String(tool.tool_name ?? "unknown")}: ${String(tool.summary ?? tool.status ?? "已执行")}`).join("；")
+    recent.map((tool) => `${String(tool.tool_name ?? "unknown")}: ${String(tool.summary ?? tool.status ?? "已执行")}`).join("；"),
   );
+}
+
+function approvalsSummary(state: UiState): string {
+  if (state.pendingApprovals.length === 0) {
+    return "待审批：0";
+  }
+  return [
+    `待审批：${state.pendingApprovals.length}`,
+    ...state.pendingApprovals
+    .map((approval, index) => {
+      const prefix = index === state.approvalCursor ? ">" : " ";
+      const rows = [
+        `${prefix} [${index + 1}/${state.pendingApprovals.length}] ${approval.tool}`,
+        `  ${approval.summary ?? approval.actionPreview ?? "待处理"}`,
+      ];
+      if (approval.riskLevel) {
+        rows.push(`  风险：${approval.riskLevel}`);
+      }
+      if (approval.mode) {
+        rows.push(`  模式：${approval.mode}`);
+      }
+      if (approval.status) {
+        rows.push(`  状态：${approval.status}`);
+      }
+      return rows.join("\n");
+    }),
+  ].join("\n");
 }
 
 function metaSummary(state: UiState): string {
   const session = state.sessionMeta ?? {};
+  const statusline = state.statusline ?? undefined;
   return [
-    line("权限模式", String(session.permission_mode ?? state.permissionMode ?? "plan")),
-    line("工作区", String(session.cwd ?? "暂无")),
-    line("待审批", String(state.pendingApprovals.length)),
+    line("工作区", String(statusline?.cwd ?? session.cwd ?? "暂无")),
+    line("权限模式", String(state.sidebarSnapshot?.permissionMode ?? statusline?.permission_mode ?? state.permissionMode ?? "plan")),
+    line("Session", String(statusline?.session_id ?? state.activeSessionId ?? "暂无")),
+    line("Run", String(statusline?.run_id ?? state.activeRunId ?? "暂无")),
+    "",
+    formatModelSection(state.sidebarSnapshot?.modelStatus),
   ].join("\n");
 }
 
@@ -143,23 +179,20 @@ function formatModelSection(modelStatus: Record<string, unknown> | undefined): s
   }
   const tiers = (modelStatus.tiers as Record<string, Record<string, unknown>> | undefined) ?? {};
   const bindings = (modelStatus.agent_bindings as Record<string, string> | undefined) ?? {};
-  const tierNames = Object.keys(tiers);
   const tierRows = ["模型分层"];
-  for (const tierName of tierNames) {
-    const tier = tiers[tierName] ?? {};
+  for (const [tierName, tier] of Object.entries(tiers)) {
     const mode = String(tier.mode ?? "unknown");
     if (mode === "local") {
       tierRows.push(`  ${tierName}：local`);
       continue;
     }
-    const backend = String(tier.backend ?? "unknown");
-    const model = String(tier.model ?? "unconfigured");
-    const credential = Boolean(tier.credential_present) ? "key:ok" : "key:missing";
-    tierRows.push(`  ${tierName}：${backend} / ${model} / ${credential}`);
+    tierRows.push(
+      `  ${tierName}：${String(tier.backend ?? "unknown")} / ${String(tier.model ?? "unconfigured")} / ${Boolean(tier.credential_present) ? "key:ok" : "key:missing"}`,
+    );
   }
   tierRows.push("");
   tierRows.push("主要绑定");
-  for (const agentName of ["SalienceAgent", "ValueAgent", "PFCAgent", "PerspectiveModel", "Renderer", "planner"]) {
+  for (const agentName of ["SalienceAgent", "ValueAgent", "PerspectiveModel", "PFCAgent", "Renderer", "planner"]) {
     const tier = bindings[agentName];
     if (tier) {
       tierRows.push(`  ${agentName} -> ${tier}`);
@@ -195,7 +228,7 @@ export function formatCognitiveSummary(snapshot: CognitiveSnapshotState | null |
   ].join("\n");
 }
 
-export function formatPanelBody(state: UiState, panel: PanelKey): string {
+export function formatDetailSummary(state: UiState, panel: Exclude<PanelKey, null>): string {
   if (panel === "status") {
     return statusSummary(state);
   }
@@ -208,12 +241,35 @@ export function formatPanelBody(state: UiState, panel: PanelKey): string {
   if (panel === "tools") {
     return toolsSummary(state);
   }
-  if (panel === "state") {
-    const blocks = [
-      formatCognitiveSummary(state.sidebarSnapshot?.cognitiveSnapshot),
-      formatModelSection(state.sidebarSnapshot?.modelStatus),
-    ].filter(Boolean);
-    return blocks.join("\n\n");
+  if (panel === "approvals") {
+    return approvalsSummary(state);
   }
-  return "";
+  if (panel === "meta") {
+    return metaSummary(state);
+  }
+  return formatCognitiveSummary(state.sidebarSnapshot?.cognitiveSnapshot);
+}
+
+export function formatSidebarSummary(state: UiState): SidebarSummaryItem[] {
+  const snapshot = state.sidebarSnapshot;
+  const lastTool = state.tools.at(-1);
+  return [
+    { label: "目标", value: snapshot?.goalSummary || "暂无", tone: "muted" },
+    { label: "步骤", value: snapshot?.currentStep || String(state.run?.current_step?.title ?? "暂无"), tone: "normal" },
+    {
+      label: "工具",
+      value: lastTool ? `${String(lastTool.tool_name ?? "unknown")}: ${String(lastTool.summary ?? lastTool.status ?? "已执行")}` : "暂无",
+      tone: "muted",
+    },
+    {
+      label: "审批",
+      value: state.pendingApprovals.length > 0 ? `${state.pendingApprovals.length} 项待处理` : "无待审批",
+      tone: state.pendingApprovals.length > 0 ? "warning" : "muted",
+    },
+    {
+      label: "认知",
+      value: snapshot?.cognitiveSnapshot.currentIntent || "暂无",
+      tone: "accent",
+    },
+  ];
 }

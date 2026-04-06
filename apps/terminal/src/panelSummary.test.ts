@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatPanelBody } from "./panelSummary.js";
+import { formatDetailSummary, formatSidebarSummary } from "./panelSummary.js";
 import type { UiState } from "./types.js";
 
 function makeState(overrides: Partial<UiState> = {}): UiState {
@@ -19,15 +19,24 @@ function makeState(overrides: Partial<UiState> = {}): UiState {
     transcriptMode: "full",
     promptHistoryByCwd: {},
     pendingApprovals: [],
+    actionBar: {
+      primary: [],
+      secondary: [],
+      selectedIndex: 0,
+    },
     permissionMode: "plan",
     assistantStreamActive: false,
+    activityRail: [],
+    detailDrawer: null,
+    focusZone: "input",
+    approvalCursor: 0,
     ...overrides
   };
 }
 
-describe("formatPanelBody", () => {
+describe("panelSummary", () => {
   it("renders a readable status summary instead of JSON", () => {
-    const summary = formatPanelBody(
+    const summary = formatDetailSummary(
       makeState({
         run: {
           status: "paused",
@@ -66,13 +75,32 @@ describe("formatPanelBody", () => {
       ]
     });
 
-    expect(formatPanelBody(state, "why")).toContain("当前目标：理解仓库结构");
-    expect(formatPanelBody(state, "steps")).toContain("剩余步骤：2");
-    expect(formatPanelBody(state, "steps")).toContain("后续：总结模块边界；整理结论");
-    expect(formatPanelBody(state, "tools")).toContain("最近工具：repo_scan: 扫描了 3 个文件；read_file: 读取了 handlers.py");
+    expect(formatDetailSummary(state, "why")).toContain("当前目标：理解仓库结构");
+    expect(formatDetailSummary(state, "steps")).toContain("剩余步骤：2");
+    expect(formatDetailSummary(state, "steps")).toContain("后续：总结模块边界；整理结论");
+    expect(formatDetailSummary(state, "tools")).toContain("最近工具：repo_scan: 扫描了 3 个文件；read_file: 读取了 handlers.py");
   });
 
-  it("renders unified state snapshot for sidebar", () => {
+  it("renders approval details with queue position, risk, and mode", () => {
+    const summary = formatDetailSummary(
+      makeState({
+        approvalCursor: 1,
+        pendingApprovals: [
+          { callId: "a1", tool: "write_file", summary: "改 app.tsx", riskLevel: "high", mode: "workspace-write", status: "pending" },
+          { callId: "a2", tool: "run_shell", actionPreview: "npm test", riskLevel: "medium", mode: "exec", status: "blocked" }
+        ]
+      }),
+      "approvals"
+    );
+
+    expect(summary).toContain("待审批：2");
+    expect(summary).toContain("> [2/2] run_shell");
+    expect(summary).toContain("风险：medium");
+    expect(summary).toContain("模式：exec");
+    expect(summary).toContain("状态：blocked");
+  });
+
+  it("renders cognition and meta drawers with decision-useful details", () => {
     const state = makeState({
       run: { status: "running", current_step: { title: "写 slash 测试" } },
       lastWhy: { goal_summary: "实现终端切片" },
@@ -144,26 +172,72 @@ describe("formatPanelBody", () => {
       pendingApprovals: [{ callId: "run-1:tool:0", tool: "write_file", riskLevel: "high" }]
     });
 
-    const summary = formatPanelBody(state, "state");
-    expect(summary).toContain("核心目标");
-    expect(summary).toContain("维持生命性、真实性与连续性");
-    expect(summary).toContain("当前意图");
-    expect(summary).toContain("收口终端架构态改造");
-    expect(summary).toContain("心境：较开心 (0.58)");
-    expect(summary).toContain("能量：状态不错 (0.71)");
-    expect(summary).toContain("情感余波：轻微波动 (0.12)");
-    expect(summary).toContain("焦点：正在专心处理眼前的事");
-    expect(summary).toContain("模式：正常交流中");
-    expect(summary).toContain("身份：阿澜");
-    expect(summary).toContain("连续性：名称与身份连续性稳定");
-    expect(summary).toContain("模型分层");
-    expect(summary).toContain("small_model：doubao / ep-20260404191810-qfn7s");
-    expect(summary).toContain("medium_model：deepseek / deepseek-chat");
-    expect(summary).toContain("large_model：doubao / doubao-seed-2-0-pro-260215");
-    expect(summary).toContain("SalienceAgent -> small_model");
-    expect(summary).toContain("PerspectiveModel -> medium_model");
-    expect(summary).toContain("真实性");
-    expect(summary).toContain("还没有足够证据判断这轮真实感");
-    expect(summary).not.toContain("权限模式：ask");
+    const cognition = formatDetailSummary(state, "cognition");
+    expect(cognition).toContain("核心目标");
+    expect(cognition).toContain("维持生命性、真实性与连续性");
+    expect(cognition).toContain("当前意图");
+    expect(cognition).toContain("收口终端架构态改造");
+    expect(cognition).toContain("心境：较开心 (0.58)");
+    expect(cognition).toContain("焦点：正在专心处理眼前的事");
+    expect(cognition).toContain("真实性");
+    expect(cognition).toContain("还没有足够证据判断这轮真实感");
+
+    const meta = formatDetailSummary(state, "meta");
+    expect(meta).toContain("工作区：/tmp/demo");
+    expect(meta).toContain("权限模式：ask");
+    expect(meta).toContain("模型分层");
+    expect(meta).toContain("small_model：doubao / ep-20260404191810-qfn7s");
+    expect(meta).toContain("PerspectiveModel -> medium_model");
+  });
+
+  it("renders a compact sidebar summary for the default shell", () => {
+    const summary = formatSidebarSummary(
+      makeState({
+        sidebarSnapshot: {
+          goalSummary: "完成终端重构",
+          currentStep: "改 app.tsx 布局",
+          reasonSummary: "主屏要先稳定",
+          lastTool: "read_file",
+          runStatus: "running",
+          permissionMode: "ask",
+          pendingApprovalCount: 2,
+          modelStatus: undefined,
+          cognitiveSnapshot: {
+            coreGoal: "维持生命性、真实性与连续性",
+            currentIntent: "收口终端架构态改造",
+            vitalSigns: {
+              mood: 0.58,
+              bodyEnergy: 0.71,
+              affectResidue: 0.12,
+              focus: "task",
+              mode: "interactive"
+            },
+            identity: {
+              displayName: "阿澜",
+              continuity: "名称与身份连续性稳定"
+            },
+            authenticity: {
+              summary: "还没有足够证据判断这轮真实感",
+              source: "none",
+              guardAction: "none"
+            }
+          }
+        },
+        steps: [{ step_id: "s1", title: "改 app.tsx 布局", status: "running" }],
+        tools: [{ call_id: "t1", tool_name: "read_file", summary: "读取 app.tsx" }],
+        pendingApprovals: [
+          { callId: "a1", tool: "write_file", summary: "准备写 app.tsx", status: "pending" },
+          { callId: "a2", tool: "run_shell", summary: "跑测试", status: "pending" }
+        ]
+      })
+    );
+
+    expect(summary).toEqual([
+      { label: "目标", value: "完成终端重构", tone: "muted" },
+      { label: "步骤", value: "改 app.tsx 布局", tone: "normal" },
+      { label: "工具", value: "read_file: 读取 app.tsx", tone: "muted" },
+      { label: "审批", value: "2 项待处理", tone: "warning" },
+      { label: "认知", value: "收口终端架构态改造", tone: "accent" }
+    ]);
   });
 });

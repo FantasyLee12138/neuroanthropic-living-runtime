@@ -24,5 +24,10 @@ fi
 export NALR_REPO_ROOT="$SCRIPT_DIR"
 export NALR_LAUNCH_CWD="${PWD}"
 
+if [ -t 1 ]; then
+  printf '\033]0;NALR\007'
+  printf '\033[2J\033[3J\033[H'
+fi
+
 cd "$TERMINAL_DIR"
 exec "$TERMINAL_DIR/node_modules/.bin/tsx" src/cli.ts "$@"

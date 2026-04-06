@@ -10,9 +10,10 @@ export type BridgeControlCommand =
   | "model"
   | "mode"
   | "permissions"
-  | "dream";
+  | "dream"
+  | "probability";
 
-export type PanelKey = "status" | "why" | "steps" | "tools" | "state" | null;
+export type PanelKey = "status" | "why" | "steps" | "tools" | "cognition" | "approvals" | "meta" | null;
 
 export type InboundBridgeEvent =
   | { type: "start_session"; session_id: string; cwd: string; persist_current?: boolean }
@@ -49,6 +50,7 @@ export type OutboundBridgeEvent =
       mode?: string;
       status?: string;
       actions?: string[];
+      choices?: UiAction[];
       run_id?: string;
       approved?: boolean | null;
     }
@@ -70,6 +72,10 @@ export type OutboundBridgeEvent =
       session?: Record<string, unknown>;
       statusline?: Record<string, unknown>;
       model_status?: Record<string, unknown>;
+      ui_actions?: {
+        primary?: UiAction[];
+        secondary?: UiAction[];
+      };
     }
   | { type: "assistant_final"; session_id?: string; run_id?: string; message: string; payload?: Record<string, unknown> }
   | { type: "error"; session_id?: string; message: string }
@@ -92,6 +98,7 @@ export interface PendingApproval {
   mode?: string;
   status?: string;
   runId?: string;
+  choices?: UiAction[];
 }
 
 export interface ToolTimelineEntry {
@@ -100,6 +107,14 @@ export interface ToolTimelineEntry {
   tool: string;
   summary?: string;
   status?: string;
+}
+
+export interface ActivityEntry {
+  kind: "step" | "tool" | "result" | "approval";
+  label: string;
+  summary?: string;
+  status?: string;
+  callId?: string;
 }
 
 export interface CognitiveSnapshotState {
@@ -123,6 +138,14 @@ export interface CognitiveSnapshotState {
   };
 }
 
+export interface UiAction {
+  id: string;
+  label: string;
+  kind: "command" | "drawer" | "approval" | "approval_nav";
+  value: string;
+  disabled: boolean;
+}
+
 export interface SidebarSnapshotState {
   goalSummary: string;
   currentStep: string;
@@ -133,6 +156,10 @@ export interface SidebarSnapshotState {
   pendingApprovalCount: number;
   cognitiveSnapshot: CognitiveSnapshotState;
   modelStatus?: Record<string, unknown>;
+  uiActions?: {
+    primary: UiAction[];
+    secondary: UiAction[];
+  };
 }
 
 export interface StatusLineState {
@@ -157,9 +184,18 @@ export interface UiState {
   sidebarSnapshot: SidebarSnapshotState | null;
   statusline: StatusLineState | null;
   lines: UiLine[];
+  activityRail: ActivityEntry[];
   transcriptMode: "full" | "compact";
   promptHistoryByCwd: Record<string, string[]>;
   pendingApprovals: PendingApproval[];
+  actionBar: {
+    primary: UiAction[];
+    secondary: UiAction[];
+    selectedIndex: number;
+  };
   permissionMode: string;
   assistantStreamActive: boolean;
+  detailDrawer: PanelKey;
+  focusZone: "input" | "transcript" | "drawer" | "actions" | "approval";
+  approvalCursor: number;
 }

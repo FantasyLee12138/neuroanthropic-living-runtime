@@ -1,8 +1,12 @@
 export type ConsoleLayoutMode = "split" | "stack";
+export type DetailPlacement = "side" | "bottom";
 
 export interface ConsoleViewportPlan {
   layout: ConsoleLayoutMode;
+  detailPlacement: DetailPlacement;
   transcriptLines: number;
+  sidebarLines: number;
+  detailLines: number;
   compactSidebar: boolean;
   sidebarWidth: number;
 }
@@ -14,22 +18,36 @@ export function resolveConsoleLayout(width: number): ConsoleLayoutMode {
 export function buildConsoleViewportPlan(input: {
   width: number;
   height: number;
-  transcriptMode: "full" | "compact";
-  hasPanel: boolean;
+  hasDetailDrawer: boolean;
   hasPendingApproval: boolean;
 }): ConsoleViewportPlan {
   const layout = resolveConsoleLayout(input.width);
-  const sidebarWidth = layout === "split" ? Math.max(38, Math.min(42, Math.floor(input.width * 0.32))) : input.width;
-  const reservedRows =
-    (layout === "split" ? 12 : 14) +
-    (input.hasPanel ? 4 : 0) +
-    (input.hasPendingApproval ? 4 : 0);
-  const rawTranscriptLines = Math.max(5, input.height - reservedRows);
-  const transcriptLines = Math.min(rawTranscriptLines, input.transcriptMode === "compact" ? 12 : 10);
+  const compactSidebar = input.height <= 22;
+  if (layout === "split") {
+    const sharedLines = Math.max(8, input.height - 8);
+    return {
+      layout,
+      detailPlacement: "side",
+      transcriptLines: sharedLines,
+      sidebarLines: sharedLines,
+      detailLines: input.hasDetailDrawer ? sharedLines : 0,
+      compactSidebar,
+      sidebarWidth: 36,
+    };
+  }
+
+  const baseRows = Math.max(14, input.height - 8);
+  const sidebarLines = compactSidebar ? 4 : 5;
+  const detailLines = input.hasDetailDrawer ? 6 : 0;
+  const transcriptLines = Math.max(8, baseRows - sidebarLines - detailLines);
+
   return {
     layout,
+    detailPlacement: "bottom",
     transcriptLines,
-    compactSidebar: input.height <= 24,
-    sidebarWidth
+    sidebarLines,
+    detailLines,
+    compactSidebar,
+    sidebarWidth: input.width,
   };
 }

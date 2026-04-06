@@ -18,9 +18,13 @@ describe("sessionStore", () => {
     expect(withRun.activeSessionId).toBe("sess-1");
     expect(withRun.activeRunId).toBe("run-1");
     expect(withRun.run?.status).toBe("running");
-    expect(withRun.lines).toEqual([]);
+    expect(withRun.lines).toEqual([{ kind: "system", text: "任务已启动。" }]);
     expect(withRun.pendingApprovals).toEqual([]);
+    expect(withRun.activityRail).toEqual([]);
     expect(withRun.toolTimeline).toEqual([]);
+    expect(withRun.detailDrawer).toBeNull();
+    expect(withRun.focusZone).toBe("input");
+    expect(withRun.approvalCursor).toBe(0);
   });
 
   it("hydrates transcript, timeline, approvals, and transcript mode from session_started", () => {
@@ -63,19 +67,28 @@ describe("sessionStore", () => {
     expect(next.toolTimeline).toEqual([
       { kind: "call", callId: "run-1:tool:0", tool: "repo_scan", summary: "scan", status: "completed" }
     ]);
+    expect(next.activityRail).toEqual([
+      { kind: "tool", label: "repo_scan", summary: "scan", status: "completed", callId: "run-1:tool:0" },
+      { kind: "approval", label: "repo_scan", summary: "scan", status: "pending", callId: "run-1:tool:0" }
+    ]);
     expect(next.pendingApprovals).toEqual([
       {
         callId: "run-1:tool:0",
         tool: "repo_scan",
+        args: undefined,
+        riskLevel: undefined,
         summary: "scan",
         actionPreview: "scan src",
+        mode: undefined,
         status: "pending",
-        runId: "run-1"
+        runId: "run-1",
+        choices: [],
       }
     ]);
+    expect(next.approvalCursor).toBe(0);
   });
 
-  it("accumulates steps and tool results for side panels", () => {
+  it("routes steps and tool results into the activity rail instead of the main transcript", () => {
     const initial = createInitialUiState();
     const withStep = applyBridgeEvent(initial, {
       type: "step_update",
@@ -92,9 +105,10 @@ describe("sessionStore", () => {
     expect(withTool.steps).toHaveLength(1);
     expect(withTool.tools).toHaveLength(1);
     expect(withTool.tools[0]?.tool_name).toBe("repo_scan");
-    expect(withTool.lines).toEqual([
-      { kind: "system", text: "Step: 检查 planner.py" },
-      { kind: "system", text: "Result: repo_scan" }
+    expect(withTool.lines).toEqual([]);
+    expect(withTool.activityRail).toEqual([
+      { kind: "step", label: "检查 planner.py", status: undefined },
+      { kind: "result", label: "repo_scan", summary: "scanned 3 files", status: undefined, callId: "run-1:tool:0" }
     ]);
     expect(withTool.toolTimeline).toEqual([
       { kind: "result", callId: "run-1:tool:0", tool: "repo_scan", summary: "scanned 3 files", status: undefined }
@@ -113,6 +127,15 @@ describe("sessionStore", () => {
       run_status: "running",
       permission_mode: "ask",
       pending_approval_count: 1,
+      ui_actions: {
+        primary: [
+          { id: "status", label: "状态", kind: "drawer", value: "status", disabled: false },
+          { id: "approvals", label: "审批", kind: "drawer", value: "approvals", disabled: false }
+        ],
+        secondary: [
+          { id: "abort", label: "中止", kind: "command", value: "abort", disabled: false }
+        ]
+      },
       status: { run_id: "run-42", status: "running", current_step: { title: "写测试" } },
       why: { goal_summary: "完成终端界面切片" },
       steps: [{ step_id: "s1", title: "写测试", status: "running" }],
@@ -157,6 +180,8 @@ describe("sessionStore", () => {
     expect(next.tools).toHaveLength(1);
     expect(next.sidebarSnapshot?.currentStep).toBe("写测试");
     expect(next.sidebarSnapshot?.pendingApprovalCount).toBe(1);
+    expect(next.actionBar.primary.map((item) => item.id)).toEqual(["status", "approvals"]);
+    expect(next.actionBar.secondary.map((item) => item.id)).toEqual(["abort"]);
     expect(next.sidebarSnapshot?.cognitiveSnapshot.coreGoal).toBe("维持生命性、真实性与连续性");
     expect(next.sidebarSnapshot?.cognitiveSnapshot.vitalSigns.mood).toBe(0.61);
     expect(next.sidebarSnapshot?.cognitiveSnapshot.identity.displayName).toBe("阿澜");
@@ -183,7 +208,11 @@ describe("sessionStore", () => {
       args: { path: "src/app.tsx" },
       risk_level: "high",
       summary: "将修改工作区文件",
-      action_preview: "write src/app.tsx"
+      action_preview: "write src/app.tsx",
+      choices: [
+        { id: "approve", label: "批准", kind: "approval", value: "approve", disabled: false },
+        { id: "reject", label: "拒绝", kind: "approval", value: "reject", disabled: false }
+      ]
     });
     const resolved = applyBridgeEvent(withApproval, {
       type: "tool_result",
@@ -194,10 +223,20 @@ describe("sessionStore", () => {
 
     expect(withApproval.pendingApprovals).toHaveLength(1);
     expect(withApproval.pendingApprovals[0]?.callId).toBe("run-1:tool:0");
+    expect(withApproval.pendingApprovals[0]?.choices).toEqual([
+      { id: "approve", label: "批准", kind: "approval", value: "approve", disabled: false },
+      { id: "reject", label: "拒绝", kind: "approval", value: "reject", disabled: false }
+    ]);
+    expect(withApproval.lines).toEqual([{ kind: "system", text: "等待审批：write_file" }]);
     expect(withApproval.toolTimeline).toEqual([
       { kind: "call", callId: "run-1:tool:0", tool: "write_file", summary: "准备写入 app.tsx", status: undefined },
       { kind: "approval", callId: "run-1:tool:0", tool: "write_file", summary: "将修改工作区文件", status: "pending" }
     ]);
+    expect(withApproval.activityRail).toEqual([
+      { kind: "tool", label: "write_file", summary: "准备写入 app.tsx", status: undefined, callId: "run-1:tool:0" },
+      { kind: "approval", label: "write_file", summary: "将修改工作区文件", status: "pending", callId: "run-1:tool:0" }
+    ]);
+    expect(withApproval.approvalCursor).toBe(0);
     expect(resolved.pendingApprovals).toEqual([]);
     expect(resolved.toolTimeline.at(-1)).toEqual({
       kind: "result",
@@ -205,6 +244,13 @@ describe("sessionStore", () => {
       tool: "write_file",
       summary: "updated app.tsx",
       status: "ok"
+    });
+    expect(resolved.activityRail.at(-1)).toEqual({
+      kind: "result",
+      label: "write_file",
+      summary: "updated app.tsx",
+      status: "ok",
+      callId: "run-1:tool:0"
     });
   });
 

@@ -6,6 +6,7 @@ import { render } from "ink";
 import { App } from "./app.js";
 import { PythonBridgeClient, createSessionId, resolveRepoRoot } from "./bridge/client.js";
 import { createOneShotPrinter } from "./oneShotPrinter.js";
+import { setTerminalTitle } from "./terminalWindow.js";
 
 const DEFAULT_ONE_SHOT_TIMEOUT_MS = 70_000;
 
@@ -26,7 +27,7 @@ function printHelp(): void {
   console.log("  NALR Dream [cue]      Trigger a manual dream run");
   console.log("");
   console.log("Slash commands:");
-  console.log("  /help /status /why /steps /tools /state /dream [cue] /pause /resume /abort /clear /compact /mode [value] /permissions [value] /model /exit");
+  console.log("  /help /status /why /steps /tools /state /probability [round|action <name>|layer <name>] /dream [cue] /pause /resume /abort /clear /compact /mode [value] /permissions [value] /model /exit");
 }
 
 async function runOneShot(prompt: string): Promise<number> {
@@ -83,6 +84,7 @@ async function runInteractive(): Promise<void> {
   const launchCwd = process.env.NALR_LAUNCH_CWD ?? process.cwd();
   const repoRoot = resolveRepoRoot(launchCwd);
   const bridge = new PythonBridgeClient({ repoRoot, cwd: launchCwd });
+  setTerminalTitle("NALR");
   const instance = render(React.createElement(App, { bridge, cwd: launchCwd, repoRoot }));
   await instance.waitUntilExit();
 }

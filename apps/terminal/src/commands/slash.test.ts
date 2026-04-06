@@ -10,6 +10,7 @@ describe("parseSlashCommand", () => {
     expect(parseSlashCommand("/model")).toEqual({ kind: "bridge", command: "model" });
     expect(parseSlashCommand("/state")).toEqual({ kind: "bridge", command: "state" });
     expect(parseSlashCommand("/dream")).toEqual({ kind: "bridge", command: "dream" });
+    expect(parseSlashCommand("/probability")).toEqual({ kind: "bridge", command: "probability" });
   });
 
   it("keeps local shell commands local", () => {
@@ -24,6 +25,16 @@ describe("parseSlashCommand", () => {
     expect(parseSlashCommand("/permissions ask")).toEqual({ kind: "bridge", command: "permissions", value: "ask" });
     expect(parseSlashCommand("/mode")).toEqual({ kind: "bridge", command: "mode" });
     expect(parseSlashCommand("/dream tea")).toEqual({ kind: "bridge", command: "dream", value: "tea" });
+    expect(parseSlashCommand("/probability action wander")).toEqual({
+      kind: "bridge",
+      command: "probability",
+      value: "action wander",
+    });
+    expect(parseSlashCommand("/probability layer token")).toEqual({
+      kind: "bridge",
+      command: "probability",
+      value: "layer token",
+    });
   });
 
   it("returns null for plain chat input", () => {

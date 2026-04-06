@@ -1,4 +1,4 @@
-import type { CognitiveSnapshotState, OutboundBridgeEvent, UiLine, UiState } from "../types.js";
+import type { ActivityEntry, CognitiveSnapshotState, OutboundBridgeEvent, UiAction, UiLine, UiState } from "../types.js";
 
 export function createInitialUiState(): UiState {
   return {
@@ -13,11 +13,20 @@ export function createInitialUiState(): UiState {
     sidebarSnapshot: null,
     statusline: null,
     lines: [],
+    activityRail: [],
     transcriptMode: "full",
     promptHistoryByCwd: {},
     pendingApprovals: [],
+    actionBar: {
+      primary: [],
+      secondary: [],
+      selectedIndex: 0,
+    },
     permissionMode: "plan",
     assistantStreamActive: false,
+    detailDrawer: null,
+    focusZone: "input",
+    approvalCursor: 0,
   };
 }
 
@@ -47,6 +56,13 @@ export function addLocalLine(state: UiState, text: string, kind: UiLine["kind"] 
 
 export function clearLines(state: UiState): UiState {
   return { ...state, lines: [], assistantStreamActive: false };
+}
+
+function appendActivity(state: UiState, entry: ActivityEntry): UiState {
+  return {
+    ...state,
+    activityRail: [...state.activityRail.slice(-11), entry],
+  };
 }
 
 function appendAssistantDelta(state: UiState, delta: string): UiState {
@@ -106,6 +122,29 @@ function normalizeTimeline(entries: unknown): UiState["toolTimeline"] {
     }));
 }
 
+function normalizeActivityRail(
+  timeline: UiState["toolTimeline"],
+  approvals: UiState["pendingApprovals"],
+): ActivityEntry[] {
+  const fromTimeline = timeline.map((entry) => ({
+    kind: entry.kind === "call" ? "tool" : entry.kind,
+    label: entry.tool,
+    summary: entry.summary,
+    status: entry.status,
+    callId: entry.callId,
+  })) satisfies ActivityEntry[];
+  const missingApprovals = approvals
+    .filter((approval) => !fromTimeline.some((entry) => entry.kind === "approval" && entry.callId === approval.callId))
+    .map((approval) => ({
+      kind: "approval",
+      label: approval.tool,
+      summary: approval.summary,
+      status: approval.status,
+      callId: approval.callId,
+    })) satisfies ActivityEntry[];
+  return [...fromTimeline, ...missingApprovals].slice(-12);
+}
+
 function normalizePendingApprovals(entries: unknown): UiState["pendingApprovals"] {
   if (!Array.isArray(entries)) {
     return [];
@@ -122,7 +161,46 @@ function normalizePendingApprovals(entries: unknown): UiState["pendingApprovals"
       mode: entry.mode == null ? undefined : String(entry.mode),
       status: entry.status == null ? undefined : String(entry.status),
       runId: entry.runId == null ? (entry.run_id == null ? undefined : String(entry.run_id)) : String(entry.runId),
+      choices: normalizeUiActions(entry.choices),
     }));
+}
+
+function normalizeUiActions(entries: unknown): UiAction[] {
+  if (!Array.isArray(entries)) {
+    return [];
+  }
+  return entries
+    .filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
+    .map((entry) => ({
+      id: String(entry.id ?? ""),
+      label: String(entry.label ?? ""),
+      kind: String(entry.kind ?? "command") as UiAction["kind"],
+      value: String(entry.value ?? ""),
+      disabled: Boolean(entry.disabled),
+    }))
+    .filter((entry) => entry.id.length > 0 && entry.label.length > 0 && entry.value.length > 0);
+}
+
+function normalizeApprovalCursor(entries: UiState["pendingApprovals"]): number {
+  return entries.length === 0 ? 0 : Math.min(entries.length - 1, 0);
+}
+
+function appendLifecycleLine(state: UiState, status: string | undefined, previousStatus?: string): UiState {
+  const normalized = String(status ?? "");
+  if (normalized === "running" && previousStatus !== "running") {
+    const text = previousStatus === "paused" ? "任务已恢复。" : "任务已启动。";
+    return appendLine(state, { kind: "system", text });
+  }
+  if (normalized === "paused" && previousStatus !== "paused") {
+    return appendLine(state, { kind: "system", text: "任务已暂停。" });
+  }
+  if (normalized === "aborted" && previousStatus !== "aborted") {
+    return appendLine(state, { kind: "system", text: "任务已中止。" });
+  }
+  if ((normalized === "completed" || normalized === "done") && previousStatus !== normalized) {
+    return appendLine(state, { kind: "system", text: "任务已完成。" });
+  }
+  return state;
 }
 
 function normalizeCognitiveSnapshot(snapshot: Record<string, unknown> | undefined): CognitiveSnapshotState {
@@ -168,45 +246,62 @@ export function applyBridgeEvent(state: UiState, event: OutboundBridgeEvent): Ui
       lines: restoredLines,
       toolTimeline: restoredTimeline,
       pendingApprovals: restoredApprovals,
+      actionBar: {
+        primary: [],
+        secondary: [],
+        selectedIndex: 0,
+      },
+      activityRail: normalizeActivityRail(restoredTimeline, restoredApprovals),
       transcriptMode,
       permissionMode: String(event.session.permission_mode ?? state.permissionMode),
+      approvalCursor: normalizeApprovalCursor(restoredApprovals),
     };
   }
   if (event.type === "assistant_token") {
     return appendAssistantDelta(state, event.delta);
   }
   if (event.type === "run_status") {
-    return {
+    const nextState = {
       ...state,
       activeSessionId: event.session_id,
       activeRunId: String(event.run.run_id ?? "") || state.activeRunId,
       run: event.run,
     };
+    return appendLifecycleLine(nextState, String(event.run.status ?? ""), String(state.run?.status ?? ""));
   }
   if (event.type === "step_update") {
-    return appendLine({
-      ...state,
-      activeSessionId: event.session_id,
-      steps: replaceByKey(state.steps, "step_id", event.step)
-    }, { kind: "system", text: `Step: ${String(event.step.title ?? event.step.step_id ?? "unknown")}` });
+    return appendActivity(
+      {
+        ...state,
+        activeSessionId: event.session_id,
+        steps: replaceByKey(state.steps, "step_id", event.step),
+      },
+      {
+        kind: "step",
+        label: String(event.step.title ?? event.step.step_id ?? "unknown"),
+        status: event.step.status == null ? undefined : String(event.step.status),
+      },
+    );
   }
   if (event.type === "tool_call") {
-    return appendLine(
+    return appendActivity(
       appendTimeline(
         { ...state, activeSessionId: event.session_id },
         { kind: "call", callId: event.call_id, tool: event.tool, summary: event.summary, status: event.status }
       ),
-      { kind: "system", text: `Tool: ${event.tool}${event.summary ? ` - ${event.summary}` : ""}` }
+      { kind: "tool", label: event.tool, summary: event.summary, status: event.status, callId: event.call_id }
     );
   }
   if (event.type === "tool_result") {
-    return appendLine(
+    const nextApprovals = state.pendingApprovals.filter((item) => item.callId !== event.call_id);
+    return appendActivity(
       appendTimeline(
         {
           ...state,
           activeSessionId: event.session_id,
           tools: replaceByKey(state.tools, "call_id", { ...event.result, call_id: event.call_id }),
-          pendingApprovals: state.pendingApprovals.filter((item) => item.callId !== event.call_id),
+          pendingApprovals: nextApprovals,
+          approvalCursor: nextApprovals.length === 0 ? 0 : Math.min(state.approvalCursor, nextApprovals.length - 1),
         },
         {
           kind: "result",
@@ -216,7 +311,13 @@ export function applyBridgeEvent(state: UiState, event: OutboundBridgeEvent): Ui
           status: event.result.status == null ? undefined : String(event.result.status),
         }
       ),
-      { kind: "system", text: `Result: ${String(event.result.tool_name ?? event.call_id)}` }
+      {
+        kind: "result",
+        label: String(event.result.tool_name ?? "unknown"),
+        summary: String(event.result.summary ?? ""),
+        status: event.result.status == null ? undefined : String(event.result.status),
+        callId: event.call_id,
+      }
     );
   }
   if (event.type === "assistant_final") {
@@ -237,33 +338,45 @@ export function applyBridgeEvent(state: UiState, event: OutboundBridgeEvent): Ui
     return state;
   }
   if (event.type === "approval_request") {
-    const nextState = appendTimeline(
-      {
-        ...state,
-        activeSessionId: event.session_id,
-        pendingApprovals: replacePendingApproval(state, {
+    const nextApprovals = replacePendingApproval(state, {
+      callId: event.call_id,
+      tool: event.tool,
+      args: event.args,
+      riskLevel: event.risk_level,
+      summary: event.summary,
+      actionPreview: event.action_preview,
+      mode: event.mode,
+      status: event.status,
+      runId: event.run_id,
+      choices: normalizeUiActions(event.choices),
+    });
+    const nextState = appendActivity(
+      appendTimeline(
+        {
+          ...state,
+          activeSessionId: event.session_id,
+          pendingApprovals: nextApprovals,
+          approvalCursor: nextApprovals.findIndex((item) => item.callId === event.call_id),
+        },
+        {
+          kind: "approval",
           callId: event.call_id,
           tool: event.tool,
-          args: event.args,
-          riskLevel: event.risk_level,
           summary: event.summary,
-          actionPreview: event.action_preview,
-          mode: event.mode,
-          status: event.status,
-          runId: event.run_id,
-        }),
-      },
+          status: event.status ?? "pending",
+        }
+      ),
       {
         kind: "approval",
-        callId: event.call_id,
-        tool: event.tool,
+        label: event.tool,
         summary: event.summary,
         status: event.status ?? "pending",
+        callId: event.call_id,
       }
     );
     return appendLine(nextState, {
       kind: "system",
-      text: `Approval: ${event.tool}${event.summary ? ` - ${event.summary}` : ""}`,
+      text: `等待审批：${event.tool}`,
     });
   }
   if (event.type === "sidebar_snapshot") {
@@ -286,12 +399,21 @@ export function applyBridgeEvent(state: UiState, event: OutboundBridgeEvent): Ui
         pendingApprovalCount: event.pending_approval_count,
         cognitiveSnapshot: normalizeCognitiveSnapshot(event.cognitive_snapshot),
         modelStatus: event.model_status,
+        uiActions: {
+          primary: normalizeUiActions(event.ui_actions?.primary),
+          secondary: normalizeUiActions(event.ui_actions?.secondary),
+        },
       },
       statusline: ((event.statusline ?? undefined) as unknown as UiState["statusline"]) ?? state.statusline,
+      actionBar: {
+        primary: normalizeUiActions(event.ui_actions?.primary),
+        secondary: normalizeUiActions(event.ui_actions?.secondary),
+        selectedIndex: 0,
+      },
       permissionMode: event.permission_mode || state.permissionMode,
       pendingApprovals:
         Array.isArray(event.session?.approvals_pending)
-          ? (event.session.approvals_pending as UiState["pendingApprovals"])
+          ? normalizePendingApprovals(event.session.approvals_pending)
           : state.pendingApprovals,
     };
   }

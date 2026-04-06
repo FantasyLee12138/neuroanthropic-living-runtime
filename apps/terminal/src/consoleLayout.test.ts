@@ -11,21 +11,39 @@ describe("resolveConsoleLayout", () => {
     expect(resolveConsoleLayout(90)).toBe("stack");
   });
 
-  it("caps transcript rows and uses compact sidebar on short terminals", () => {
-    expect(buildConsoleViewportPlan({ width: 140, height: 20, transcriptMode: "full", hasPanel: true, hasPendingApproval: true })).toEqual({
+  it("keeps the transcript dominant on short wide terminals", () => {
+    expect(buildConsoleViewportPlan({ width: 140, height: 20, hasDetailDrawer: true, hasPendingApproval: true })).toEqual({
       layout: "split",
-      transcriptLines: 5,
+      detailPlacement: "side",
+      transcriptLines: 12,
+      sidebarLines: 12,
+      detailLines: 12,
       compactSidebar: true,
-      sidebarWidth: 42
+      sidebarWidth: 36
     });
   });
 
-  it("allows a roomier transcript on taller terminals", () => {
-    expect(buildConsoleViewportPlan({ width: 140, height: 36, transcriptMode: "compact", hasPanel: false, hasPendingApproval: false })).toEqual({
+  it("gives tall terminals a much roomier transcript without a hard cap", () => {
+    expect(buildConsoleViewportPlan({ width: 140, height: 36, hasDetailDrawer: false, hasPendingApproval: false })).toEqual({
       layout: "split",
-      transcriptLines: 12,
+      detailPlacement: "side",
+      transcriptLines: 28,
+      sidebarLines: 28,
+      detailLines: 0,
       compactSidebar: false,
-      sidebarWidth: 42
+      sidebarWidth: 36
+    });
+  });
+
+  it("moves detail content below the transcript on narrow terminals", () => {
+    expect(buildConsoleViewportPlan({ width: 90, height: 28, hasDetailDrawer: true, hasPendingApproval: false })).toEqual({
+      layout: "stack",
+      detailPlacement: "bottom",
+      transcriptLines: 9,
+      sidebarLines: 5,
+      detailLines: 6,
+      compactSidebar: false,
+      sidebarWidth: 90
     });
   });
 });
