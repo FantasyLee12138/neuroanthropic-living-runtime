@@ -8,9 +8,12 @@ from typing import Annotated
 import typer
 
 from nalr.cli.presentation import (
+    format_action_probability_view,
     format_agents_view,
     format_chat_turn,
     format_gates_view,
+    format_probability_layer_view,
+    format_probability_view,
     format_skills_view,
     format_why_view,
 )
@@ -238,7 +241,8 @@ def identity_show() -> None:
 
 @identity_app.command("set-name")
 def identity_set_name(name: str) -> None:
-    emit(get_cil().execute(f"identity set-name {name}"))
+    controller = get_controller()
+    emit(controller.seed_identity_name(name, source_hint="user_seed"))
 
 
 @run_app.command("start")
@@ -372,12 +376,65 @@ def trace_gates(
     )
 
 
+@trace_app.command("probability")
+def trace_probability(
+    round_ref: str,
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    controller = get_controller()
+    emit_trace_view(
+        round_ref=round_ref,
+        as_json=json_output,
+        fetcher=controller.trace_probability_field,
+        formatter=format_probability_view,
+    )
+
+
+@trace_app.command("probability-layer")
+def trace_probability_layer(
+    round_ref: str,
+    layer: str = typer.Option(..., "--layer"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    controller = get_controller()
+    emit_trace_view(
+        round_ref=round_ref,
+        as_json=json_output,
+        fetcher=lambda ref: controller.trace_probability_layer(ref, layer=layer),
+        formatter=format_probability_layer_view,
+    )
+
+
+@trace_app.command("action-prob")
+def trace_action_prob(
+    round_ref: str,
+    action: str,
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    controller = get_controller()
+    emit_trace_view(
+        round_ref=round_ref,
+        as_json=json_output,
+        fetcher=lambda ref: controller.trace_action_probability(ref, action=action),
+        formatter=format_action_probability_view,
+    )
+
+
 @trace_export_app.command("parquet")
 def trace_export_parquet(
     since_round: int | None = typer.Option(None, "--since-round"),
     overwrite: bool = typer.Option(True, "--overwrite/--no-overwrite"),
+    rewrite_history: bool = typer.Option(False, "--rewrite-history"),
 ) -> None:
-    emit(get_controller().export_trace_parquet(since_round=since_round, overwrite=overwrite))
+    controller = get_controller()
+    history_rewrite = None
+    if rewrite_history:
+        controller.flush_pending_io(raise_on_error=True)
+        history_rewrite = controller.trace_store.rewrite_legacy_round_parquet_history(force=True)
+    payload = controller.export_trace_parquet(since_round=since_round, overwrite=overwrite)
+    if history_rewrite is not None:
+        payload["history_rewrite"] = history_rewrite
+    emit(payload)
 
 
 @trace_app.command("compact")

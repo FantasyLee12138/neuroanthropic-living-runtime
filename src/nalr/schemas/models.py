@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 
@@ -105,6 +105,41 @@ def normalize_temperament_state(value: Any) -> dict[str, Any]:
     }
 
 
+def _normalize_signal_map(payload: dict[str, Any]) -> dict[str, float]:
+    normalized: dict[str, float] = {}
+    for key, raw_value in dict(payload or {}).items():
+        key_name = str(key).strip()
+        if not key_name or not isinstance(raw_value, (int, float)):
+            continue
+        normalized[key_name] = round(float(raw_value), 6)
+    return normalized
+
+
+def _normalize_positive_signal_map(payload: dict[str, Any]) -> dict[str, float]:
+    normalized: dict[str, float] = {}
+    for key, value in _normalize_signal_map(payload).items():
+        normalized[key] = round(abs(float(value)), 6)
+    return normalized
+
+
+def _normalize_string_list(values: list[Any]) -> list[str]:
+    normalized: list[str] = []
+    for raw in list(values or []):
+        value = str(raw).strip()
+        if not value or value in normalized:
+            continue
+        normalized.append(value)
+    return normalized
+
+
+def _merge_signal_maps(*payloads: dict[str, float]) -> dict[str, float]:
+    merged: dict[str, float] = {}
+    for payload in payloads:
+        for key, value in _normalize_signal_map(payload).items():
+            merged[key] = round(merged.get(key, 0.0) + float(value), 6)
+    return merged
+
+
 @dataclass
 class RoundEvent:
     source: str
@@ -166,15 +201,25 @@ class RoundTrace:
     proposal_summaries: list[dict[str, Any]] = field(default_factory=list)
     gate_decisions: list[dict[str, Any]] = field(default_factory=list)
     skill_traces: list[dict[str, Any]] = field(default_factory=list)
-    distribution_state: dict[str, Any] = field(default_factory=dict)
+    parallel_traces: list[dict[str, Any]] = field(default_factory=list)
+    action_bookkeeping: dict[str, Any] = field(default_factory=dict)
+    candidate_distribution: dict[str, Any] = field(default_factory=dict)
+    probability_field: dict[str, Any] = field(default_factory=dict)
     stochastic_state: dict[str, Any] = field(default_factory=dict)
+    conflict_arbitration: dict[str, Any] = field(default_factory=dict)
     render_plan: dict[str, Any] = field(default_factory=dict)
     rendered_expression: dict[str, Any] = field(default_factory=dict)
+    renderer_decision_integrity: dict[str, Any] = field(default_factory=dict)
+    memory_write_gate: dict[str, Any] = field(default_factory=dict)
     authenticity: dict[str, Any] = field(default_factory=dict)
     identity_evolution: dict[str, Any] = field(default_factory=dict)
     vitality_snapshot: dict[str, Any] = field(default_factory=dict)
     vitality_events: list[dict[str, Any]] = field(default_factory=list)
     long_run_projection: dict[str, Any] = field(default_factory=dict)
+    motivation_pool: dict[str, Any] = field(default_factory=dict)
+    motivation_feedback: dict[str, Any] = field(default_factory=dict)
+    endogenous_tick_reason: dict[str, Any] = field(default_factory=dict)
+    endogenous_policy_shift: dict[str, Any] = field(default_factory=dict)
     appraisal_snapshot: dict[str, Any] = field(default_factory=dict)
     state_delta_before_clip: dict[str, Any] = field(default_factory=dict)
     state_delta_after_clip: dict[str, Any] = field(default_factory=dict)
@@ -447,6 +492,100 @@ class RunState:
 
 
 @dataclass
+class EndogenousMotivationSignal:
+    motivation_id: str
+    motivation_type: str
+    raw_drive: float = 0.0
+    source_features: dict[str, float] = field(default_factory=dict)
+    target_actions: dict[str, float] = field(default_factory=dict)
+    state_tags: list[str] = field(default_factory=list)
+    audit_reason: str = ""
+
+    def __post_init__(self) -> None:
+        self.raw_drive = round(max(0.0, float(self.raw_drive)), 6)
+        self.source_features = _normalize_signal_map(self.source_features)
+        self.target_actions = _normalize_signal_map(self.target_actions)
+        self.state_tags = _normalize_string_list(self.state_tags)
+
+
+@dataclass
+class MotivationPoolState:
+    active_motivations: list[EndogenousMotivationSignal] = field(default_factory=list)
+    pool_weight_snapshot: dict[str, float] = field(default_factory=dict)
+    endogenous_activation_score: float = 0.0
+    last_feedback_update_at: str | None = None
+
+    def __post_init__(self) -> None:
+        self.active_motivations = [
+            item if isinstance(item, EndogenousMotivationSignal) else EndogenousMotivationSignal(**item)
+            for item in self.active_motivations
+        ]
+        self.pool_weight_snapshot = _normalize_positive_signal_map(self.pool_weight_snapshot)
+        self.endogenous_activation_score = round(max(0.0, float(self.endogenous_activation_score)), 6)
+
+
+@dataclass
+class MotivationFeedbackRecord:
+    round_id: str
+    motivation_id: str
+    sampled_action: str
+    user_response: str | None = None
+    response_latency_ms: int | None = None
+    affect_delta: dict[str, float] = field(default_factory=dict)
+    memory_activation_delta: float = 0.0
+    relation_delta: float = 0.0
+    reward_signal: float = 0.0
+    update_reason: str = ""
+
+    def __post_init__(self) -> None:
+        self.affect_delta = _normalize_signal_map(self.affect_delta)
+        self.memory_activation_delta = round(float(self.memory_activation_delta), 6)
+        self.relation_delta = round(float(self.relation_delta), 6)
+        self.reward_signal = round(float(self.reward_signal), 6)
+
+
+@dataclass
+class MotivationLearningState:
+    motivation_weights: dict[str, float] = field(default_factory=dict)
+    recent_feedback: list[MotivationFeedbackRecord] = field(default_factory=list)
+    endogenous_policy_shift: dict[str, float] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.motivation_weights = _normalize_positive_signal_map(self.motivation_weights)
+        self.recent_feedback = [
+            item if isinstance(item, MotivationFeedbackRecord) else MotivationFeedbackRecord(**item)
+            for item in self.recent_feedback
+        ]
+        self.endogenous_policy_shift = _normalize_signal_map(self.endogenous_policy_shift)
+
+
+@dataclass
+class EndogenousTickTrigger:
+    trigger_type: str = ""
+    trigger_score: float = 0.0
+    source_metrics: dict[str, float] = field(default_factory=dict)
+    selected_mode: str = ""
+    audit_reason: str = ""
+
+    def __post_init__(self) -> None:
+        self.trigger_score = round(max(0.0, float(self.trigger_score)), 6)
+        self.source_metrics = _normalize_signal_map(self.source_metrics)
+
+
+@dataclass
+class EndogenousSchedulerState:
+    last_endogenous_tick_at: str | None = None
+    recent_triggers: list[EndogenousTickTrigger] = field(default_factory=list)
+    suppression_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        self.recent_triggers = [
+            item if isinstance(item, EndogenousTickTrigger) else EndogenousTickTrigger(**item)
+            for item in self.recent_triggers
+        ]
+
+
+@dataclass
 class TurnPlan:
     text: str
     route: str
@@ -554,6 +693,9 @@ class RuntimeState:
     last_entropy_failure: dict[str, Any] = field(default_factory=dict)
     session_metadata: dict[str, Any] = field(default_factory=dict)
     identity_state: IdentityState = field(default_factory=IdentityState)
+    motivation_pool_state: MotivationPoolState = field(default_factory=MotivationPoolState)
+    motivation_learning_state: MotivationLearningState = field(default_factory=MotivationLearningState)
+    endogenous_scheduler_state: EndogenousSchedulerState = field(default_factory=EndogenousSchedulerState)
     endogenous_state: dict[str, Any] = field(default_factory=dict)
     active_run_id: str | None = None
     run_status: str = "idle"
@@ -572,6 +714,12 @@ class RuntimeState:
             self.subject_core = SubjectCore(**self.subject_core)
         if isinstance(self.identity_state, dict):
             self.identity_state = IdentityState(**self.identity_state)
+        if isinstance(self.motivation_pool_state, dict):
+            self.motivation_pool_state = MotivationPoolState(**self.motivation_pool_state)
+        if isinstance(self.motivation_learning_state, dict):
+            self.motivation_learning_state = MotivationLearningState(**self.motivation_learning_state)
+        if isinstance(self.endogenous_scheduler_state, dict):
+            self.endogenous_scheduler_state = EndogenousSchedulerState(**self.endogenous_scheduler_state)
         self.identity_state.aliases = sanitize_identity_aliases(self.identity_state.aliases)
         self.temperament_state = normalize_temperament_state(self.temperament_state)
         if isinstance(self.repair_state, dict):
@@ -629,6 +777,12 @@ class CommandResult:
     parsed_args: dict[str, Any] = field(default_factory=dict)
     flags: dict[str, Any] = field(default_factory=dict)
     rollback: dict[str, Any] = field(default_factory=dict)
+    subject_id: str = ""
+    continuity_nonce: str = ""
+    cause_type: str = "external_stimulus"
+    boundary_action: str = "allow_internal"
+    violation_code: str = ""
+    deprecation_warning: str = ""
 
 
 @dataclass
@@ -784,30 +938,168 @@ class SkillResult:
 
 
 @dataclass
-class ProposalBundle:
-    owner: str
+class ActionEvidenceSignal:
+    module_name: str
+    module_type: str
     confidence: float = 0.5
-    action_preferences: dict[str, float] = field(default_factory=dict)
-    delta_p: dict[str, float] = field(default_factory=dict)
-    sigma_scale: float = 1.0
-    veto: bool = False
-    mode_switch: str | None = None
+    action_delta: dict[str, float] = field(default_factory=dict)
     utility_shift: dict[str, float] = field(default_factory=dict)
-    state_patch: dict[str, Any] = field(default_factory=dict)
-    memory_ops: list[dict[str, Any]] = field(default_factory=list)
-    trace_tags: list[str] = field(default_factory=list)
-    reason: str = ""
+    sigma_scale: float = 1.0
     priority_bucket: str = "task_goal"
     control_domain: str = "task"
     gated_actions: list[str] = field(default_factory=list)
     risk_hints: dict[str, Any] = field(default_factory=dict)
-    provider: str = ""
-    model: str = ""
-    backend: str = ""
-    latency_ms: int = 0
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    agent_tier: str = ""
+    veto: bool = False
+    trace_reason: str = ""
+    trace_tags: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.confidence = round(max(0.0, min(1.0, float(self.confidence))), 4)
+        self.sigma_scale = round(max(0.35, min(1.6, float(self.sigma_scale))), 4)
+
+
+@dataclass
+class EnergyProjectionSpec:
+    module_type: str
+    target_space: Literal["context", "memory", "action", "token", "global"]
+    normalization_strategy: str = "rms"
+    module_temperature: float = 1.0
+    variance_clip: float = 3.0
+    coupling_mode: str = "layer_local"
+
+
+@dataclass
+class DeltaStatistics:
+    support_size: int = 0
+    mean_abs: float = 0.0
+    rms: float = 0.0
+    max_abs: float = 0.0
+    clipped: bool = False
+
+
+@dataclass
+class CrossLayerCouplingSpec:
+    source_layer: Literal["context", "memory", "action", "token", "global"]
+    target_layer: Literal["context", "memory", "action", "token", "global"]
+    carrier_signal: str
+    projection_rule: str
+    allowed_phase: str
+    enabled: bool = True
+
+
+@dataclass
+class ProbabilisticContribution:
+    module_name: str
+    module_type: str
+    level: Literal["context", "memory", "action", "token", "global"]
+    target_space: Literal["context", "memory", "action", "token", "global"]
+    raw_signal: dict[str, float] = field(default_factory=dict)
+    modulated_delta: dict[str, float] = field(default_factory=dict)
+    inhibitory_drive: dict[str, float] = field(default_factory=dict)
+    failure_taxonomy: list[str] = field(default_factory=list)
+    hard_mask: dict[str, bool] = field(default_factory=dict)
+    posterior: dict[str, float] = field(default_factory=dict)
+    peak_clusters: list[dict[str, Any]] = field(default_factory=list)
+    compromise_template_prior: dict[str, float] = field(default_factory=dict)
+    confidence: float = 0.5
+    confidence_calibrated: float | None = None
+    trace_reason: str = ""
+    projection_reason: str = ""
+    applied_at_stage: str = ""
+    native_operator: str = "modulated_delta"
+    dependency_trace: list[str] = field(default_factory=list)
+    projection: EnergyProjectionSpec | None = None
+
+    def __post_init__(self) -> None:
+        self.raw_signal = _normalize_signal_map(self.raw_signal)
+        self.modulated_delta = _normalize_signal_map(self.modulated_delta)
+        self.inhibitory_drive = _normalize_positive_signal_map(self.inhibitory_drive)
+        self.failure_taxonomy = _normalize_string_list(self.failure_taxonomy)
+        self.hard_mask = {
+            str(target).strip(): bool(flag)
+            for target, flag in dict(self.hard_mask or {}).items()
+            if str(target).strip()
+        }
+        if not self.raw_signal:
+            self.raw_signal = dict(self.modulated_delta)
+        if not self.modulated_delta:
+            self.modulated_delta = dict(self.raw_signal)
+        self.confidence = round(max(0.0, min(1.0, float(self.confidence))), 4)
+        if self.confidence_calibrated is not None:
+            self.confidence_calibrated = round(max(0.0, min(1.0, float(self.confidence_calibrated))), 4)
+        if self.projection is None:
+            self.projection = EnergyProjectionSpec(module_type=self.module_type, target_space=self.target_space)
+
+
+@dataclass
+class ContributionAuditRecord:
+    module_name: str
+    module_type: str
+    level: Literal["context", "memory", "action", "token", "global"]
+    target_space: Literal["context", "memory", "action", "token", "global"]
+    delta_raw: dict[str, float] = field(default_factory=dict)
+    delta_projected: dict[str, float] = field(default_factory=dict)
+    delta_normalized: dict[str, float] = field(default_factory=dict)
+    raw_signal: dict[str, float] = field(default_factory=dict)
+    modulated_delta: dict[str, float] = field(default_factory=dict)
+    inhibitory_drive: dict[str, float] = field(default_factory=dict)
+    failure_taxonomy: list[str] = field(default_factory=list)
+    hard_masked_targets: list[str] = field(default_factory=list)
+    posterior: dict[str, float] = field(default_factory=dict)
+    peak_clusters: list[dict[str, Any]] = field(default_factory=list)
+    compromise_template_prior: dict[str, float] = field(default_factory=dict)
+    confidence_raw: float = 0.0
+    confidence_calibrated: float = 0.0
+    normalization_reason: str = ""
+    projection_reason: str = ""
+    trace_reason: str = ""
+    dependency_trace: list[str] = field(default_factory=list)
+    stats: DeltaStatistics = field(default_factory=DeltaStatistics)
+
+
+@dataclass
+class ProbabilityLayerState:
+    layer: Literal["context", "memory", "action", "token", "global"]
+    base_energy: dict[str, float] = field(default_factory=dict)
+    aggregated_raw_signal: dict[str, float] = field(default_factory=dict)
+    aggregated_modulated_delta: dict[str, float] = field(default_factory=dict)
+    aggregated_inhibitory_drive: dict[str, float] = field(default_factory=dict)
+    aggregated_projected_delta: dict[str, float] = field(default_factory=dict)
+    aggregated_normalized_delta: dict[str, float] = field(default_factory=dict)
+    final_energy: dict[str, float] = field(default_factory=dict)
+    failure_taxonomy: list[str] = field(default_factory=list)
+    hard_masked_targets: list[str] = field(default_factory=list)
+    winner_target: str = ""
+    winner_posterior: dict[str, float] = field(default_factory=dict)
+    counterfactual_top_peaks: list[dict[str, Any]] = field(default_factory=list)
+    contribution_audit: list[ContributionAuditRecord] = field(default_factory=list)
+
+
+@dataclass
+class ProbabilityFieldSnapshot:
+    context: ProbabilityLayerState = field(default_factory=lambda: ProbabilityLayerState(layer="context"))
+    memory: ProbabilityLayerState = field(default_factory=lambda: ProbabilityLayerState(layer="memory"))
+    action: ProbabilityLayerState = field(default_factory=lambda: ProbabilityLayerState(layer="action"))
+    token: ProbabilityLayerState = field(default_factory=lambda: ProbabilityLayerState(layer="token"))
+    token_state: TokenFieldState | None = None
+    couplings: list[CrossLayerCouplingSpec] = field(default_factory=list)
+    source_chain: list[str] = field(default_factory=list)
+
+
+@dataclass
+class TokenFieldState:
+    step_index: int
+    prefix_tokens: list[str] = field(default_factory=list)
+    active_module_sources: list[str] = field(default_factory=list)
+    generated_delta_sources: list[str] = field(default_factory=list)
+    delta_generation_policy: Literal["propagate_only"] = "propagate_only"
+    sequence_consistency_tag: str = "persistent_field"
+
+    def __post_init__(self) -> None:
+        illegal = [source for source in self.generated_delta_sources if source not in self.active_module_sources]
+        if illegal:
+            joined = ", ".join(illegal)
+            raise ValueError(f"TokenFieldState cannot generate new delta sources without explicit module registration: {joined}")
 
 
 @dataclass
@@ -849,23 +1141,14 @@ class CommandEnvelope:
 
 
 @dataclass
-class ActionDistributionState:
+class ActionBookkeepingState:
     u_base: dict[str, float] = field(default_factory=dict)
-    u_shifted: dict[str, float] = field(default_factory=dict)
     p_base: dict[str, float] = field(default_factory=dict)
-    p_raw: dict[str, float] = field(default_factory=dict)
-    p_base_stochastic: dict[str, float] = field(default_factory=dict)
-    q_noise: dict[str, float] = field(default_factory=dict)
-    p_mix: dict[str, float] = field(default_factory=dict)
-    p_final: dict[str, float] = field(default_factory=dict)
     ci: dict[str, float] = field(default_factory=dict)
     gate: dict[str, float] = field(default_factory=dict)
     risk_suppressor: dict[str, float] = field(default_factory=dict)
     query_intent: dict[str, Any] = field(default_factory=dict)
     disclosure_intent: dict[str, Any] = field(default_factory=dict)
-    resample_idx: int = 0
-    conflict_mode: str = "none"
-    conflict: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -1003,6 +1286,8 @@ class StochasticState:
     lambda_noise_pre_guard: float = 0.0
     log_m_guard_triggered: bool = False
     guard_reason: str = ""
+    base_stochastic_distribution: dict[str, float] = field(default_factory=dict)
+    q_noise_distribution: dict[str, float] = field(default_factory=dict)
     q_noise_pre_guard_summary: dict[str, float] = field(default_factory=dict)
     entropy_refs_by_node: dict[str, Any] = field(default_factory=dict)
     entropy_ref: QuantumEntropyRef = field(default_factory=QuantumEntropyRef)

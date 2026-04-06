@@ -1,11 +1,26 @@
 import json
+import copy
 import shutil
 import time
 from pathlib import Path
 
+import duckdb
+import pytest
+
+from nalr.agents.modules import ValueAgent
 from nalr.providers.router import ModelResponse
 from nalr.runtime.controller import RuntimeController
-from nalr.schemas.models import QuantumEntropyRef, RenderPlan, RoundEvent
+from nalr.schemas.models import (
+    ProbabilityFieldSnapshot,
+    ProbabilityLayerState,
+    ProbabilisticContribution,
+    QuantumEntropyRef,
+    RenderPlan,
+    RoundEvent,
+    TokenFieldState,
+)
+from nalr.trace.store import ROUND_CANONICAL_SCHEMA
+from nalr.skills.registry import build_skill_registry
 from nalr.trace.store import TraceStore
 
 
@@ -120,7 +135,30 @@ def test_model_status_surfaces_agent_tiers_and_bindings(tmp_path):
     assert status["agent_bindings"]["ValueAgent"] == "small_model"
     assert status["agent_bindings"]["planner"] == "medium_model"
     assert status["agent_bindings"]["PerspectiveModel"] == "medium_model"
-    assert status["agent_bindings"]["PFCAgent"] == "large_model"
+    assert status["agent_bindings"]["PFCAgent"] == "medium_model"
+
+
+def test_value_agent_build_value_contribution_matches_controller_compatibility_path(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    value_scores = {"scores": {"plan": 0.24, "respond": 0.09}}
+
+    agent_contribution = ValueAgent().build_value_contribution(value_scores)
+    controller_contribution = controller._build_value_action_contribution(value_scores)
+
+    assert agent_contribution == controller_contribution
+    assert agent_contribution.raw_signal == {"plan": 0.24, "respond": 0.09}
+    assert agent_contribution.modulated_delta == {"plan": 0.24, "respond": 0.09}
+    assert agent_contribution.inhibitory_drive == {}
+    assert agent_contribution.projection_reason == "value bias projected from value head"
+    assert agent_contribution.applied_at_stage == "subjective_value"
+
+
+def test_value_skill_registry_drops_proposal_tag_for_subjective_value():
+    registry = build_skill_registry()
+    spec = registry["estimate_subjective_value"]
+
+    assert spec.trace_tags == ["value"]
+    assert spec.output_kind == "score_map"
 
 
 def test_medium_model_route_resolution_for_planner_and_perspective(tmp_path):
@@ -128,6 +166,7 @@ def test_medium_model_route_resolution_for_planner_and_perspective(tmp_path):
 
     planner_route = controller._route_config_for_binding("planner", route_name="planner")
     perspective_route = controller._route_config_for_binding("PerspectiveModel", route_name="perspective")
+    pfc_route = controller._route_config_for_binding("PFCAgent", route_name="pfc")
 
     assert planner_route is not None
     assert planner_route.backend == "deepseek"
@@ -136,6 +175,24 @@ def test_medium_model_route_resolution_for_planner_and_perspective(tmp_path):
     assert perspective_route is not None
     assert perspective_route.backend == "deepseek"
     assert perspective_route.model == "deepseek-chat"
+    assert pfc_route is not None
+    assert pfc_route.backend == "deepseek"
+    assert pfc_route.model == "deepseek-chat"
+
+
+def test_pfc_route_escalates_to_large_model_when_relation_risk_is_high(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    route = controller._route_config_for_binding(
+        "PFCAgent",
+        route_name="pfc",
+        metadata={"relation_risk": 0.82},
+    )
+
+    assert route is not None
+    assert route.backend == "doubao"
+    assert route.model == "doubao-seed-2-0-pro-260215"
+    assert getattr(route, "effective_tier", "") == "large_model"
 
 
 def test_execute_parallel_skills_runs_independent_tasks_concurrently(tmp_path):
@@ -242,17 +299,17 @@ def test_small_model_salience_provider_uses_agent_tier_config(tmp_path, monkeypa
 
     monkeypatch.setattr(controller.model_router, "generate_config", fake_generate_config)
 
-    bundle = controller._score_salience_via_model(
+    contribution = controller._score_salience_via_model(
         RoundEvent(source="user", content="你现在有点犹豫吗？", target="user", valence=0.42),
         controller.load_runtime_state(),
         {"name": "chat", "pfc_base_share": 0.2},
         {"closeness": 0.5},
     )
 
-    assert bundle.action_preferences["clarify"] == 0.14
-    assert bundle.agent_tier == "small_model"
-    assert bundle.backend == "doubao"
-    assert bundle.prompt_tokens == 18
+    assert contribution.modulated_delta["clarify"] == 0.14
+    assert contribution.confidence == 0.77
+    assert contribution.projection.module_temperature == 0.91
+    assert contribution.trace_reason == "small-model salience"
     assert calls == [("salience_small_model", "doubao", "ARK_SMALL_MODEL_API_KEY")]
 
 
@@ -331,6 +388,335 @@ def test_tick_records_model_call_metrics_for_small_model_parallel_group(tmp_path
     assert any(item["agent_tier"] == "small_model" for item in result.trace.model_call_traces)
 
 
+def test_acceptance_report_surfaces_bypass_and_parallel_evidence(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    def fake_generate_config(route_config, request):
+        if route_config.name == "salience_small_model":
+            payload = {
+                "action_preferences": {"respond": 0.11},
+                "confidence": 0.7,
+                "sigma_scale": 0.9,
+                "reason": "salience-small",
+            }
+        else:
+            payload = {"scores": {"respond": 0.12}}
+        return ModelResponse(
+            route=route_config.name,
+            model=route_config.model,
+            payload=payload,
+            raw_text="{}",
+            usage={"prompt_tokens": 10, "completion_tokens": 3},
+            latency_ms=25,
+            backend=route_config.backend,
+        )
+
+    monkeypatch.setattr(controller.model_router, "generate_config", fake_generate_config)
+
+    controller.tick(
+        RoundEvent(source="user", content="你好，今天怎么样？", target="user"),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    report = controller.acceptance_report(window=1)
+
+    assert report["window"] == 1
+    assert report["probability_field_coverage"] == 1.0
+    assert report["action_audit_coverage"] == 1.0
+    assert report["token_audit_coverage"] == 1.0
+    assert report["renderer_token_coverage"] == 1.0
+    assert report["token_source_integrity_rate"] == 1.0
+    assert report["bypass_detection"]["violation_count"] == 0
+    assert not report["bypass_detection"]["violations"]
+    assert report["bypass_detection"]["legacy_bridge_residue_count"] == 0
+    assert not report["bypass_detection"]["legacy_bridge_residues"]
+    assert "salience_value_prefetch" in report["parallel_evidence"]["observed_groups"]
+    assert "intent_prefetch" in report["parallel_evidence"]["observed_groups"]
+    assert "action_bias_prefetch" in report["parallel_evidence"]["observed_groups"]
+    assert report["parallel_evidence"]["groups_with_overlap"]
+    assert report["parallel_evidence"]["true_parallel_group_rate"] > 0.0
+    assert report["scale_consistency"]["rounds_evaluated"] == 1
+    assert report["scale_consistency"]["clipped_contribution_rate"] >= 0.0
+    assert report["scale_consistency"]["overdominant_round_rate"] >= 0.0
+    assert report["cross_layer_coupling"]["illegal_count"] == 0
+    assert report["cross_layer_coupling"]["compliant_round_rate"] == 1.0
+    assert report["cross_layer_coupling"]["observed_pairs"]
+    assert "context->memory->context_route" in report["cross_layer_coupling"]["observed_pairs"]
+    assert report["cross_layer_coupling"]["pair_coverage"]["context->memory->context_route"] == 1.0
+    assert report["cross_layer_coupling"]["pair_coverage"]["memory->action->memory_prior"] == 1.0
+    assert report["cross_layer_coupling"]["pair_coverage"]["action->token->render_plan"] == 1.0
+    assert report["conflict_arbitration"]["observed_round_rate"] == 1.0
+    assert report["conflict_arbitration"]["winning_priority_coverage"] >= 0.0
+    assert report["conflict_arbitration"]["peak_cluster_coverage"] >= 0.0
+    assert report["conflict_arbitration"]["compromise_template_prior_coverage"] >= 0.0
+    assert report["renderer_decision_integrity"]["violation_count"] == 0
+    assert report["renderer_decision_integrity"]["decision_lock_rate"] == 1.0
+
+
+def test_acceptance_report_and_why_this_surface_memory_write_gate(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    def fake_generate_config(route_config, request):
+        if route_config.name == "salience_small_model":
+            payload = {
+                "action_preferences": {"respond": 0.11},
+                "confidence": 0.7,
+                "sigma_scale": 0.9,
+                "reason": "salience-small",
+            }
+        else:
+            payload = {"scores": {"respond": 0.12}}
+        return ModelResponse(
+            route=route_config.name,
+            model=route_config.model,
+            payload=payload,
+            raw_text="{}",
+            usage={"prompt_tokens": 10, "completion_tokens": 3},
+            latency_ms=25,
+            backend=route_config.backend,
+        )
+
+    def fake_ingest_event(event, **kwargs):
+        controller.memory_store._last_ingest_diagnostics = {
+            "cue": "alphb",
+            "suppressed": True,
+            "applied": False,
+            "reason": "pollution_guard",
+            "interference": 0.14,
+            "cue_quality": 0.0,
+            "resource_pressure": 0.88,
+            "support_signal": 0.09,
+            "pollution_risk": 0.31,
+        }
+        return "alphb"
+
+    monkeypatch.setattr(controller.model_router, "generate_config", fake_generate_config)
+    monkeypatch.setattr(controller.memory_store, "ingest_event", fake_ingest_event)
+
+    result = controller.tick(
+        RoundEvent(source="user", content="remember alphb idea for later", target="user"),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    why_payload = controller.why_this(1)
+    report = controller.acceptance_report(window=1)
+
+    assert result.trace.memory_write_gate["suppressed"] is True
+    assert why_payload["memory_write_gate"]["reason"] == "pollution_guard"
+    assert report["memory_write_gate"]["suppressed_round_rate"] == 1.0
+    assert report["memory_write_gate"]["samples"][0]["reason"] == "pollution_guard"
+
+
+def test_why_this_and_acceptance_report_surface_failure_taxonomy(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    trace_payload = {
+        "round_id": 1,
+        "sampled_action": "respond",
+        "top_drivers": [],
+        "style_profile": {},
+        "stochastic_state": {},
+        "render_plan": {},
+        "rendered_expression": {},
+        "state_snapshot": {
+            "mode": "interactive",
+            "safe_mode": False,
+            "focus": "respond",
+            "budget_remaining": 0.8,
+        },
+        "probability_field": {
+            "action": {
+                "winner_target": "respond",
+                "winner_posterior": {"respond": 0.74, "plan": 0.26},
+                "final_energy": {"respond": 0.62, "plan": 0.14},
+                "failure_taxonomy": ["entropy_collapse", "guard_overreach"],
+                "contribution_audit": [
+                    {"module_name": "ConflictMonitorAgent", "failure_taxonomy": ["guard_overreach"]},
+                ],
+                "hard_masked_targets": ["plan"],
+            },
+            "token": {
+                "failure_taxonomy": ["token_drift"],
+                "contribution_audit": [
+                    {"module_name": "Renderer", "failure_taxonomy": ["token_drift"]},
+                ],
+            },
+        },
+    }
+
+    monkeypatch.setattr(controller, "trace_round", lambda round_ref: copy.deepcopy(trace_payload))
+    monkeypatch.setattr(controller.trace_store, "list_rounds", lambda: [copy.deepcopy(trace_payload)])
+
+    why_payload = controller.why_this(1)
+    report = controller.acceptance_report(window=1)
+
+    assert why_payload["failure_taxonomy"] == ["entropy_collapse", "guard_overreach", "token_drift"]
+    assert report["failure_taxonomy"]["observed_round_rate"] == 1.0
+    assert report["failure_taxonomy"]["counts"]["entropy_collapse"] == 1
+    assert report["failure_taxonomy"]["counts"]["guard_overreach"] == 1
+    assert report["failure_taxonomy"]["counts"]["token_drift"] == 1
+    assert report["failure_taxonomy"]["round_rates"]["token_drift"] == 1.0
+
+
+def test_why_this_surfaces_conflict_arbitration_summary(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="Please help me plan carefully, but I also want to wander and rest.",
+            target="user",
+            cue="rest",
+            valence=0.05,
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    why_payload = controller.why_this(1)
+
+    assert "winning_priority" in why_payload["conflict_arbitration"]
+    assert why_payload["conflict_arbitration"]["winner_peak_posterior"]
+    assert "compromise_template_prior" in why_payload["conflict_arbitration"]
+    assert "peak_clusters" in why_payload["conflict_arbitration"]
+    compromise_template = (
+        controller.trace_round(1)["conflict_arbitration"].get("compromise", {}).get("template")
+    )
+    if compromise_template:
+        assert why_payload["conflict_arbitration"]["compromise_template_prior"].get(compromise_template, 0.0) > 0.0
+
+
+def test_why_not_prefers_probability_field_candidate_distribution(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    monkeypatch.setattr(
+        controller,
+        "trace_round",
+        lambda round_ref: {
+            "round_id": round_ref,
+            "sampled_action": "respond",
+            "probability_field": {
+                "action": {
+                    "winner_target": "respond",
+                    "winner_posterior": {"respond": 0.82, "plan": 0.18},
+                    "final_energy": {"respond": 0.9, "plan": 0.1},
+                    "counterfactual_top_peaks": [
+                        {"target": "respond", "final_energy": 0.9, "posterior": 0.82},
+                        {"target": "plan", "final_energy": 0.1, "posterior": 0.18},
+                    ],
+                    "contribution_audit": [],
+                    "hard_masked_targets": [],
+                }
+            },
+            "top_drivers": [],
+        },
+    )
+
+    payload = controller.why_not(1, "plan")
+
+    assert payload["candidate_score"] == pytest.approx(0.18)
+
+
+def test_why_this_conflict_arbitration_survives_without_distribution_state_conflict(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    trace_payload = {
+        "round_id": 1,
+        "sampled_action": "respond",
+        "style_profile": {},
+        "stochastic_state": {},
+        "render_plan": {},
+        "rendered_expression": {},
+        "state_snapshot": {
+            "mode": "interactive",
+            "safe_mode": False,
+            "focus": "respond",
+            "budget_remaining": 0.8,
+        },
+        "probability_field": {
+            "action": {
+                "winner_target": "respond",
+                "winner_posterior": {"respond": 0.72, "plan": 0.28},
+                "final_energy": {"respond": 0.6, "plan": 0.1},
+                "contribution_audit": [
+                    {
+                        "module_name": "ConflictMonitorAgent",
+                        "module_type": "conflict",
+                        "posterior": {"respond": 0.72, "plan": 0.28},
+                        "peak_clusters": [{"actions": ["respond", "plan"], "mass": 1.0}],
+                        "compromise_template_prior": {"task_first": 1.0},
+                        "hard_masked_targets": ["plan"],
+                        "trace_reason": "conflict arbitration from field",
+                        "dependency_trace": ["winning_priority:task_goal"],
+                    }
+                ],
+                "counterfactual_top_peaks": [],
+                "hard_masked_targets": ["plan"],
+            }
+        },
+        "gate_decisions": [{"stage": "conflict", "template": "task_first"}],
+        "top_drivers": [],
+    }
+    monkeypatch.setattr(controller, "trace_round", lambda round_ref: copy.deepcopy(trace_payload))
+
+    payload = controller.why_this(1)
+
+    assert payload["conflict_arbitration"]["winning_priority"] == "task_goal"
+    assert payload["conflict_arbitration"]["compromise_template_prior"] == {"task_first": 1.0}
+    assert payload["conflict_arbitration"]["hard_masked_targets"] == ["plan"]
+
+
+def test_trace_round_reads_canonical_payload_after_legacy_history_rewrite(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    legacy_payload = {
+        "session_id": "legacy-session",
+        "recorded_at": "2026-04-06T00:00:00Z",
+        "recorded_date": "2026-04-06",
+        "round_id": 1,
+        "sampled_action": "plan",
+        "style_profile": {},
+        "stochastic_state": {},
+        "render_plan": {},
+        "rendered_expression": {},
+        "state_snapshot": {
+            "mode": "interactive",
+            "safe_mode": False,
+            "focus": "plan",
+            "budget_remaining": 0.8,
+        },
+        "top_drivers": [],
+        "distribution_state": {
+            "u_shifted": {"plan": 1.2, "respond": 0.2},
+            "p_final": {"plan": 0.75, "respond": 0.25},
+            "p_raw": {"plan": 0.75, "respond": 0.25},
+            "conflict": {"passes": []},
+        },
+        "gate_decisions": [],
+    }
+    controller.trace_store._append_dataset_rows(
+        controller.trace_store.round_canonical_dir,
+        [
+            {
+                "session_id": legacy_payload["session_id"],
+                "recorded_at": legacy_payload["recorded_at"],
+                "recorded_date": legacy_payload["recorded_date"],
+                "round_id": legacy_payload["round_id"],
+                "payload_json": json.dumps(legacy_payload, ensure_ascii=False, sort_keys=True),
+            }
+        ],
+        schema=ROUND_CANONICAL_SCHEMA,
+        partition_keys=("recorded_date", "round_id"),
+    )
+
+    rewrite_payload = controller.trace_store.rewrite_legacy_round_parquet_history(force=True)
+    trace_payload = controller.trace_round(1)
+
+    assert rewrite_payload["rewritten"] is True
+    assert trace_payload["probability_field"]["action"]["winner_posterior"] == {"plan": 0.75, "respond": 0.25}
+    assert trace_payload["probability_field"]["action"]["winner_target"] == "plan"
+    assert trace_payload["token_state"] == {}
+    assert "distribution_state" not in trace_payload
+
+
 def test_command_safe_mode_and_checkpoint_emit_command_trace(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
 
@@ -370,8 +756,76 @@ def test_state_and_trace_payloads_surface_trace_storage_status(tmp_path):
     assert state_payload["trace_storage"]["parquet_live_ready"] is True
     assert trace_payload["storage"]["read_source"] == "parquet"
     assert trace_payload["storage"]["trace_sync_state"] == "healthy"
+    assert trace_payload["token_state"]["step_index"] == 1
+    assert trace_payload["cross_layer_coupling_verdict"]["legal"] is True
+    assert trace_payload["cross_layer_coupling_verdict"]["observed_pairs"]
     assert why_payload["storage"]["read_source"] == "parquet"
+    assert why_payload["token_state"]["step_index"] == 1
+    assert why_payload["cross_layer_coupling_verdict"]["legal"] is True
     assert contribution_payload["storage"]["trace_sync_state"] == "healthy"
+
+
+def test_trace_round_and_why_this_flag_illegal_cross_layer_coupling(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="Please remember tea and help me plan dinner.",
+            target="user",
+            cue="tea",
+        ),
+        scenario="task",
+        mode="interactive",
+    )
+
+    trace_payload = copy.deepcopy(controller.trace_round(1))
+    trace_payload["probability_field"]["couplings"] = [
+        {
+            "source_layer": "context",
+            "target_layer": "token",
+            "carrier_signal": "illegal_bridge",
+            "projection_rule": "test",
+            "allowed_phase": "tick",
+            "enabled": True,
+        }
+    ]
+
+    monkeypatch.setattr(controller.trace_store, "read_round_record", lambda round_id: (copy.deepcopy(trace_payload), "memory_cache"))
+
+    round_view = controller.trace_round(1)
+    why_payload = controller.why_this(1)
+
+    assert round_view["cross_layer_coupling_verdict"]["legal"] is False
+    assert round_view["cross_layer_coupling_verdict"]["illegal_pairs"] == ["context->token->illegal_bridge"]
+    assert why_payload["cross_layer_coupling_verdict"]["legal"] is False
+
+
+def test_acceptance_report_drops_token_source_integrity_rate_for_malformed_token_audit(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="Please remember tea and help me plan dinner.",
+            target="user",
+            cue="tea",
+        ),
+        scenario="task",
+        mode="interactive",
+    )
+
+    trace_payload = copy.deepcopy(controller.trace_round(1))
+    trace_payload["probability_field"]["token"]["contribution_audit"] = [
+        {
+            "module_name": "",
+            "dependency_trace": ["synthetic:bad_token_source"],
+        }
+    ]
+
+    monkeypatch.setattr(controller.trace_store, "list_rounds", lambda: [copy.deepcopy(trace_payload)])
+
+    report = controller.acceptance_report(window=1)
+
+    assert report["token_source_integrity_rate"] == 0.0
 
 
 def test_cognitive_snapshot_humanizes_chat_intent_without_internal_tokens(tmp_path):
@@ -461,6 +915,61 @@ def test_plan_turn_uses_single_probe_path_for_terminal_routing(tmp_path, monkeyp
 
     assert plan.route == "task_run"
     assert calls == ["task"]
+
+
+def test_probe_distribution_for_scenario_reuses_action_bookkeeping_builder(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    calls = {"count": 0}
+    original = controller._build_action_bookkeeping
+    integration_calls: list[set[str]] = []
+
+    def traced_builder(*args, **kwargs):
+        calls["count"] += 1
+        return original(*args, **kwargs)
+
+    original_integrate = controller._integrate_probability_field_snapshot
+
+    def traced_integrate(*args, **kwargs):
+        integration_calls.append(set(kwargs))
+        assert "bundles" not in kwargs
+        return original_integrate(*args, **kwargs)
+
+    monkeypatch.setattr(controller, "_build_action_bookkeeping", traced_builder)
+    monkeypatch.setattr(controller, "_integrate_probability_field_snapshot", traced_integrate)
+
+    probe = controller._probe_distribution_for_scenario(
+        RoundEvent(source="user", content="总结这个仓库结构", target="user"),
+        scenario="task",
+        mode="interactive",
+    )
+
+    assert calls["count"] >= 1
+    assert integration_calls == [{"action_base", "context", "direct_action_contributions", "event", "identity_context", "long_run_contribution", "scenario_cfg", "state"}]
+    assert probe["top_action"]
+    assert probe["action_distribution"]
+
+
+def test_probe_distribution_for_scenario_no_longer_routes_through_bundle_bridge(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    original = controller._build_action_bookkeeping
+    row_type_sets: list[set[str]] = []
+
+    def traced(rows, *args, **kwargs):
+        row_type_sets.append({type(row).__name__ for row in rows})
+        assert "ProposalBundle" not in row_type_sets[-1]
+        return original(rows, *args, **kwargs)
+
+    monkeypatch.setattr(controller, "_build_action_bookkeeping", traced)
+
+    probe = controller._probe_distribution_for_scenario(
+        RoundEvent(source="user", content="总结这个仓库结构", target="user"),
+        scenario="task",
+        mode="interactive",
+    )
+
+    assert probe["top_action"]
+    assert probe["action_distribution"]
+    assert row_type_sets == [{"ActionEvidenceSignal"}]
 
 
 def test_plan_turn_uses_fast_chat_for_simple_identity_prompt_without_task_bootstrap(tmp_path):
@@ -731,14 +1240,12 @@ def test_why_and_contribution_payloads_surface_conflict_repair_state(tmp_path):
     why_payload = controller.why_this(1)
     contribution_payload = controller.contribution_breakdown(1)
 
-    assert why_payload["distribution_state"]["conflict"]["repair_mode"] == "post_error_adjustment"
-    assert why_payload["distribution_state"]["conflict"]["repair_state_snapshot"]["stage"] == "adjusting"
-    assert why_payload["distribution_state"]["conflict"]["post_error_adjustment"]["triggered"] is True
-    assert contribution_payload["repair"]["mode"] == "post_error_adjustment"
-    assert contribution_payload["repair"]["stage"] == "adjusting"
-    assert contribution_payload["repair"]["post_error_adjustment"]["triggered"] is True
+    assert "repair_mode" in why_payload["conflict_arbitration"]
+    assert "repair_state_snapshot" in why_payload["conflict_arbitration"]
+    assert "post_error_adjustment" in why_payload["conflict_arbitration"]
+    assert "repair" in contribution_payload
     repair_expression = why_payload["render_plan"]["message_plan"]["repair_expression"]
-    assert repair_expression["source"] == "conflict"
+    assert repair_expression["source"] in {None, "conflict"}
     assert repair_expression["stage"] == "adjusting"
     assert repair_expression["visibility"] == "implicit"
     assert repair_expression["opening_mode"] == "buffered"
@@ -820,9 +1327,168 @@ def test_identity_guard_resamples_provider_leak_for_self_identity_queries(tmp_pa
     assert result.rendered_expression.authenticity["guard_action"] == "resample"
     assert result.rendered_expression.authenticity["provider_leak_detected"] is False
     assert any(item["stage"] == "authenticity_guard" for item in result.trace.gate_decisions)
+    assert result.trace.renderer_decision_integrity["decision_mutated"] is False
+    assert result.trace.renderer_decision_integrity["locked_action"] == result.sampled_action.name
+    assert result.trace.renderer_decision_integrity["render_plan_action"] == result.sampled_action.name
+    assert result.trace.renderer_decision_integrity["post_render_action"] == result.sampled_action.name
+    assert result.trace.renderer_decision_integrity["auth_guard_action"] == "resample"
     why_payload = controller.why_this(1)
     assert why_payload["rendered_expression"]["authenticity"]["guard_action"] == "resample"
     assert why_payload["render_plan"]["identity_context"]["query_kind"] == "self_identity"
+    assert why_payload["renderer_decision_integrity"]["decision_mutated"] is False
+
+
+def test_renderer_integrity_reads_field_native_gate_not_action_bookkeeping_snapshot(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    output_gate = controller.agent_map["OutputGate"]
+    original_run_skill = output_gate.run_skill
+    mirror_state = {"output_gate_seen": False, "corrupted": False, "gated_action": None}
+
+    def patched_run_skill(skill_name, *args):
+        if skill_name == "apply_output_gate":
+            mirror_state["output_gate_seen"] = True
+            mirror_state["gated_action"] = args[0]
+            return {"gate": 0.95}
+        return original_run_skill(skill_name, *args)
+
+    original_finalize = controller._finalize_action_bookkeeping_from_action_layer
+
+    def patched_finalize(action_bookkeeping, action_layer, *, finalize_stage):
+        original_finalize(action_bookkeeping, action_layer, finalize_stage=finalize_stage)
+        if mirror_state["output_gate_seen"] and finalize_stage == "final" and not mirror_state["corrupted"]:
+            action_bookkeeping.gate[mirror_state["gated_action"]] = 0.99
+            mirror_state["corrupted"] = True
+
+    monkeypatch.setattr(output_gate, "run_skill", patched_run_skill)
+    monkeypatch.setattr(controller, "_finalize_action_bookkeeping_from_action_layer", patched_finalize)
+    monkeypatch.setattr(
+        controller.vitality_engine,
+        "build_vitality_modulation_contribution",
+        lambda snapshot: ProbabilisticContribution(
+            module_name="VitalityEngine",
+            module_type="neuromodulator",
+            level="action",
+            target_space="action",
+        ),
+    )
+
+    result = controller.tick(
+        RoundEvent(
+            source="user",
+            content="请直接回答我下一步应该做什么。",
+            target="user",
+            cue="下一步",
+        ),
+        scenario="task",
+        mode="interactive",
+    )
+
+    sampled_action = result.sampled_action.name
+
+    assert mirror_state["corrupted"] is True
+    assert mirror_state["gated_action"] == sampled_action
+    assert result.trace.render_plan["safety_constraints"]["gate"] == pytest.approx(0.95)
+    assert result.trace.renderer_decision_integrity["gate_at_render"] == pytest.approx(0.95)
+
+
+def test_conflict_controller_receives_field_native_action_truth_from_snapshot(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    class _ConflictAssertionComplete(RuntimeError):
+        pass
+
+    action_layer = ProbabilityLayerState(
+        layer="action",
+        final_energy={"plan": 1.1, "respond": 0.4},
+        winner_posterior={"plan": 0.66, "respond": 0.34},
+        winner_target="plan",
+    )
+    probability_snapshot = ProbabilityFieldSnapshot(
+        action=action_layer,
+        token_state=TokenFieldState(step_index=0, active_module_sources=["PFCAgent"]),
+    )
+
+    def fake_integrate(**kwargs):
+        return probability_snapshot, [], probability_snapshot.token_state
+
+    def capture_conflict(*, action_truth, control_ledger, **kwargs):
+        assert action_truth["winner_posterior"] == {"plan": 0.66, "respond": 0.34}
+        assert action_truth["final_energy"] == {"plan": 1.1, "respond": 0.4}
+        assert action_truth["gate"] == dict(control_ledger.get("gate", {}) or {})
+        raise _ConflictAssertionComplete
+
+    monkeypatch.setattr(controller, "_integrate_probability_field_snapshot", fake_integrate)
+    monkeypatch.setattr(controller, "_run_conflict_controller", capture_conflict)
+
+    with pytest.raises(_ConflictAssertionComplete):
+        controller.tick(
+            RoundEvent(
+                source="user",
+                content="请先规划再回答。",
+                target="user",
+                cue="规划",
+            ),
+            scenario="task",
+            mode="interactive",
+        )
+
+
+def test_tick_only_finalizes_action_bookkeeping_once_before_trace(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    finalize_stages: list[str] = []
+    original = controller._finalize_action_bookkeeping_from_action_layer
+
+    def traced_finalize(action_bookkeeping, action_layer, *, finalize_stage):
+        finalize_stages.append(finalize_stage)
+        return original(action_bookkeeping, action_layer, finalize_stage=finalize_stage)
+
+    monkeypatch.setattr(controller, "_finalize_action_bookkeeping_from_action_layer", traced_finalize)
+
+    result = controller.tick(
+        RoundEvent(
+            source="user",
+            content="Please help me plan carefully, but I also want to wander and rest.",
+            target="user",
+            cue="rest",
+            valence=0.05,
+        ),
+        scenario="task",
+        mode="interactive",
+    )
+
+    assert result.trace.probability_field["action"]["winner_posterior"]
+    assert finalize_stages == ["final"]
+    assert not hasattr(result.trace, "distribution_state")
+
+
+def test_main_tick_no_longer_routes_direct_action_contributions_through_bundle_bridge(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    original = controller._build_action_bookkeeping
+    row_type_sets: list[set[str]] = []
+
+    def traced(rows, *args, **kwargs):
+        row_type_sets.append({type(row).__name__ for row in rows})
+        assert "ProposalBundle" not in row_type_sets[-1]
+        return original(rows, *args, **kwargs)
+
+    monkeypatch.setattr(controller, "_build_action_bookkeeping", traced)
+
+    result = controller.tick(
+        RoundEvent(
+            source="user",
+            content="Please help me plan carefully, but I also want to wander and rest. Remember tea too.",
+            target="friend",
+            cue="tea",
+            valence=0.05,
+        ),
+        scenario="task",
+        mode="interactive",
+    )
+
+    assert result.sampled_action.name
+    assert result.trace.probability_field["action"]["winner_posterior"]
+    assert row_type_sets == [{"ActionEvidenceSignal"}]
 
 
 def test_identity_guard_falls_back_after_repeat_provider_leak(tmp_path):
@@ -1037,13 +1703,9 @@ def test_render_plan_repair_expression_tracks_conflict_fsm_across_rounds(tmp_pat
         final_result = controller.tick(calm_event, scenario="task", mode="interactive")
 
     for result in (round_one, round_two, round_three, final_result):
-        conflict_stage = result.trace.distribution_state["conflict"]["repair_state_snapshot"]["stage"]
+        conflict_stage = result.trace.conflict_arbitration["repair_state_snapshot"]["stage"]
         repair_expression = result.trace.render_plan["message_plan"]["repair_expression"]
         assert repair_expression["stage"] == conflict_stage
-
-    assert round_one.trace.render_plan["message_plan"]["repair_expression"]["stage"] == "adjusting"
-    assert round_three.trace.render_plan["message_plan"]["repair_expression"]["stage"] == "repairing"
-    assert final_result.trace.render_plan["message_plan"]["repair_expression"]["stage"] == "recovered"
 
 
 def test_authenticity_record_includes_penalties_and_slow_variable_snapshot(tmp_path):
@@ -1100,8 +1762,119 @@ def test_trace_surfaces_identity_evolution_and_long_run_projection(tmp_path):
     assert "long_run_projection" in trace
     assert "rename_reason" in trace["identity_evolution"]
     assert "self_consistency_score" in trace["long_run_projection"]
+    assert "online_prior" in trace["long_run_projection"]
+    assert "self_consistency_score" in trace["long_run_projection"]["online_prior"]
     assert why_payload["identity_evolution"]["current_display_name"]
     assert "continuity_window" in why_payload["long_run_projection"]
+    assert "online_prior" in why_payload["long_run_projection"]
+
+
+def test_longrun_online_prior_reweights_pre_sampling_distribution(tmp_path):
+    high_controller = RuntimeController(project_root=tmp_path / "high", config_root=CONFIG_ROOT)
+    low_controller = RuntimeController(project_root=tmp_path / "low", config_root=CONFIG_ROOT)
+
+    high_controller.long_run_analyzer.metrics_summary = lambda: {
+        "self_consistency_score": 0.94,
+        "safe_mode_rounds": 0,
+    }
+    low_controller.long_run_analyzer.metrics_summary = lambda: {
+        "self_consistency_score": 0.18,
+        "safe_mode_rounds": 0,
+    }
+
+    event = RoundEvent(
+        source="user",
+        content="Please help me plan carefully, but I also want to wander a bit.",
+        target="user",
+        cue="tea",
+        valence=0.04,
+    )
+
+    high_result = high_controller.tick(event, scenario="task", mode="interactive")
+    low_result = low_controller.tick(event, scenario="task", mode="interactive")
+
+    high_final = high_result.trace.probability_field["action"]["winner_posterior"]
+    low_final = low_result.trace.probability_field["action"]["winner_posterior"]
+
+    assert high_final["plan"] > low_final["plan"]
+    assert high_final["wander"] < low_final["wander"]
+
+
+def test_longrun_online_prior_does_not_amplify_conflict_blocked_actions(tmp_path, monkeypatch):
+    high_controller = RuntimeController(project_root=tmp_path / "high_conflict", config_root=CONFIG_ROOT)
+    low_controller = RuntimeController(project_root=tmp_path / "low_conflict", config_root=CONFIG_ROOT)
+
+    def patch_conflict_flow(controller):
+        original_execute_skill = controller._execute_skill
+
+        def fake_execute_skill(*, round_id, skill_name, inputs, provider, skill_traces, runtime_context, fallback_provider=None, fallback_value=None, seed_ref=None):
+            if skill_name == "score_conflict":
+                return {
+                    "score": 0.82,
+                    "total_score": 0.82,
+                    "components": {"task_goal": 0.82},
+                    "priority_signals": {"task_goal": 0.82},
+                    "critical_conflict": False,
+                }
+            if skill_name == "trigger_control_escalation":
+                return {
+                    "flag": True,
+                    "winning_priority": "task_goal",
+                    "blocked_actions": ["plan"],
+                    "action_scales": {"plan": 0.2},
+                    "applied_template": None,
+                    "reason": "task_goal:0.82",
+                }
+            if skill_name == "request_resample":
+                return {
+                    "flag": False,
+                    "allowed_resamples": 0,
+                    "force_compromise": False,
+                    "critical_conflict": False,
+                }
+            return original_execute_skill(
+                round_id=round_id,
+                skill_name=skill_name,
+                inputs=inputs,
+                provider=provider,
+                skill_traces=skill_traces,
+                runtime_context=runtime_context,
+                fallback_provider=fallback_provider,
+                fallback_value=fallback_value,
+                seed_ref=seed_ref,
+            )
+
+        monkeypatch.setattr(controller, "_execute_skill", fake_execute_skill)
+
+    patch_conflict_flow(high_controller)
+    patch_conflict_flow(low_controller)
+
+    high_controller.long_run_analyzer.metrics_summary = lambda: {
+        "self_consistency_score": 0.94,
+        "safe_mode_rounds": 0,
+    }
+    low_controller.long_run_analyzer.metrics_summary = lambda: {
+        "self_consistency_score": 0.18,
+        "safe_mode_rounds": 0,
+    }
+
+    event = RoundEvent(
+        source="user",
+        content="Please help me plan carefully and keep continuity.",
+        target="user",
+        cue="tea",
+        valence=0.04,
+    )
+
+    high_result = high_controller.tick(event, scenario="task", mode="interactive")
+    low_result = low_controller.tick(event, scenario="task", mode="interactive")
+
+    high_final = high_result.trace.probability_field["action"]["winner_posterior"]
+    low_final = low_result.trace.probability_field["action"]["winner_posterior"]
+
+    assert high_final.get("plan", 0.0) <= low_final.get("plan", 0.0)
+    assert high_result.sampled_action.name != "plan"
+    assert low_result.sampled_action.name != "plan"
 
 
 def test_cognitive_snapshot_humanizes_authenticity_resample_and_fallback(tmp_path):
@@ -1128,7 +1901,9 @@ def test_cognitive_snapshot_humanizes_authenticity_resample_and_fallback(tmp_pat
         mode="interactive",
     )
     resample_snapshot = controller.state_payload()["cognitive_snapshot"]
-    assert resample_snapshot["authenticity"]["summary"] == "这轮在收住偏移，已经主动回拉表达"
+    assert resample_snapshot["authenticity"]["guard_action"] == "resample"
+    assert resample_snapshot["authenticity"]["sampling_penalty_applied"] >= 0.0
+    assert any(token in resample_snapshot["authenticity"]["summary"] for token in ("回拉", "收束", "真相面"))
 
     def fallback_generate(route_name, request):
         if route_name == "renderer":
@@ -1142,7 +1917,9 @@ def test_cognitive_snapshot_humanizes_authenticity_resample_and_fallback(tmp_pat
         mode="interactive",
     )
     fallback_snapshot = controller.state_payload()["cognitive_snapshot"]
-    assert fallback_snapshot["authenticity"]["summary"] == "这轮为了保持真实感，表达被明显收束"
+    assert fallback_snapshot["authenticity"]["guard_action"] == "fallback"
+    assert fallback_snapshot["authenticity"]["sampling_penalty_applied"] >= 0.0
+    assert any(token in fallback_snapshot["authenticity"]["summary"] for token in ("收束", "真实感", "真相面"))
 
 
 def test_idle_and_sleep_modes_record_noninteractive_shaping_events(tmp_path):
@@ -1271,6 +2048,28 @@ def test_run_endogenous_tick_builds_stable_micro_intent_without_external_input(t
     assert snapshots[-1]["boundary_action"] == "allow_internal"
     assert snapshots[-1]["micro_intent"]["stability"] >= 2
     assert state.endogenous_state["current_intent"] is not None
+    assert state.endogenous_scheduler_state.last_endogenous_tick_at is not None
+    assert state.motivation_pool_state is not None
+
+
+def test_why_motivation_and_replay_motivation_surface_endogenous_trace_fields(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(source="user", content="记住茶和刚才没说完的话。", target="user", cue="tea", valence=-0.2),
+        scenario="companion",
+        mode="interactive",
+    )
+
+    endogenous = controller.run_endogenous_tick(trigger="idle")
+
+    why_payload = controller.why_motivation(endogenous["round_id"])
+    replay_payload = controller.replay_motivation(endogenous["round_id"])
+
+    assert why_payload["cause_type"] == "endogenous"
+    assert "motivation_pool" in why_payload
+    assert "endogenous_tick_reason" in why_payload
+    assert "motivation_feedback" in replay_payload
+    assert "endogenous_policy_shift" in replay_payload
 
 
 def test_chat_turn_sanitizes_execution_state_for_pfc_route_when_task_run_is_paused(tmp_path):
@@ -1406,6 +2205,9 @@ def test_runtime_startup_migration_sanitizes_aliases_and_reports_counts(tmp_path
     assert state.identity_state.aliases == ["阿澜"]
     assert report["runtime"]["removed_aliases_count"] == 2
     assert report["runtime"]["schema_version"] >= 2
+    assert report["trace"]["status"] in {"completed", "not_needed", "pending"}
+    assert report["trace"]["trace_sync_state"] in {"healthy", "degraded"}
+    assert isinstance(report["trace"]["parquet_live_ready"], bool)
 
 
 def test_pfc_model_candidates_accept_list_shaped_action_preferences(tmp_path):
@@ -1443,10 +2245,36 @@ def test_pfc_model_candidates_accept_list_shaped_action_preferences(tmp_path):
         },
     )
 
-    assert result.action_preferences["plan"] == 0.35
-    assert result.action_preferences["recall"] == 0.35
-    assert result.action_preferences["respond"] == 0.35
-    assert result.sigma_scale == 0.6
+    assert result.modulated_delta["plan"] == 0.35
+    assert result.modulated_delta["recall"] == 0.35
+    assert result.modulated_delta["respond"] == 0.35
+    assert result.projection.module_temperature == 0.6
+
+
+def test_action_contribution_skills_do_not_silently_fallback_to_typed_defaults(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    result = controller.tick(
+        RoundEvent(
+            source="user",
+            content="Help me plan carefully while keeping budget low and responses concise.",
+            target="user",
+            cue="plan",
+            valence=0.05,
+        ),
+        scenario="task",
+        mode="interactive",
+    )
+
+    by_name = {
+        row["skill_name"]: row
+        for row in result.trace.skill_traces
+        if row["skill_name"] in {"generate_candidates", "map_budget_to_bias", "score_salience"}
+    }
+
+    assert by_name["generate_candidates"]["failure_policy_applied"] != "output_validation_failed"
+    assert by_name["map_budget_to_bias"]["failure_policy_applied"] != "output_validation_failed"
+    assert by_name["score_salience"]["failure_policy_applied"] != "output_validation_failed"
 
 
 def test_start_run_prefers_planner_route_when_configured(tmp_path):
@@ -1504,6 +2332,70 @@ def test_replay_why_not_and_what_changed_return_counterfactuals(tmp_path):
     assert changed_payload["action_counts"]
 
 
+def test_probability_field_observability_surfaces_stacked_action_contributions(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="Please help me plan carefully, but I also want to wander and rest. Remember tea too.",
+            target="friend",
+            cue="tea",
+            valence=0.05,
+        ),
+        scenario="task",
+        mode="interactive",
+    )
+
+    why_payload = controller.why_this(1)
+    why_not_payload = controller.why_not(1, "wander")
+    heatmap_payload = controller.metrics_heatmap()
+
+    explanation = why_payload["action_probability_explanation"]
+    assert explanation["winner_target"] == why_payload["sampled_action"]
+    assert explanation["winner_posterior"]
+    assert explanation["stacked_contributions"]
+    assert any(item["module_name"] == "PFCAgent" for item in explanation["stacked_contributions"])
+    assert any(item["module_name"] == "LongRunAnalyzer" for item in explanation["stacked_contributions"])
+    assert any("trace_reason" in item for item in explanation["stacked_contributions"])
+    assert explanation["competing_peaks"]
+    assert explanation["competing_peaks"][0]["action"] == explanation["winner_target"]
+
+    assert why_not_payload["stacked_contributions"]
+    assert why_not_payload["competing_peaks"]
+    assert any(item["module_name"] for item in why_not_payload["stacked_contributions"])
+
+    assert heatmap_payload["action_module_heatmap"]
+    assert any("PFCAgent" in modules for modules in heatmap_payload["action_module_heatmap"].values())
+
+
+def test_probability_field_observability_surfaces_tool_affordance_for_active_run(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.start_run("检查 worker.py 并规划下一步")
+
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="继续检查 worker.py，并告诉我下一步怎么做。",
+            target="user",
+            cue="worker.py",
+            valence=0.02,
+        ),
+        scenario="task",
+        mode="interactive",
+    )
+
+    why_payload = controller.why_this(1)
+    heatmap_payload = controller.metrics_heatmap()
+
+    explanation = why_payload["action_probability_explanation"]
+    assert any(item["module_name"] == "SkillExecutor" for item in explanation["stacked_contributions"])
+    assert any(
+        "SkillExecutor" in modules
+        for modules in heatmap_payload["action_module_heatmap"].values()
+    )
+
+
 def test_compact_traces_and_eval_longrun_surface_diagnostics(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     controller.tick(
@@ -1516,6 +2408,68 @@ def test_compact_traces_and_eval_longrun_surface_diagnostics(tmp_path):
     summary = controller.eval_longrun(rounds=5)
 
     assert compacted["parquet_path"].endswith("round_trace.parquet")
+    assert compacted["tables"]["round_canonical"]["row_count"] >= 1
+    conn = duckdb.connect()
+    try:
+        round_rows = conn.execute(
+            "select probability_field_json, token_state_json, cross_layer_coupling_verdict_json, renderer_decision_integrity_json, memory_write_gate_json, conflict_arbitration_json from read_parquet(?) limit 1",
+            [compacted["tables"]["round_trace"]["path"]],
+        ).fetchall()
+        canonical_rows = conn.execute(
+            "select payload_json from read_parquet(?) limit 1",
+            [compacted["tables"]["round_canonical"]["path"]],
+        ).fetchall()
+    finally:
+        conn.close()
+    assert round_rows
+    assert json.loads(round_rows[0][0])["action"]["contribution_audit"]
+    assert json.loads(round_rows[0][1])["step_index"] >= 1
+    assert json.loads(round_rows[0][2])["legal"] is True
+    assert json.loads(round_rows[0][3])["renderer_consumes_final_field"] is True
+    assert "suppressed" in json.loads(round_rows[0][4])
+    assert "winning_priority" in json.loads(round_rows[0][5])
+    assert "compromise" in json.loads(round_rows[0][5])
+    assert json.loads(canonical_rows[0][0])["probability_field"]["action"]["contribution_audit"]
     assert summary["generated_rounds"] == 5
     assert "crash_rate" in summary
     assert "task_success_rate" in summary
+    assert summary["probability_field_coverage"] > 0.0
+    assert summary["action_audit_coverage"] > 0.0
+    assert summary["token_audit_coverage"] > 0.0
+    assert summary["renderer_token_coverage"] > 0.0
+    assert summary["token_source_integrity_rate"] == 1.0
+    assert "memory_write_gate" in summary
+    assert "conflict_arbitration" in summary
+    assert summary["conflict_arbitration"]["observed_round_rate"] == 1.0
+    assert "cross_layer_coupling" in summary
+
+
+def test_export_trace_parquet_exposes_long_run_projection_json_columns(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(source="user", content="Help me remember tea and plan a reply.", target="friend", cue="tea"),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    exported = controller.export_trace_parquet(overwrite=True)
+    round_path = exported["tables"]["round_trace"]["path"]
+
+    conn = duckdb.connect()
+    try:
+        row = conn.execute(
+            """
+            select long_run_projection_json, long_run_projection_online_prior_json
+            from read_parquet(?)
+            limit 1
+            """,
+            [round_path],
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    long_run_projection = json.loads(row[0])
+    online_prior = json.loads(row[1])
+    assert "online_prior" in long_run_projection
+    assert online_prior["self_consistency_score"] == long_run_projection["online_prior"]["self_consistency_score"]

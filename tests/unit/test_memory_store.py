@@ -211,6 +211,92 @@ def test_memory_store_ingest_event_unpacks_interference_tuple(tmp_path):
     assert hot["alphb"]["interfered"] is True
 
 
+def test_memory_store_suppresses_polluting_write_under_high_interference_and_pressure(tmp_path):
+    store = MemoryStore(tmp_path / ".alive")
+    store.ingest_event(
+        RoundEvent(
+            source="user",
+            content="remember alpha idea for later",
+            target="user",
+            cue="alpha",
+            valence=0.1,
+        ),
+        round_id=1,
+        session_id="sess-1",
+    )
+    alpha = next(item for item in store._read_list(store.episodic_path) if item["cue"] == "alpha")
+    alpha["detail_strength"] = 0.30
+    alpha["gist_strength"] = 0.32
+    store._write_list(store.episodic_path, [alpha])
+
+    cue = store.ingest_event(
+        RoundEvent(
+            source="user",
+            content="remember alphb idea for later",
+            target="user",
+            cue="alphb",
+            valence=0.0,
+        ),
+        round_id=2,
+        session_id="sess-1",
+        cue_quality=0.0,
+        resource_pressure=0.92,
+    )
+
+    hot = {item["cue"]: item for item in store._read_list(store.episodic_path)}
+    diagnostics = store.last_ingest_diagnostics()
+
+    assert cue == "alphb"
+    assert "alphb" not in hot
+    assert diagnostics["suppressed"] is True
+    assert diagnostics["reason"] == "pollution_guard"
+    assert diagnostics["interference"] > 0.0
+    assert diagnostics["resource_pressure"] == 0.92
+
+
+def test_memory_store_assigns_episode_and_separation_ids_to_recallable_memories(tmp_path):
+    store = MemoryStore(tmp_path / ".alive")
+    store.ingest_event(
+        RoundEvent(
+            source="user",
+            content="remember alpha idea for later",
+            target="user",
+            cue="alpha",
+            valence=0.1,
+        ),
+        round_id=1,
+        session_id="sess-1",
+    )
+    alpha = next(item for item in store._read_list(store.episodic_path) if item["cue"] == "alpha")
+    alpha["detail_strength"] = 0.30
+    alpha["gist_strength"] = 0.32
+    store._write_list(store.episodic_path, [alpha])
+
+    store.ingest_event(
+        RoundEvent(
+            source="user",
+            content="remember alphb idea for later",
+            target="user",
+            cue="alphb",
+            valence=0.1,
+        ),
+        round_id=2,
+        session_id="sess-1",
+        cue_quality=1.0,
+    )
+
+    hot = {item["cue"]: item for item in store._read_list(store.episodic_path)}
+    recall = store.recall("alphb")
+
+    assert hot["alphb"]["episode_id"].startswith("ep-")
+    assert hot["alphb"]["separation_id"].startswith("sep-")
+    assert recall["episode_id"] == hot["alphb"]["episode_id"]
+    assert recall["separation_id"] == hot["alphb"]["separation_id"]
+    assert recall["prior_vector"]["episodic_confidence"] > 0.0
+    assert recall["prior_vector"]["interference_penalty"] >= 0.0
+    assert recall["prior_vector"]["detail_bias"] >= 0.0
+
+
 def test_memory_store_marks_old_habit_as_suppressed_but_recoverable(tmp_path):
     store = MemoryStore(tmp_path / ".alive")
 
@@ -563,6 +649,33 @@ def test_memory_store_compacts_hot_warm_archive_layers(tmp_path):
     assert tiers["hot"] <= 2
     assert tiers["warm"] <= 2
     assert tiers["archive"] >= 1
+
+
+def test_memory_store_compaction_ignores_suppressed_raw_events(tmp_path):
+    store = MemoryStore(tmp_path / ".alive")
+    store.ingest_event(
+        RoundEvent(source="user", content="remember alpha idea for later", target="user", cue="alpha", valence=0.1),
+        round_id=1,
+        session_id="sess-1",
+    )
+    alpha = next(item for item in store._read_list(store.episodic_path) if item["cue"] == "alpha")
+    alpha["detail_strength"] = 0.30
+    alpha["gist_strength"] = 0.32
+    store._write_list(store.episodic_path, [alpha])
+
+    store.ingest_event(
+        RoundEvent(source="user", content="remember alphb idea for later", target="user", cue="alphb", valence=0.0),
+        round_id=2,
+        session_id="sess-1",
+        cue_quality=0.0,
+        resource_pressure=0.92,
+    )
+
+    summary = store.compact_tiers()
+    hot_artifacts = store.sample_compacted("hot", limit=10)
+
+    assert summary["raw_event_count"] == 1
+    assert [item["cue"] for item in hot_artifacts] == ["alpha"]
 
 
 def test_memory_store_recall_prefers_detail_then_gist_and_supports_ablation(tmp_path):

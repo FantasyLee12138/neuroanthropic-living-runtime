@@ -1,13 +1,14 @@
+import math
 from pathlib import Path
 
 from nalr.runtime.controller import RuntimeController
-from nalr.schemas.models import ActionDistributionState, ProposalBundle, RoundEvent, RuntimeState
+from nalr.schemas.models import ActionBookkeepingState, ActionEvidenceSignal, RoundEvent, RuntimeState
 
 
 CONFIG_ROOT = Path(__file__).resolve().parents[2] / "config"
 
 
-def test_tick_records_formula_distribution_state_and_richer_proposal_fields(tmp_path):
+def test_tick_records_formula_action_bookkeeping_and_richer_proposal_fields(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     controller.entropy_pool.ingest_bytes(bytes(range(256)) * 8, source="fixture_qrng", reason="formula alignment")
 
@@ -24,19 +25,18 @@ def test_tick_records_formula_distribution_state_and_richer_proposal_fields(tmp_
         mode="interactive",
     )
 
-    distribution = result.trace.distribution_state
+    action_bookkeeping = result.trace.action_bookkeeping
+    action_layer = result.trace.probability_field["action"]
 
-    assert distribution["p_base"]
-    assert distribution["p_raw"]
-    assert distribution["p_final"]
-    assert distribution["gate"]
-    assert distribution["ci"]
-    assert distribution["conflict"]["components"]
-    assert distribution["conflict"]["passes"]
-    assert distribution["query_intent"]["posterior"]
-    assert distribution["disclosure_intent"]["posterior"]
-    assert abs(sum(distribution["p_final"].values()) - 1.0) <= 1e-5
-    assert all(0.01 <= value <= 0.85 for value in distribution["p_raw"].values())
+    assert action_bookkeeping["p_base"]
+    assert action_bookkeeping["gate"]
+    assert action_bookkeeping["ci"]
+    assert action_bookkeeping["risk_suppressor"]
+    assert action_bookkeeping["query_intent"]["posterior"]
+    assert action_bookkeeping["disclosure_intent"]["posterior"]
+    assert abs(sum(action_layer["winner_posterior"].values()) - 1.0) <= 1e-5
+    assert all(0.0 <= value <= 1.0 for value in action_bookkeeping["p_base"].values())
+    assert "distribution_state" not in controller.trace_round(result.round_id)
     assert result.trace.stochastic_state["entropy_ref"]["source"]
     assert "batch_id" in result.trace.stochastic_state["entropy_ref"]
     assert 0.0 <= result.trace.stochastic_state["v_t"] <= 1.0
@@ -54,7 +54,7 @@ def test_tick_records_formula_distribution_state_and_richer_proposal_fields(tmp_
     assert "selected" in proposal
 
 
-def test_tick_executes_conflict_thalamus_and_output_skills_independently(tmp_path):
+def test_tick_executes_conflict_and_output_skills_without_thalamus_sampling(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     controller.entropy_pool.ingest_bytes(bytes(range(256)) * 8, source="fixture_qrng", reason="skill fanout")
 
@@ -73,16 +73,16 @@ def test_tick_executes_conflict_thalamus_and_output_skills_independently(tmp_pat
     skill_names = [item["skill_name"] for item in result.trace.skill_traces]
 
     assert "score_conflict" in skill_names
-    assert "aggregate_proposals" in skill_names
-    assert "normalize_distribution" in skill_names
-    assert "sample_action" in skill_names
     assert "apply_output_gate" in skill_names
     assert "render_tone_profile" in skill_names
     assert "compute_delay_profile" in skill_names
-    assert result.trace.distribution_state["conflict"]["total_score"] >= 0.0
+    assert "aggregate_proposals" not in skill_names
+    assert "normalize_distribution" not in skill_names
+    assert "sample_action" not in skill_names
+    assert result.trace.conflict_arbitration["total_score"] >= 0.0
 
 
-def test_distribution_state_uses_sigma_scale_and_utility_shift_in_shifted_utility(tmp_path):
+def test_action_bookkeeping_uses_sigma_scale_and_utility_shift_in_shifted_utility(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     state = controller.load_runtime_state()
     scenario_cfg = controller.config["scenarios"]["scenarios"]["task"]
@@ -99,36 +99,35 @@ def test_distribution_state_uses_sigma_scale_and_utility_shift_in_shifted_utilit
         "valence": -0.10,
     }
 
-    baseline = ProposalBundle(
-        owner="ValueAgent",
+    baseline = ActionEvidenceSignal(
+        module_name="ValueAgent",
+        module_type="value",
         confidence=0.92,
-        action_preferences={"plan": 0.12},
-        delta_p={"plan": 0.12},
+        action_delta={"plan": 0.12},
         sigma_scale=0.70,
         utility_shift={"plan": 0.00},
-        reason="baseline",
+        trace_reason="baseline",
     )
-    shifted = ProposalBundle(
-        owner="ValueAgent",
+    shifted = ActionEvidenceSignal(
+        module_name="ValueAgent",
+        module_type="value",
         confidence=0.92,
-        action_preferences={"plan": 0.12},
-        delta_p={"plan": 0.12},
+        action_delta={"plan": 0.12},
         sigma_scale=1.35,
         utility_shift={"plan": 0.22},
-        reason="shifted",
+        trace_reason="shifted",
     )
 
-    baseline_distribution = controller._build_distribution_state(
+    baseline_bookkeeping = controller._build_action_bookkeeping(
         [baseline], state, scenario_cfg, mode_cfg, relation_state, context
     )
-    shifted_distribution = controller._build_distribution_state(
+    shifted_bookkeeping = controller._build_action_bookkeeping(
         [shifted], state, scenario_cfg, mode_cfg, relation_state, context
     )
 
-    assert shifted_distribution.u_base["plan"] == baseline_distribution.u_base["plan"]
-    assert shifted_distribution.u_shifted["plan"] > baseline_distribution.u_shifted["plan"]
-    assert shifted_distribution.p_raw["plan"] > baseline_distribution.p_raw["plan"]
-    assert shifted_distribution.risk_suppressor["connect"] < 1.0
+    assert shifted_bookkeeping.u_base["plan"] == baseline_bookkeeping.u_base["plan"]
+    assert shifted_bookkeeping.p_base["plan"] == baseline_bookkeeping.p_base["plan"]
+    assert shifted_bookkeeping.risk_suppressor["connect"] < 1.0
 
 
 def test_task_profile_reduces_stochastic_noise_when_control_strength_is_higher(tmp_path):
@@ -146,16 +145,17 @@ def test_task_profile_reduces_stochastic_noise_when_control_strength_is_higher(t
         "connect": 0.03,
         "wander": 0.02,
     }
-    distribution_state = ActionDistributionState(
+    action_bookkeeping = ActionBookkeepingState(
         p_base=dict(deterministic),
-        p_raw=dict(deterministic),
-        p_mix={},
-        p_final={},
         ci={action: 0.22 for action in deterministic},
         gate={action: 1.0 for action in deterministic},
         risk_suppressor={action: 1.0 for action in deterministic},
-        resample_idx=0,
     )
+    control_ledger = {
+        "ci": dict(action_bookkeeping.ci),
+        "gate": dict(action_bookkeeping.gate),
+        "risk_suppressor": dict(action_bookkeeping.risk_suppressor),
+    }
     event = RoundEvent(
         source="user",
         content="Please help me plan calmly.",
@@ -174,23 +174,27 @@ def test_task_profile_reduces_stochastic_noise_when_control_strength_is_higher(t
 
     _, chat_stochastic = controller._apply_stochastic_layer(
         deterministic,
-        distribution_state,
+        action_bookkeeping,
+        control_ledger,
         state,
         event,
         chat_cfg,
         relation_state,
         0.05,
         17,
+        action_energy={action: math.log(max(value, 1e-9)) for action, value in deterministic.items()},
     )
     _, task_stochastic = controller._apply_stochastic_layer(
         deterministic,
-        distribution_state,
+        action_bookkeeping,
+        control_ledger,
         state,
         event,
         task_cfg,
         relation_state,
         0.05,
         17,
+        action_energy={action: math.log(max(value, 1e-9)) for action, value in deterministic.items()},
     )
 
     assert task_stochastic.lambda_noise < chat_stochastic.lambda_noise
@@ -260,7 +264,7 @@ def test_tick_supports_internal_short_reply_action_when_resources_are_tight(tmp_
         mode="interactive",
     )
 
-    assert "short_reply" in result.trace.distribution_state["p_base"]
-    assert result.trace.distribution_state["p_final"]["short_reply"] >= 0.0
+    assert "short_reply" in result.trace.probability_field["action"]["base_energy"]
+    assert result.trace.probability_field["action"]["winner_posterior"]["short_reply"] >= 0.0
     assert result.sampled_action.name == "respond"
     assert result.trace.render_plan["action"] == "respond"

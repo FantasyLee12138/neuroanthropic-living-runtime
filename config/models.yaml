@@ -90,7 +90,7 @@ model_tiers:
     api_key_env: ARK_API_KEY
 agent_model_bindings:
   planner: medium_model
-  PFCAgent: large_model
+  PFCAgent: medium_model
   PerspectiveModel: medium_model
   Renderer: large_model
   SalienceAgent: small_model

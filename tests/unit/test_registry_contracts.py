@@ -1,7 +1,16 @@
 import pytest
 
 from nalr.agents.registry import build_agent_registry
-from nalr.schemas.models import CircuitBreakerPolicy, FallbackRoute, SkillPermissionProfile, SkillSpec
+from nalr.schemas.models import (
+    CircuitBreakerPolicy,
+    ContributionAuditRecord,
+    FallbackRoute,
+    ProbabilisticContribution,
+    SkillPermissionProfile,
+    SkillSpec,
+    TokenFieldState,
+)
+from nalr.skills.contracts import serialize_contract_value
 from nalr.skills.registry import build_skill_registry, serialize_contract
 
 
@@ -45,6 +54,9 @@ def test_agent_registry_exposes_v056_contracts():
         "mark_post_error_adjustment",
     ]
 
+    thalamus_spec = registry["ThalamusAttentionAgent"]
+    assert thalamus_spec.owned_skills == []
+
     plausibility_spec = registry["BehaviorPlausibilityGuard"]
     assert "check_behavior_plausibility" in plausibility_spec.owned_skills
 
@@ -60,7 +72,7 @@ def test_skill_registry_exposes_typed_skill_specs():
     assert spec.failure_policy == "fallback_to_rules"
     assert spec.policy_check is True
     assert spec.idempotent is True
-    assert spec.output_kind == "candidate_actions"
+    assert spec.output_kind == "contribution"
     assert "proposal" in spec.trace_tags
     assert spec.permission.external_io is True
     assert spec.fallback_route is not None
@@ -70,7 +82,15 @@ def test_skill_registry_exposes_typed_skill_specs():
     assert spec.breaker_policy.failure_threshold == 3
     assert spec.breaker_policy.cooldown_rounds == 5
     assert serialize_contract(spec.input_schema)["event"] == "RoundEvent"
-    assert serialize_contract(spec.output_schema) == "ProposalBundle"
+    assert serialize_contract(spec.output_schema) == "ProbabilisticContribution"
+
+    salience_spec = registry["score_salience"]
+    assert serialize_contract(salience_spec.output_schema) == "ProbabilisticContribution"
+    assert salience_spec.output_kind == "contribution"
+
+    resource_spec = registry["map_budget_to_bias"]
+    assert serialize_contract(resource_spec.output_schema) == "ProbabilisticContribution"
+    assert resource_spec.output_kind == "contribution"
 
     async_spec = registry["flush_trace_batch"]
     assert async_spec.sync_mode == "async"
@@ -83,6 +103,56 @@ def test_skill_registry_exposes_typed_skill_specs():
     assert repair_spec.output_kind == "flag"
     assert serialize_contract(repair_spec.input_schema)["state"] == "RuntimeState"
     assert serialize_contract(repair_spec.output_schema)["repair_mode"] == "optional[str]"
+
+    conflict_spec = registry["score_conflict"]
+    assert serialize_contract(conflict_spec.input_schema)["signals"] == "list[ActionEvidenceSignal]"
+    assert serialize_contract(conflict_spec.input_schema)["probability_field"] == "dict[str, Any]"
+    escalation_spec = registry["trigger_control_escalation"]
+    assert serialize_contract(escalation_spec.input_schema)["probability_field"] == "dict[str, Any]"
+    assert serialize_contract(escalation_spec.input_schema)["conflict_arbitration"] == "dict[str, Any]"
+    assert "aggregate_proposals" not in registry
+    assert "normalize_distribution" not in registry
+    assert "sample_action" not in registry
+
+
+def test_probabilistic_contribution_contract_freezes_neuromodulation_fields():
+    contribution_fields = ProbabilisticContribution.__dataclass_fields__
+    audit_fields = ContributionAuditRecord.__dataclass_fields__
+    token_state_fields = TokenFieldState.__dataclass_fields__
+
+    assert "raw_signal" in contribution_fields
+    assert "modulated_delta" in contribution_fields
+    assert "inhibitory_drive" in contribution_fields
+    assert "failure_taxonomy" in contribution_fields
+    assert "raw_signal" in audit_fields
+    assert "modulated_delta" in audit_fields
+    assert "inhibitory_drive" in audit_fields
+    assert "failure_taxonomy" in audit_fields
+    assert "delta_generation_policy" in token_state_fields
+
+
+def test_probabilistic_contribution_serialization_uses_canonical_fields_only():
+    payload = serialize_contract_value(
+        ProbabilisticContribution(
+            module_name="demo",
+            module_type="executive",
+            level="action",
+            target_space="action",
+            raw_signal={"plan": 0.4},
+            modulated_delta={"plan": 0.2},
+            inhibitory_drive={"rest": 0.1},
+            failure_taxonomy=["guard_overreach"],
+            confidence=0.5,
+            trace_reason="typed test",
+            projection_reason="typed test",
+        )
+    )
+
+    assert payload["raw_signal"] == {"plan": 0.4}
+    assert payload["modulated_delta"] == {"plan": 0.2}
+    assert payload["inhibitory_drive"] == {"rest": 0.1}
+    assert payload["failure_taxonomy"] == ["guard_overreach"]
+    assert payload["native_operator"] == "modulated_delta"
 
 
 def test_skill_spec_rejects_invalid_runtime_metadata():

@@ -12,17 +12,17 @@ from typing import Any, get_args, get_origin, get_type_hints
 from nalr.schemas.models import (
     ActionCandidate,
     CircuitBreakerState,
-    ProposalBundle,
+    ProbabilisticContribution,
     SkillResult,
     SkillRuntimeContext,
     SkillSpec,
     to_dict,
 )
-from nalr.skills.contracts import coerce_contract
+from nalr.skills.contracts import coerce_contract, serialize_contract_value
 
 
 def _hash_payload(payload: Any) -> str:
-    return hashlib.sha1(json.dumps(to_dict(payload), ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    return hashlib.sha1(json.dumps(serialize_contract_value(payload), ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 class PolicyViolation(Exception):
@@ -163,18 +163,18 @@ class SkillExecutor:
     def _policy_postcheck(self, spec: SkillSpec, output: Any) -> str | None:
         if not spec.policy_check:
             return None
-        if isinstance(output, ProposalBundle):
+        if isinstance(output, ProbabilisticContribution):
             if not 0.0 <= float(output.confidence) <= 1.0:
-                return "proposal_confidence_out_of_range"
-            if not 0.60 <= float(output.sigma_scale) <= 1.60:
-                return "proposal_sigma_scale_out_of_range"
-            if any(abs(float(value)) > 1.0 for value in output.action_preferences.values()):
-                return "proposal_action_preferences_out_of_range"
-            if any(abs(float(value)) > 1.0 for value in output.delta_p.values()):
-                return "proposal_delta_p_out_of_range"
+                return "contribution_confidence_out_of_range"
+            if output.confidence_calibrated is not None and not 0.0 <= float(output.confidence_calibrated) <= 1.0:
+                return "contribution_confidence_calibrated_out_of_range"
+            for field_name in ("raw_signal", "modulated_delta", "inhibitory_drive"):
+                field_value = getattr(output, field_name, {})
+                if any(abs(float(value)) > 3.5 for value in field_value.values()):
+                    return f"{field_name}_out_of_range"
             return None
 
-        payload = to_dict(output)
+        payload = serialize_contract_value(output)
         if spec.output_kind == "gate":
             gate = payload.get("gate", payload.get("pass"))
             if isinstance(gate, dict):
@@ -216,8 +216,19 @@ class SkillExecutor:
             return 0.0
         if contract is bool:
             return False
-        if contract is ProposalBundle:
-            return ProposalBundle(owner=spec.owner_module, action_preferences={"respond": 0.0}, delta_p={"respond": 0.0}, reason="typed fallback")
+        if contract is ProbabilisticContribution:
+            return ProbabilisticContribution(
+                module_name=spec.owner_module,
+                module_type=spec.owner_module.replace("Agent", "").replace("Model", "").lower() or "action",
+                level="action",
+                target_space="action",
+                raw_signal={"respond": 0.0},
+                modulated_delta={"respond": 0.0},
+                confidence=0.0,
+                trace_reason="typed fallback",
+                projection_reason="typed fallback",
+                native_operator="modulated_delta",
+            )
         if contract is ActionCandidate:
             return ActionCandidate(name="respond", probability=1.0, rationale="typed fallback")
         if isinstance(contract, type) and is_dataclass(contract):
@@ -398,7 +409,7 @@ class SkillExecutor:
         else:
             breaker_state = self._record_success(skill_name)
 
-        normalized_output = to_dict(raw_output)
+        normalized_output = serialize_contract_value(raw_output)
         result = SkillResult(
             skill_name=skill_name,
             owner_module=spec.owner_module,

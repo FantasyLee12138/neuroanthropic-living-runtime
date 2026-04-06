@@ -16,7 +16,14 @@ from uuid import uuid4
 
 import yaml
 
-from nalr.agents.modules import TEMPLATE_ACTION_SCALES, TEMPLATE_BY_PRIORITY, build_agents, compute_salience_signal
+from nalr.agents.modules import (
+    OWNER_CONTROL_DOMAIN,
+    OWNER_PRIORITY_BUCKET,
+    TEMPLATE_ACTION_SCALES,
+    TEMPLATE_BY_PRIORITY,
+    build_agents,
+    compute_salience_signal,
+)
 from nalr.dream.orchestrator import DreamOrchestrator
 from nalr.memory.store import MemoryStore, _derive_cue
 from nalr.output.renderer import fallback_render_text
@@ -28,13 +35,18 @@ from nalr.runtime.async_io import AsyncIOWorker
 from nalr.runtime.dynamics import smooth_resource_biases
 from nalr.runtime.entropy import AnuQuantumEntropyProvider, QuantumEntropyPool, QuantumEntropyUnavailableError
 from nalr.runtime.authenticity import AuthenticityPolicy
+from nalr.runtime.endogenous_scheduler import EndogenousTickScheduler
 from nalr.runtime.identity import IdentityRuntime
 from nalr.runtime.longrun import LongRunAnalyzer
 from nalr.runtime.metadata import iso_date, utc_now_iso
+from nalr.runtime.motivation_feedback import MotivationFeedbackUpdater
+from nalr.runtime.motivation_pool import EndogenousMotivationPool
+from nalr.runtime.probability_field import ProbabilityFieldIntegrator
 from nalr.runtime.vitality import VitalityEngine
 from nalr.schemas.models import (
     ActionCandidate,
-    ActionDistributionState,
+    ActionBookkeepingState,
+    ActionEvidenceSignal,
     AgentContribution,
     AuthenticityRecord,
     CheckpointRef,
@@ -45,11 +57,17 @@ from nalr.schemas.models import (
     ConflictRepairLedgerEntry,
     ConflictRepairState,
     DisclosureIntentState,
+    EndogenousMotivationSignal,
+    EndogenousTickTrigger,
+    CrossLayerCouplingSpec,
+    EnergyProjectionSpec,
     ExpressionProfile,
     HealthEvent,
     IdentityContext,
     IdentityState,
-    ProposalBundle,
+    ProbabilityFieldSnapshot,
+    ProbabilityLayerState,
+    ProbabilisticContribution,
     RenderPlan,
     RenderedExpression,
     RunPolicy,
@@ -66,6 +84,7 @@ from nalr.schemas.models import (
     StochasticState,
     SubjectCore,
     TaskNode,
+    TokenFieldState,
     TurnExecution,
     TurnPlan,
     ToolResult,
@@ -76,38 +95,60 @@ from nalr.skills.executor import SkillExecutor
 from nalr.skills.registry import build_skill_registry, serialize_contract
 from nalr.storage.parquet_io import read_snapshot_rows, rewrite_snapshot
 from nalr.trace.exporter import TraceExporter
-from nalr.trace.store import TraceStore
+from nalr.trace.store import TraceStore, canonical_probability_field_payload
 
 
 def _clip(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return max(low, min(high, value))
 
 
-PIPELINE_ORDER: list[tuple[str, tuple[str, ...]]] = [
-    ("state_update", ()),
-    ("salience", ("SalienceAgent",)),
-    ("body", ("BodyStateAgent",)),
-    ("emotion", ("EmotionAgent",)),
-    ("relationship", ("RelationshipAgent",)),
-    ("resource", ("ResourceAgent",)),
-    ("pfc", ("PFCAgent",)),
-    ("habit", ("HabitAgent",)),
-    ("desire", ("DesireAgent",)),
-    ("dmn", ("DMNAgent",)),
-    ("hippocampus", ("HippocampusAgent",)),
-    ("perspective", ("PerspectiveModel",)),
-    ("value", ("ValueAgent",)),
-    ("unconscious", ("UnconsciousAgent",)),
-    ("cerebellar", ("CerebellarPredictor",)),
-    ("conflict", ("ConflictMonitorAgent",)),
-    ("thalamus", ("ThalamusAttentionAgent",)),
-    ("plausibility_guard", ("BehaviorPlausibilityGuard",)),
-    ("forced_mode_switch", ("ForcedModeSwitch",)),
-    ("output_gate", ("OutputGate",)),
-    ("late_perspective", ("PerspectiveModel",)),
-    ("renderer", ()),
-    ("writeback", ()),
+PIPELINE_TELEMETRY_STAGES: list[str] = [
+    "state_update",
+    "salience",
+    "body",
+    "emotion",
+    "relationship",
+    "resource",
+    "pfc",
+    "habit",
+    "desire",
+    "dmn",
+    "hippocampus",
+    "perspective",
+    "value",
+    "unconscious",
+    "cerebellar",
+    "conflict",
+    "thalamus",
+    "plausibility_guard",
+    "forced_mode_switch",
+    "output_gate",
+    "late_perspective",
+    "renderer",
+    "writeback",
 ]
+
+ACTION_HEAD_STAGE_ORDER: list[tuple[str, str]] = [
+    ("salience", "SalienceAgent"),
+    ("body", "BodyStateAgent"),
+    ("emotion", "EmotionAgent"),
+    ("relationship", "RelationshipAgent"),
+    ("resource", "ResourceAgent"),
+    ("pfc", "PFCAgent"),
+    ("habit", "HabitAgent"),
+    ("desire", "DesireAgent"),
+    ("dmn", "DMNAgent"),
+    ("hippocampus", "HippocampusAgent"),
+    ("perspective", "PerspectiveModel"),
+    ("value", "ValueAgent"),
+    ("unconscious", "UnconsciousAgent"),
+    ("cerebellar", "CerebellarPredictor"),
+]
+
+ACTION_STAGE_BY_OWNER: dict[str, str] = {
+    owner: stage
+    for stage, owner in ACTION_HEAD_STAGE_ORDER
+}
 
 
 CORE_ACTIONS = ("respond", "plan", "recall", "rest", "connect", "clarify", "wander")
@@ -182,6 +223,10 @@ class RuntimeController:
             self.entropy_pool.ingest_bytes(bytes([128]) * (256 * 64), source="pytest_qrng_fixture", reason="test harness")
         self.authenticity_policy = AuthenticityPolicy(self._identity_cfg())
         self.vitality_engine = VitalityEngine()
+        self.probability_integrator = ProbabilityFieldIntegrator()
+        self.endogenous_motivation_pool = EndogenousMotivationPool()
+        self.motivation_feedback_updater = MotivationFeedbackUpdater()
+        self.endogenous_scheduler = EndogenousTickScheduler()
         self.dream_orchestrator = DreamOrchestrator(
             project_root=self.project_root,
             home_path=self.home_path,
@@ -382,6 +427,13 @@ class RuntimeController:
     def runtime_migration_report(self) -> dict[str, Any]:
         runtime_status = self._runtime_migration_status()
         memory_status = self.memory_store.migration_report()
+        trace_sync_status = self.trace_store.trace_storage_status()
+        trace_migration_status: dict[str, Any] = {}
+        if self.trace_store.migration_status_path.exists():
+            try:
+                trace_migration_status = json.loads(self.trace_store.migration_status_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                trace_migration_status = {}
         return {
             "runtime": {
                 "schema_version": int(runtime_status.get("schema_version", 0) or 0),
@@ -391,6 +443,15 @@ class RuntimeController:
                 "migrated_at": runtime_status.get("migrated_at"),
             },
             "memory": memory_status,
+            "trace": {
+                "status": str(trace_migration_status.get("status") or "not_needed"),
+                "migrated_at": trace_migration_status.get("migrated_at"),
+                "parquet_live_ready": bool(trace_sync_status.get("parquet_live_ready", False)),
+                "trace_sync_state": str(trace_sync_status.get("trace_sync_state", trace_sync_status.get("storage_state", "healthy"))),
+                "storage_state": str(trace_sync_status.get("storage_state", "healthy")),
+                "degraded_reason": trace_sync_status.get("degraded_reason"),
+                "last_sync_at": trace_sync_status.get("last_sync_at"),
+            },
         }
 
     def flush_pending_io(self, *, raise_on_error: bool = False) -> None:
@@ -753,16 +814,14 @@ class RuntimeController:
             1 for item in rounds if item.get("cause_type") == "endogenous"
         )
         ratio = round(external_count / max(internal_count, 1), 4)
-        endogenous_intent_count = sum(
-            1 for item in rounds if item.get("cause_type") == "endogenous" and item.get("sampled_action") == "rest"
-        )
+        endogenous_rounds = [item for item in rounds if item.get("cause_type") == "endogenous"]
         return {
             "subject_id": core.subject_id,
             "continuity_nonce": core.continuity_nonce,
             "subject_core_integrity": bool(core.subject_id and core.continuity_nonce and core.birth_ts),
             "boundary_violation_count": boundary_violation_count,
             "external_to_internal_ratio": ratio,
-            "endogenous_intent_rate": round(endogenous_intent_count / max(len(rounds), 1), 4),
+            "endogenous_intent_rate": round(len(endogenous_rounds) / max(len(rounds), 1), 4),
         }
 
     def _round_seed(self, state: RuntimeState, event: RoundEvent) -> int:
@@ -1230,18 +1289,46 @@ class RuntimeController:
         bindings = self._agent_model_bindings()
         return bindings.get(binding_key, "state_machine")
 
+    def _effective_agent_tier(self, binding_key: str, *, metadata: dict[str, Any] | None = None) -> str:
+        base_tier = self._agent_tier(binding_key)
+        info = dict(metadata or {})
+        if base_tier == "state_machine":
+            return base_tier
+        if binding_key == "PFCAgent":
+            escalate = (
+                float(info.get("relation_risk", 0.0) or 0.0) >= 0.62
+                or float(info.get("disclosure_sensitivity", 0.0) or 0.0) >= 0.55
+                or float(info.get("authenticity_risk", 0.0) or 0.0) >= 0.32
+                or float(info.get("conflict_score", 0.0) or 0.0) >= self.config["thresholds"]["thresholds"]["conflict_high"]
+                or int(info.get("resample_count", 0) or 0) >= 2
+            )
+            return "large_model" if escalate else base_tier
+        if binding_key == "PerspectiveModel":
+            escalate = (
+                float(info.get("relation_risk", 0.0) or 0.0) >= 0.72
+                or float(info.get("disclosure_sensitivity", 0.0) or 0.0) >= 0.72
+            )
+            return "large_model" if escalate else base_tier
+        return base_tier
+
     def _tier_config(self, tier_name: str) -> dict[str, Any]:
         return dict(self._model_tiers().get(tier_name, {}))
 
-    def _route_config_for_binding(self, binding_key: str, *, route_name: str) -> ModelRouteConfig | None:
-        tier_name = self._agent_tier(binding_key)
+    def _route_config_for_binding(
+        self,
+        binding_key: str,
+        *,
+        route_name: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> ModelRouteConfig | None:
+        tier_name = self._effective_agent_tier(binding_key, metadata=metadata)
         tier_cfg = self._tier_config(tier_name)
         if not tier_cfg:
             return None
         mode = str(tier_cfg.get("mode", "local")).lower()
         if mode == "local":
             return None
-        return ModelRouteConfig(
+        route_config = ModelRouteConfig(
             name=route_name,
             backend=str(tier_cfg.get("backend", "")),
             model=str(tier_cfg.get("model", "")),
@@ -1251,6 +1338,8 @@ class RuntimeController:
             base_url=str(tier_cfg.get("base_url", self.config["models"]["models"].get("base_url", ""))),
             api_key_env=str(tier_cfg.get("api_key_env", "")).strip() or None,
         )
+        setattr(route_config, "effective_tier", tier_name)
+        return route_config
 
     def _record_model_call(
         self,
@@ -1268,7 +1357,7 @@ class RuntimeController:
             {
                 "skill_name": skill_name,
                 "binding_key": binding_key,
-                "agent_tier": self._agent_tier(binding_key),
+                "agent_tier": getattr(route_config, "effective_tier", self._agent_tier(binding_key)),
                 "route": response.route,
                 "backend": getattr(response, "backend", route_config.backend),
                 "model": response.model,
@@ -1286,11 +1375,12 @@ class RuntimeController:
         *,
         route_name: str,
         request: ModelRequest,
+        binding_metadata: dict[str, Any] | None = None,
         model_call_traces: list[dict[str, Any]] | None = None,
         skill_name: str | None = None,
         parallel_group: str | None = None,
     ):
-        route_config = self._route_config_for_binding(binding_key, route_name=route_name)
+        route_config = self._route_config_for_binding(binding_key, route_name=route_name, metadata=binding_metadata)
         if route_config is None:
             return self.model_router.generate(route_name, request)
         try:
@@ -1572,6 +1662,8 @@ class RuntimeController:
                             "timeout_ms": timeout_ms,
                             "latency_ms": latency_ms,
                             "agent_tier": agent_tier,
+                            "started_at_ms": round(started * 1000, 3),
+                            "finished_at_ms": round(time.perf_counter() * 1000, 3),
                         }
                     )
         finally:
@@ -1619,6 +1711,665 @@ class RuntimeController:
             task_type=str(task.get("task_type", "skill")),
             timeout_ms=int(task.get("timeout_ms", 0) or 0),
         )
+
+    def _action_evidence_from_contribution(
+        self,
+        contribution: ProbabilisticContribution,
+        *,
+        priority_bucket: str | None = None,
+        control_domain: str | None = None,
+        gated_actions: list[str] | None = None,
+        risk_hints: dict[str, Any] | None = None,
+        veto: bool = False,
+        trace_tags: list[str] | None = None,
+    ) -> ActionEvidenceSignal:
+        projected_delta = self._projected_action_delta_from_contribution(contribution)
+        projection = contribution.projection or EnergyProjectionSpec(
+            module_type=contribution.module_type,
+            target_space=contribution.target_space,
+        )
+        hard_masked = {
+            action
+            for action, blocked in dict(contribution.hard_mask or {}).items()
+            if blocked
+        }
+        hard_masked.update(str(action) for action in list(gated_actions or []) if isinstance(action, str) and action)
+        return ActionEvidenceSignal(
+            module_name=contribution.module_name,
+            module_type=contribution.module_type,
+            confidence=float(contribution.confidence),
+            action_delta=projected_delta,
+            utility_shift=dict(projected_delta),
+            sigma_scale=max(0.6, min(1.6, float(projection.module_temperature or 1.0))),
+            priority_bucket=priority_bucket or OWNER_PRIORITY_BUCKET.get(contribution.module_name, "task_goal"),
+            control_domain=control_domain or OWNER_CONTROL_DOMAIN.get(contribution.module_name, "task"),
+            gated_actions=sorted(hard_masked),
+            risk_hints=dict(risk_hints or {}),
+            veto=bool(veto),
+            trace_reason=contribution.trace_reason,
+            trace_tags=list(trace_tags or [str(contribution.module_type)]),
+        )
+
+    def _projected_action_delta_from_contribution(
+        self,
+        contribution: ProbabilisticContribution,
+    ) -> dict[str, float]:
+        projected: dict[str, float] = {
+            str(action): float(value)
+            for action, value in dict(contribution.modulated_delta or contribution.raw_signal or {}).items()
+            if isinstance(action, str) and action
+        }
+        for action, value in dict(contribution.inhibitory_drive or {}).items():
+            action_name = str(action).strip()
+            if not action_name:
+                continue
+            projected[action_name] = round(projected.get(action_name, 0.0) - abs(float(value)), 6)
+        return {action: round(float(value), 6) for action, value in projected.items() if abs(float(value)) >= 1e-9}
+
+    def _action_signal_metadata(
+        self,
+        *,
+        owner: str,
+        state: RuntimeState,
+        relation_state: dict[str, float],
+        context: dict[str, Any],
+        module_type: str | None = None,
+        priority_bucket: str | None = None,
+        control_domain: str | None = None,
+        projected_delta: dict[str, float] | None = None,
+        utility_shift: dict[str, float] | None = None,
+        gated_actions: list[str] | None = None,
+        risk_hints: dict[str, Any] | None = None,
+        veto: bool = False,
+        trace_tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        metadata = {
+            "priority_bucket": priority_bucket
+            or {
+                "BodyStateAgent": "body_safety",
+                "EmotionAgent": "body_safety",
+                "ResourceAgent": "budget_overload",
+                "RelationshipAgent": "relation_boundary",
+                "PerspectiveModel": "relation_boundary",
+                "DesireAgent": "immediate_desire",
+                "DMNAgent": "roaming",
+            }.get(owner, "task_goal"),
+            "control_domain": control_domain
+            or {
+                "BodyStateAgent": "body",
+                "EmotionAgent": "body",
+                "ResourceAgent": "resource",
+                "RelationshipAgent": "relation",
+                "PerspectiveModel": "relation",
+                "DesireAgent": "desire",
+                "DMNAgent": "dmn",
+            }.get(owner, "task"),
+            "gated_actions": [
+                str(action)
+                for action in list(gated_actions or [])
+                if isinstance(action, str) and action
+            ],
+            "risk_hints": dict(risk_hints or {}),
+            "veto": bool(veto),
+            "trace_tags": list(trace_tags or ([str(module_type)] if module_type else [])),
+        }
+
+        gated = set(metadata["gated_actions"])
+        hints = dict(metadata["risk_hints"])
+        projected = {
+            str(action): float(value)
+            for action, value in dict(projected_delta or {}).items()
+            if isinstance(action, str) and action
+        }
+        utility = {
+            str(action): float(value)
+            for action, value in dict(utility_shift or {}).items()
+            if isinstance(action, str) and action
+        }
+
+        if owner == "BodyStateAgent":
+            hints.setdefault("body_load", round(_clip(1.0 - state.body_energy), 4))
+            hints.setdefault("body_energy", round(state.body_energy, 4))
+            if state.body_energy < 0.20:
+                gated.add("connect")
+            if state.body_energy < 0.12:
+                gated.add("plan")
+        elif owner == "ResourceAgent":
+            overload = round(_clip(1.0 - state.budget_remaining), 4)
+            hints.setdefault("overload", overload)
+            for key in (
+                "scarcity_pressure",
+                "body_hunger_bias",
+                "effort_avoidance_bias",
+                "deliberation_compress",
+                "rumination_bias",
+                "action_shrink_scale",
+            ):
+                value = state.resource_state.get(key)
+                if isinstance(value, (int, float)):
+                    hints.setdefault(key, round(float(value), 4))
+            if overload > 0.80:
+                gated.add("plan")
+        elif owner in {"RelationshipAgent", "PerspectiveModel"}:
+            hints.setdefault("relationship_risk", round(relation_state["relationship_risk"], 4))
+            hints.setdefault("boundary_level", round(relation_state["boundary_level"], 4))
+            if relation_state["boundary_level"] > 0.70:
+                gated.add("connect")
+        elif owner == "PFCAgent":
+            hints.setdefault("goal_pressure", round(max(projected.values(), default=0.0), 4))
+        elif owner == "ValueAgent":
+            hints.setdefault("goal_pressure", round(max(utility.values(), default=0.0), 4))
+        elif owner == "DesireAgent":
+            hints.setdefault("comfort_pull", round(max(projected.values(), default=0.0), 4))
+        elif owner == "DMNAgent":
+            hints.setdefault("roam_pull", round(projected.get("wander", 0.0), 4))
+        elif owner == "HabitAgent":
+            hints.setdefault("habit_strength", round(float(context.get("habit_strength", 0.0)), 4))
+
+        metadata["gated_actions"] = sorted(gated)
+        metadata["risk_hints"] = hints
+        return metadata
+
+    def _coerce_action_signals(
+        self,
+        rows: list[ActionEvidenceSignal | ProbabilisticContribution],
+    ) -> list[ActionEvidenceSignal]:
+        signals: list[ActionEvidenceSignal] = []
+        for row in rows:
+            if isinstance(row, ActionEvidenceSignal):
+                signals.append(row)
+            else:
+                signals.append(self._action_evidence_from_contribution(row))
+        return signals
+
+    def _build_value_action_contribution(
+        self,
+        value_scores: dict[str, Any],
+    ) -> ProbabilisticContribution:
+        scores = {
+            str(action): float(value)
+            for action, value in dict(value_scores.get("scores", {}) or {}).items()
+        }
+        sigma_scale = 0.98
+        top_action = max(scores, key=scores.get) if scores else ""
+        dependency_trace = [
+            "priority:task_goal",
+            "control:task",
+            f"sigma_scale:{round(sigma_scale, 4)}",
+        ]
+        if top_action:
+            dependency_trace.append(f"top_action:{top_action}")
+        return ProbabilisticContribution(
+            module_name="ValueAgent",
+            module_type="value",
+            level="action",
+            target_space="action",
+            raw_signal=dict(scores),
+            modulated_delta=dict(scores),
+            confidence=0.59,
+            confidence_calibrated=round(_clip(0.59 * sigma_scale, 0.0, 1.0), 4),
+            trace_reason="subjective value re-rank",
+            projection_reason="value bias projected from value head",
+            applied_at_stage="subjective_value",
+            native_operator="value_bias",
+            dependency_trace=dependency_trace,
+            projection=EnergyProjectionSpec(module_type="value", target_space="action", module_temperature=sigma_scale),
+        )
+
+    def _candidate_distribution_from_trace(self, trace: dict[str, Any]) -> dict[str, float]:
+        action_layer = self._action_layer_from_trace(trace)
+        winner_posterior = action_layer.get("winner_posterior", {}) if isinstance(action_layer, dict) else {}
+        if isinstance(winner_posterior, dict) and winner_posterior:
+            return {
+                str(action): round(float(value), 6)
+                for action, value in winner_posterior.items()
+            }
+        candidate_distribution = trace.get("candidate_distribution", {})
+        if isinstance(candidate_distribution, dict) and candidate_distribution:
+            return {
+                str(action): round(float(value), 6)
+                for action, value in candidate_distribution.items()
+            }
+        return {}
+
+    def _probability_field_couplings(self) -> list[CrossLayerCouplingSpec]:
+        return [
+            CrossLayerCouplingSpec(
+                source_layer="context",
+                target_layer="memory",
+                carrier_signal="context_route",
+                projection_rule="field_native",
+                allowed_phase="tick",
+            ),
+            CrossLayerCouplingSpec(
+                source_layer="memory",
+                target_layer="action",
+                carrier_signal="memory_prior",
+                projection_rule="field_native",
+                allowed_phase="tick",
+            ),
+            CrossLayerCouplingSpec(
+                source_layer="action",
+                target_layer="token",
+                carrier_signal="render_plan",
+                projection_rule="field_native",
+                allowed_phase="render",
+            ),
+        ]
+
+    def _collect_probability_field_contributions(
+        self,
+        *,
+        direct_action_contributions: dict[str, ProbabilisticContribution] | None,
+        render_plan: RenderPlan | None,
+        event: RoundEvent,
+        state: RuntimeState,
+        scenario_cfg: dict[str, Any],
+        context: dict[str, Any],
+        identity_context: IdentityContext | None,
+        authenticity: AuthenticityRecord | None,
+        vitality_snapshot: dict[str, Any] | None,
+        long_run_contribution: ProbabilisticContribution | None,
+        include_conflict: bool,
+        include_token: bool,
+        control_ledger: dict[str, Any] | None = None,
+        action_truth: dict[str, Any] | None = None,
+    ) -> tuple[list[ProbabilisticContribution], TokenFieldState]:
+        thalamus_agent = self.agent_map["ThalamusAttentionAgent"]
+        hippocampus_agent = self.agent_map["HippocampusAgent"]
+        conflict_agent = self.agent_map["ConflictMonitorAgent"]
+
+        contribution_rows: list[ProbabilisticContribution] = []
+        contribution_rows.append(thalamus_agent.build_context_routing_contribution(event, state, scenario_cfg, context))
+        contribution_rows.append(thalamus_agent.build_memory_routing_contribution(event, state, scenario_cfg, context))
+        contribution_rows.append(hippocampus_agent.build_memory_prior_contribution(event, state, scenario_cfg, context))
+        if include_token and render_plan is not None:
+            contribution_rows.append(self._build_renderer_token_contribution(render_plan, context))
+        tool_contribution = self._build_tool_affordance_contribution(state, context)
+        if tool_contribution is not None:
+            contribution_rows.append(tool_contribution)
+        if identity_context is not None:
+            contribution_rows.append(
+                self.identity_runtime.build_identity_prior_contribution(
+                    identity_context=identity_context,
+                    state=state,
+                )
+            )
+        if authenticity is not None:
+            contribution_rows.append(self.authenticity_policy.build_action_penalty_contribution(authenticity))
+        if vitality_snapshot is not None:
+            contribution_rows.append(self.vitality_engine.build_vitality_modulation_contribution(vitality_snapshot))
+        if long_run_contribution is not None:
+            contribution_rows.append(long_run_contribution)
+
+        for direct_contribution in dict(direct_action_contributions or {}).values():
+            contribution_rows.append(direct_contribution)
+
+        if include_conflict:
+            conflict_state = dict((control_ledger or {}).get("conflict", {}) or {})
+            conflict_view = dict(action_truth or {})
+            if conflict_state and conflict_view:
+                contribution_rows.append(
+                    conflict_agent.build_arbitration_contribution(conflict_state, conflict_view)
+                )
+
+        token_state = TokenFieldState(
+            step_index=state.round_count,
+            prefix_tokens=event.content.split()[:12],
+            active_module_sources=sorted({row.module_name for row in contribution_rows} | {"Renderer"}),
+            generated_delta_sources=[],
+        )
+        return contribution_rows, token_state
+
+    def _integrate_probability_field_snapshot(
+        self,
+        *,
+        direct_action_contributions: dict[str, ProbabilisticContribution] | None,
+        action_base: dict[str, float],
+        event: RoundEvent,
+        state: RuntimeState,
+        scenario_cfg: dict[str, Any],
+        context: dict[str, Any],
+        identity_context: IdentityContext | None,
+        authenticity: AuthenticityRecord | None = None,
+        vitality_snapshot: dict[str, Any] | None = None,
+        long_run_contribution: ProbabilisticContribution | None = None,
+        include_conflict: bool = False,
+        include_token: bool = False,
+        render_plan: RenderPlan | None = None,
+        source_chain: list[str] | None = None,
+        control_ledger: dict[str, Any] | None = None,
+        action_truth: dict[str, Any] | None = None,
+    ) -> tuple[ProbabilityFieldSnapshot, list[ProbabilisticContribution], TokenFieldState]:
+        contribution_rows, token_state = self._collect_probability_field_contributions(
+            direct_action_contributions=direct_action_contributions,
+            control_ledger=control_ledger,
+            action_truth=action_truth,
+            render_plan=render_plan,
+            event=event,
+            state=state,
+            scenario_cfg=scenario_cfg,
+            context=context,
+            identity_context=identity_context,
+            authenticity=authenticity,
+            vitality_snapshot=vitality_snapshot,
+            long_run_contribution=long_run_contribution,
+            include_conflict=include_conflict,
+            include_token=include_token,
+        )
+        snapshot = self.probability_integrator.integrate(
+            context_base={
+                "task_relevance": round(float(scenario_cfg.get("pfc_base_share", 0.0) or 0.0), 6),
+                "relation_context": round(float(context.get("closeness", 0.0) or 0.0), 6),
+            },
+            memory_base={
+                str(context.get("cue") or "memory:empty"): round(float(context.get("recall_strength", 0.0) or 0.0), 6),
+            },
+            action_base={
+                str(action): float(value)
+                for action, value in dict(action_base or {}).items()
+            },
+            token_state=token_state,
+            contributions=contribution_rows,
+            couplings=self._probability_field_couplings(),
+            source_chain=source_chain or ["probability_field_native", "context_memory_action"],
+        )
+        return snapshot, contribution_rows, token_state
+
+    def _finalize_action_bookkeeping_from_action_layer(
+        self,
+        action_bookkeeping: ActionBookkeepingState,
+        action_layer: dict[str, Any] | ProbabilityLayerState,
+        *,
+        finalize_stage: str,
+    ) -> None:
+        del finalize_stage
+        if isinstance(action_layer, ProbabilityLayerState):
+            action_keys = {
+                *action_bookkeeping.p_base.keys(),
+                *dict(action_layer.final_energy or {}).keys(),
+                *dict(action_layer.winner_posterior or {}).keys(),
+            }
+        else:
+            action_keys = {
+                *action_bookkeeping.p_base.keys(),
+                *dict(action_layer.get("final_energy", {}) or {}).keys(),
+                *dict(action_layer.get("winner_posterior", {}) or {}).keys(),
+            }
+        all_actions = sorted(str(action) for action in action_keys if isinstance(action, str) and action)
+        action_bookkeeping.gate = {
+            action: float(action_bookkeeping.gate.get(action, 1.0) or 1.0)
+            for action in all_actions
+        }
+        action_bookkeeping.risk_suppressor = {
+            action: float(action_bookkeeping.risk_suppressor.get(action, 1.0) or 1.0)
+            for action in all_actions
+        }
+
+    def _reintegrate_probability_snapshot(
+        self,
+        *,
+        snapshot: ProbabilityFieldSnapshot,
+        contributions: list[ProbabilisticContribution],
+        token_state: TokenFieldState,
+        source_chain: list[str] | None = None,
+    ) -> ProbabilityFieldSnapshot:
+        return self.probability_integrator.reintegrate_action_token_layers(
+            snapshot=snapshot,
+            contributions=contributions,
+            token_state=token_state,
+            source_chain=source_chain,
+        )
+
+    def _action_truth_from_field(
+        self,
+        action_layer: ProbabilityLayerState | dict[str, Any],
+        *,
+        gate: dict[str, float] | None = None,
+        conflict_mode: str = "field_native",
+    ) -> dict[str, Any]:
+        if isinstance(action_layer, ProbabilityLayerState):
+            winner_posterior = {
+                str(action): float(value)
+                for action, value in dict(action_layer.winner_posterior or {}).items()
+            }
+            final_energy = {
+                str(action): float(value)
+                for action, value in dict(action_layer.final_energy or {}).items()
+            }
+            hard_masked_targets = [str(action) for action in list(action_layer.hard_masked_targets or [])]
+        else:
+            winner_posterior = {
+                str(action): float(value)
+                for action, value in dict(action_layer.get("winner_posterior", {}) or {}).items()
+            }
+            final_energy = {
+                str(action): float(value)
+                for action, value in dict(action_layer.get("final_energy", {}) or {}).items()
+            }
+            hard_masked_targets = [str(action) for action in list(action_layer.get("hard_masked_targets", []) or [])]
+
+        gate_map = {
+            str(action): float(value)
+            for action, value in dict(gate or {}).items()
+        }
+        for action in winner_posterior:
+            gate_map.setdefault(action, 0.0 if action in hard_masked_targets else 1.0)
+        return {
+            "winner_posterior": winner_posterior,
+            "final_energy": final_energy,
+            "gate": gate_map,
+            "hard_masked_targets": sorted({*hard_masked_targets, *[action for action, value in gate_map.items() if value <= 0.0]}),
+            "conflict_mode": conflict_mode,
+        }
+
+    def _refresh_action_truth(
+        self,
+        action_layer: ProbabilityLayerState | dict[str, Any],
+        current_action_truth: dict[str, Any] | None = None,
+        *,
+        conflict_mode: str = "field_native",
+    ) -> dict[str, Any]:
+        gate = (
+            {
+                str(action): float(value)
+                for action, value in dict(current_action_truth.get("gate", {}) or {}).items()
+            }
+            if isinstance(current_action_truth, dict)
+            else None
+        )
+        effective_mode = (
+            str(current_action_truth.get("conflict_mode") or conflict_mode)
+            if isinstance(current_action_truth, dict)
+            else conflict_mode
+        )
+        return self._action_truth_from_field(
+            action_layer,
+            gate=gate,
+            conflict_mode=effective_mode,
+        )
+
+    def _control_ledger_from_action_bookkeeping(
+        self,
+        action_bookkeeping: ActionBookkeepingState,
+    ) -> dict[str, Any]:
+        return {
+            "ci": {str(action): float(value) for action, value in dict(action_bookkeeping.ci or {}).items()},
+            "gate": {str(action): float(value) for action, value in dict(action_bookkeeping.gate or {}).items()},
+            "risk_suppressor": {
+                str(action): float(value)
+                for action, value in dict(action_bookkeeping.risk_suppressor or {}).items()
+            },
+            "resample_idx": 0,
+            "conflict_mode": "none",
+            "conflict": {},
+        }
+
+    def _merge_control_ledger_into_action_bookkeeping(
+        self,
+        action_bookkeeping: ActionBookkeepingState,
+        control_ledger: dict[str, Any],
+    ) -> None:
+        action_bookkeeping.ci = {
+            str(action): float(value)
+            for action, value in dict(control_ledger.get("ci", {}) or {}).items()
+            if isinstance(action, str) and action
+        }
+        action_bookkeeping.risk_suppressor = {
+            str(action): float(value)
+            for action, value in dict(control_ledger.get("risk_suppressor", {}) or {}).items()
+            if isinstance(action, str) and action
+        }
+
+    def _action_bookkeeping_payload(
+        self,
+        *,
+        action_bookkeeping: ActionBookkeepingState,
+        probability_field_snapshot: ProbabilityFieldSnapshot,
+        control_ledger: dict[str, Any],
+        action_truth: dict[str, Any],
+        stochastic_state: StochasticState,
+    ) -> dict[str, Any]:
+        del probability_field_snapshot
+        del stochastic_state
+        payload = to_dict(action_bookkeeping)
+        payload["gate"] = {
+            str(action): float(value)
+            for action, value in dict(action_truth.get("gate", {}) or {}).items()
+        }
+        payload["risk_suppressor"] = {
+            str(action): float(value)
+            for action, value in dict(control_ledger.get("risk_suppressor", {}) or {}).items()
+        }
+        payload["ci"] = {
+            str(action): float(value)
+            for action, value in dict(control_ledger.get("ci", {}) or {}).items()
+        }
+        payload["resample_idx"] = int(control_ledger.get("resample_idx", 0) or 0)
+        return payload
+
+    def _build_distribution_delta_contribution(
+        self,
+        *,
+        module_name: str,
+        module_type: str,
+        from_distribution: dict[str, float],
+        to_distribution: dict[str, float],
+        trace_reason: str,
+        projection_reason: str,
+        applied_at_stage: str,
+        native_operator: str,
+        dependency_trace: list[str] | None = None,
+        hard_mask: dict[str, bool] | None = None,
+        confidence: float = 1.0,
+        module_temperature: float = 1.0,
+    ) -> ProbabilisticContribution | None:
+        modulated_delta: dict[str, float] = {}
+        inhibitory_drive: dict[str, float] = {}
+        all_actions = sorted({*from_distribution.keys(), *to_distribution.keys(), *(hard_mask or {}).keys()})
+        for action in all_actions:
+            if hard_mask and hard_mask.get(action):
+                inhibitory_drive[str(action)] = 1.0
+                continue
+            base_probability = max(float(from_distribution.get(action, 0.0) or 0.0), 1e-9)
+            target_probability = max(float(to_distribution.get(action, 0.0) or 0.0), 1e-9)
+            shift = round(math.log(target_probability) - math.log(base_probability), 6)
+            if abs(shift) >= 1e-9:
+                modulated_delta[action] = shift
+        effective_hard_mask = {
+            str(action): bool(flag)
+            for action, flag in dict(hard_mask or {}).items()
+            if flag
+        }
+        if not modulated_delta and not inhibitory_drive and not effective_hard_mask:
+            return None
+        return ProbabilisticContribution(
+            module_name=module_name,
+            module_type=module_type,
+            level="action",
+            target_space="action",
+            raw_signal=dict(modulated_delta),
+            modulated_delta=modulated_delta,
+            inhibitory_drive=inhibitory_drive,
+            hard_mask=effective_hard_mask,
+            confidence=confidence,
+            confidence_calibrated=round(_clip(confidence), 4),
+            trace_reason=trace_reason,
+            projection_reason=projection_reason,
+            applied_at_stage=applied_at_stage,
+            native_operator=native_operator,
+            dependency_trace=list(dependency_trace or []),
+            projection=EnergyProjectionSpec(
+                module_type=module_type,
+                target_space="action",
+                module_temperature=module_temperature,
+            ),
+        )
+
+    def _prefetch_action_bias_heads(
+        self,
+        *,
+        round_id: int,
+        event: RoundEvent,
+        state_snapshot: RuntimeState,
+        live_state: RuntimeState,
+        scenario_cfg: dict[str, Any],
+        context: dict[str, Any],
+        skill_traces: list[dict[str, Any]],
+        runtime_context: SkillRuntimeContext,
+        parallel_traces: list[dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        tasks: list[dict[str, Any]] = []
+        desire_agent = self.agent_map["DesireAgent"]
+        dmn_agent = self.agent_map["DMNAgent"]
+        perspective_agent = self.agent_map["PerspectiveModel"]
+
+        tasks.append(
+            {
+                "name": "DesireAgent",
+                "task_type": "callable",
+                "inputs": {},
+                "provider": lambda: desire_agent.build_direct_action_contribution(event, state_snapshot, scenario_cfg, context),
+                "parallel_group": "action_bias_prefetch",
+                "agent_tier": self._agent_tier("DesireAgent"),
+            }
+        )
+        tasks.append(
+            {
+                "name": "DMNAgent",
+                "task_type": "callable",
+                "inputs": {},
+                "provider": lambda: dmn_agent.build_direct_action_contribution(event, state_snapshot, scenario_cfg, context),
+                "parallel_group": "action_bias_prefetch",
+                "agent_tier": self._agent_tier("DMNAgent"),
+            }
+        )
+        if live_state.resource_state.get("resource_mode") != "starvation":
+            tasks.append(
+                {
+                    "name": "PerspectiveModel",
+                    "task_type": "callable",
+                    "inputs": {},
+                    "provider": lambda: perspective_agent.build_direct_action_contribution(event, state_snapshot, scenario_cfg, context),
+                    "parallel_group": "action_bias_prefetch",
+                    "agent_tier": self._agent_tier("PerspectiveModel"),
+                }
+            )
+
+        outputs = self._execute_parallel_skills(
+            round_id=round_id,
+            tasks=tasks,
+            skill_traces=skill_traces,
+            runtime_context=runtime_context,
+            parallel_traces=parallel_traces,
+        )
+        prefetched: dict[str, dict[str, Any]] = {}
+        for owner, contribution in outputs.items():
+            if isinstance(contribution, ProbabilisticContribution):
+                prefetched[owner] = {
+                    "contribution": contribution,
+                }
+        return prefetched
 
     def _unnamed_label(self) -> str:
         return self.identity_runtime.unnamed_label()
@@ -1668,7 +2419,7 @@ class RuntimeController:
         state = self.load_runtime_state()
         rename_event = self._set_identity_name(state, name, source_hint=source_hint, round_id=state.round_count)
         if rename_event:
-            self._save_state(state)
+            self._save_state(state, sync=True)
         return self.identity_payload()
 
     def _initial_identity_threshold_met(self, evidence: dict[str, Any]) -> bool:
@@ -1968,7 +2719,7 @@ class RuntimeController:
         context: dict[str, Any],
         *,
         model_call_traces: list[dict[str, Any]] | None = None,
-    ) -> ProposalBundle:
+    ) -> ProbabilisticContribution:
         request = ModelRequest(
             system_prompt="你是 PFCAgent。仅回 JSON:{action_preferences,confidence,sigma_scale,reason}。",
             user_prompt=self._json_prompt(self._build_pfc_model_payload(event, state, scenario, context)),
@@ -1987,6 +2738,13 @@ class RuntimeController:
             "PFCAgent",
             route_name="pfc",
             request=request,
+            binding_metadata={
+                "relation_risk": float(context.get("relation_risk", 0.0) or 0.0),
+                "disclosure_sensitivity": float(context.get("disclosure_sensitivity", 0.0) or 0.0),
+                "authenticity_risk": float(context.get("authenticity_risk", 0.0) or 0.0),
+                "conflict_score": float(context.get("conflict_score", 0.0) or 0.0),
+                "resample_count": int(context.get("resample_count", 0) or 0),
+            },
             model_call_traces=model_call_traces,
             skill_name="generate_candidates",
         )
@@ -1994,21 +2752,35 @@ class RuntimeController:
             action: self._clip_delta(float(score))
             for action, score in self._coerce_score_map(response.payload.get("action_preferences", {})).items()
         }
-        return ProposalBundle(
-            owner="PFCAgent",
-            confidence=_clip(float(response.payload.get("confidence", 0.84)), 0.0, 1.0),
-            action_preferences=prefs,
-            delta_p=prefs,
-            sigma_scale=_clip(float(response.payload.get("sigma_scale", 0.92)), 0.60, 1.60),
-            trace_tags=["pfc", "model"],
-            reason=str(response.payload.get("reason", f"model route={response.route}")),
-            provider=self._provider_descriptor_for_route("pfc")[0],
-            model=response.model,
-            backend=getattr(response, "backend", ""),
-            latency_ms=int(getattr(response, "latency_ms", 0) or 0),
-            prompt_tokens=int(getattr(response, "usage", {}).get("prompt_tokens", 0) or 0),
-            completion_tokens=int(getattr(response, "usage", {}).get("completion_tokens", 0) or 0),
-            agent_tier=self._agent_tier("PFCAgent"),
+        confidence = _clip(float(response.payload.get("confidence", 0.84)), 0.0, 1.0)
+        sigma_scale = _clip(float(response.payload.get("sigma_scale", 0.92)), 0.60, 1.60)
+        top_action = max(prefs, key=prefs.get) if prefs else ""
+        dependency_trace = [
+            "priority:task_goal",
+            "control:task",
+            f"sigma_scale:{round(sigma_scale, 4)}",
+        ]
+        if top_action:
+            dependency_trace.append(f"top_action:{top_action}")
+        return ProbabilisticContribution(
+            module_name="PFCAgent",
+            module_type="executive",
+            level="action",
+            target_space="action",
+            raw_signal=dict(prefs),
+            modulated_delta=dict(prefs),
+            confidence=confidence,
+            confidence_calibrated=round(_clip(confidence * sigma_scale, 0.0, 1.0), 4),
+            trace_reason=str(response.payload.get("reason", f"model route={response.route}")),
+            projection_reason="executive prior projected from PFC model head",
+            applied_at_stage="executive_prior",
+            native_operator="executive_prior",
+            dependency_trace=dependency_trace,
+            projection=EnergyProjectionSpec(
+                module_type="executive",
+                target_space="action",
+                module_temperature=sigma_scale,
+            ),
         )
 
     def _invoke_pfc_model_generator(
@@ -2019,7 +2791,7 @@ class RuntimeController:
         context: dict[str, Any],
         *,
         model_call_traces: list[dict[str, Any]] | None = None,
-    ) -> ProposalBundle:
+    ) -> ProbabilisticContribution:
         generator = self._generate_pfc_candidates_via_model
         parameters = inspect.signature(generator).parameters
         if "model_call_traces" in parameters:
@@ -2086,6 +2858,10 @@ class RuntimeController:
             "PerspectiveModel",
             route_name="perspective",
             request=request,
+            binding_metadata={
+                "relation_risk": float(relation_state.get("relationship_risk", 0.0) or 0.0),
+                "disclosure_sensitivity": float(context.get("disclosure_sensitivity", 0.0) or 0.0),
+            },
             model_call_traces=model_call_traces,
             skill_name="infer_other_state",
             parallel_group=parallel_group,
@@ -2128,6 +2904,10 @@ class RuntimeController:
             "PerspectiveModel",
             route_name="perspective",
             request=request,
+            binding_metadata={
+                "relation_risk": float(relation_state.get("relationship_risk", 0.0) or 0.0),
+                "disclosure_sensitivity": float(context.get("disclosure_sensitivity", 0.0) or 0.0),
+            },
             model_call_traces=model_call_traces,
             skill_name="simulate_other_reaction",
             parallel_group=parallel_group,
@@ -2178,10 +2958,10 @@ class RuntimeController:
         *,
         model_call_traces: list[dict[str, Any]] | None = None,
         parallel_group: str | None = None,
-    ) -> ProposalBundle:
+    ) -> ProbabilisticContribution:
         route_config = self._route_config_for_binding("SalienceAgent", route_name="salience_small_model")
         if route_config is None:
-            return self.agent_map["SalienceAgent"].score_salience(event, state, scenario, context)
+            return self.agent_map["SalienceAgent"].build_direct_action_contribution(event, state, scenario, context)
         request = ModelRequest(
             system_prompt="评估 salience。仅回 JSON:{action_preferences,confidence,sigma_scale,reason}。",
             user_prompt=self._json_prompt(self._build_pfc_model_payload(event, state, scenario, context)),
@@ -2209,24 +2989,38 @@ class RuntimeController:
                 action: self._clip_delta(float(score))
                 for action, score in self._coerce_score_map(response.payload.get("action_preferences", {})).items()
             }
-            return ProposalBundle(
-                owner="SalienceAgent",
-                confidence=_clip(float(response.payload.get("confidence", 0.64)), 0.0, 1.0),
-                action_preferences=prefs,
-                delta_p=prefs,
-                sigma_scale=_clip(float(response.payload.get("sigma_scale", 0.92)), 0.60, 1.60),
-                trace_tags=["salience", "model"],
-                reason=str(response.payload.get("reason", "small-model salience")),
-                provider="small_model",
-                model=response.model,
-                backend=getattr(response, "backend", route_config.backend),
-                latency_ms=int(getattr(response, "latency_ms", 0) or 0),
-                prompt_tokens=int(getattr(response, "usage", {}).get("prompt_tokens", 0) or 0),
-                completion_tokens=int(getattr(response, "usage", {}).get("completion_tokens", 0) or 0),
-                agent_tier=self._agent_tier("SalienceAgent"),
+            confidence = _clip(float(response.payload.get("confidence", 0.64)), 0.0, 1.0)
+            sigma_scale = _clip(float(response.payload.get("sigma_scale", 0.92)), 0.60, 1.60)
+            top_action = max(prefs, key=prefs.get) if prefs else ""
+            dependency_trace = [
+                "priority:task_goal",
+                "control:task",
+                f"sigma_scale:{round(sigma_scale, 4)}",
+            ]
+            if top_action:
+                dependency_trace.append(f"top_action:{top_action}")
+            return ProbabilisticContribution(
+                module_name="SalienceAgent",
+                module_type="salience",
+                level="action",
+                target_space="action",
+                raw_signal=dict(prefs),
+                modulated_delta=dict(prefs),
+                confidence=confidence,
+                confidence_calibrated=round(_clip(confidence * sigma_scale, 0.0, 1.0), 4),
+                trace_reason=str(response.payload.get("reason", "small-model salience")),
+                projection_reason="salience bias projected from salience model head",
+                applied_at_stage="salience_attention",
+                native_operator="salience_bias",
+                dependency_trace=dependency_trace,
+                projection=EnergyProjectionSpec(
+                    module_type="salience",
+                    target_space="action",
+                    module_temperature=sigma_scale,
+                ),
             )
         except Exception:
-            return self.agent_map["SalienceAgent"].score_salience(event, state, scenario, context)
+            return self.agent_map["SalienceAgent"].build_direct_action_contribution(event, state, scenario, context)
 
     def _estimate_subjective_value_via_model(
         self,
@@ -2382,9 +3176,9 @@ class RuntimeController:
         state.action_ci = ci_state
         return ci_state
 
-    def _build_distribution_state(
+    def _build_action_bookkeeping(
         self,
-        bundles: list[ProposalBundle],
+        rows: list[ActionEvidenceSignal | ProbabilisticContribution],
         state: RuntimeState,
         scenario_cfg: dict[str, Any],
         mode_cfg: dict[str, Any],
@@ -2393,37 +3187,20 @@ class RuntimeController:
         query_state: QueryIntentState | None = None,
         disclosure_state: DisclosureIntentState | None = None,
         resample_idx: int = 0,
-    ) -> ActionDistributionState:
+    ) -> ActionBookkeepingState:
         thresholds = self.config["thresholds"]["thresholds"]
         p_base = self._build_base_distribution(state, scenario_cfg, mode_cfg, relation_state)
-        actions = sorted({*p_base.keys(), *(action for bundle in bundles for action in bundle.delta_p.keys())})
-        context_delta = self._compute_context_delta(state, scenario_cfg)
-        intent_delta = (
-            self.identity_runtime.intent_runtime.intent_action_delta(query_state, disclosure_state)
-            if query_state is not None and disclosure_state is not None
-            else {}
-        )
+        signals = self._coerce_action_signals(rows)
+        actions = sorted({*p_base.keys(), *(action for signal in signals for action in signal.action_delta.keys())})
         u_base: dict[str, float] = {}
-        u_shifted: dict[str, float] = {}
-        p_raw: dict[str, float] = {}
         risk_suppressor: dict[str, float] = {}
         gate = {action: 1.0 for action in actions}
         ci = self._update_ci(state, actions, context, scenario_cfg, thresholds)
 
         for action in actions:
             base_probability = p_base.get(action, 0.02)
-            raw = base_probability + context_delta.get(action, 0.0) + intent_delta.get(action, 0.0)
             base_utility = math.log(max(base_probability, thresholds["p_floor"]))
-            shifted = base_utility + context_delta.get(action, 0.0) + intent_delta.get(action, 0.0)
-            for bundle in bundles:
-                weight = self._agent_weight(bundle.owner, state)
-                weighted_delta = weight * bundle.delta_p.get(action, 0.0) * bundle.confidence * bundle.sigma_scale
-                weighted_utility = weight * bundle.utility_shift.get(action, 0.0) * max(0.35, bundle.confidence)
-                raw += weighted_delta + weighted_utility
-                shifted += weighted_delta + weighted_utility
             u_base[action] = round(base_utility, 6)
-            u_shifted[action] = round(shifted, 6)
-            p_raw[action] = _clip(raw, thresholds["p_floor"], thresholds["p_cap"])
             suppressor = 1.0
             if action == "wander" and not mode_cfg.get("allow_dmn", True):
                 suppressor = 0.4
@@ -2431,15 +3208,9 @@ class RuntimeController:
                 suppressor = 0.65
             risk_suppressor[action] = suppressor
 
-        return ActionDistributionState(
+        return ActionBookkeepingState(
             u_base=u_base,
-            u_shifted=u_shifted,
             p_base=p_base,
-            p_raw=p_raw,
-            p_base_stochastic={},
-            q_noise={},
-            p_mix={},
-            p_final={},
             ci=ci,
             gate=gate,
             risk_suppressor=risk_suppressor,
@@ -2454,90 +3225,69 @@ class RuntimeController:
                 "legacy_disclosure_detail": disclosure_state.legacy_disclosure_detail if disclosure_state is not None else "none",
                 "clipped": list(disclosure_state.posterior.clipped) if disclosure_state is not None else [],
             },
-            resample_idx=resample_idx,
-            conflict_mode="none",
-            conflict={},
         )
-
-    def _enrich_bundle_metadata(
-        self,
-        bundle: ProposalBundle,
-        state: RuntimeState,
-        relation_state: dict[str, float],
-        context: dict[str, Any],
-    ) -> ProposalBundle:
-        owner = bundle.owner
-        if not getattr(bundle, "priority_bucket", None):
-            bundle.priority_bucket = {
-                "BodyStateAgent": "body_safety",
-                "EmotionAgent": "body_safety",
-                "ResourceAgent": "budget_overload",
-                "RelationshipAgent": "relation_boundary",
-                "PerspectiveModel": "relation_boundary",
-                "DesireAgent": "immediate_desire",
-                "DMNAgent": "roaming",
-            }.get(owner, "task_goal")
-        if not getattr(bundle, "control_domain", None):
-            bundle.control_domain = {
-                "BodyStateAgent": "body",
-                "EmotionAgent": "body",
-                "ResourceAgent": "resource",
-                "RelationshipAgent": "relation",
-                "PerspectiveModel": "relation",
-                "DesireAgent": "desire",
-                "DMNAgent": "dmn",
-            }.get(owner, "task")
-        bundle.gated_actions = list(getattr(bundle, "gated_actions", []))
-        bundle.risk_hints = dict(getattr(bundle, "risk_hints", {}))
-
-        if owner == "BodyStateAgent":
-            bundle.risk_hints.setdefault("body_load", round(_clip(1.0 - state.body_energy), 4))
-            bundle.risk_hints.setdefault("body_energy", round(state.body_energy, 4))
-            if state.body_energy < 0.20 and "connect" not in bundle.gated_actions:
-                bundle.gated_actions.append("connect")
-            if state.body_energy < 0.12 and "plan" not in bundle.gated_actions:
-                bundle.gated_actions.append("plan")
-        elif owner == "ResourceAgent":
-            overload = _clip(1.0 - state.budget_remaining)
-            bundle.risk_hints.setdefault("overload", round(overload, 4))
-            if overload > 0.80 and "plan" not in bundle.gated_actions:
-                bundle.gated_actions.append("plan")
-        elif owner in {"RelationshipAgent", "PerspectiveModel"}:
-            bundle.risk_hints.setdefault("relationship_risk", round(relation_state["relationship_risk"], 4))
-            bundle.risk_hints.setdefault("boundary_level", round(relation_state["boundary_level"], 4))
-            if relation_state["boundary_level"] > 0.70 and "connect" not in bundle.gated_actions:
-                bundle.gated_actions.append("connect")
-        elif owner == "PFCAgent":
-            bundle.risk_hints.setdefault("goal_pressure", round(max(bundle.delta_p.values(), default=0.0), 4))
-        elif owner == "ValueAgent":
-            bundle.risk_hints.setdefault("goal_pressure", round(max(bundle.utility_shift.values(), default=0.0), 4))
-        elif owner == "DesireAgent":
-            bundle.risk_hints.setdefault("comfort_pull", round(max(bundle.delta_p.values(), default=0.0), 4))
-        elif owner == "DMNAgent":
-            bundle.risk_hints.setdefault("roam_pull", round(bundle.delta_p.get("wander", 0.0), 4))
-        elif owner == "HabitAgent":
-            bundle.risk_hints.setdefault("habit_strength", round(context.get("habit_strength", 0.0), 4))
-
-        return bundle
 
     def _apply_conflict_scales(
         self,
-        distribution_state: ActionDistributionState,
+        action_truth: dict[str, Any],
+        action_bookkeeping: ActionBookkeepingState | dict[str, Any],
         action_scales: dict[str, float],
         thresholds: dict[str, Any],
-    ) -> None:
+        hard_blocked_actions: list[str] | None = None,
+    ) -> dict[str, Any]:
+        bookkeeping = (
+            {
+                "risk_suppressor": action_bookkeeping.risk_suppressor,
+                "gate": action_bookkeeping.gate,
+            }
+            if isinstance(action_bookkeeping, ActionBookkeepingState)
+            else action_bookkeeping
+        )
+        distribution = {
+            str(action): float(value)
+            for action, value in dict(action_truth.get("winner_posterior", {}) or {}).items()
+        }
+        gate = {
+            str(action): float(value)
+            for action, value in dict(action_truth.get("gate", {}) or {}).items()
+        }
+        hard_masked = {
+            str(action)
+            for action in list(action_truth.get("hard_masked_targets", []) or [])
+        }
         for action, scale in action_scales.items():
-            if action not in distribution_state.p_raw:
+            if action not in distribution:
                 continue
             bounded_scale = _clip(scale, 0.0, 1.50)
-            distribution_state.risk_suppressor[action] = min(distribution_state.risk_suppressor.get(action, 1.0), bounded_scale)
-            distribution_state.p_raw[action] = _clip(
-                distribution_state.p_raw[action] * bounded_scale,
+            bookkeeping.setdefault("risk_suppressor", {})
+            bookkeeping["risk_suppressor"][action] = min(
+                float(bookkeeping["risk_suppressor"].get(action, 1.0) or 1.0),
+                bounded_scale,
+            )
+            distribution[action] = _clip(
+                distribution[action] * bounded_scale,
                 thresholds["p_floor"],
                 thresholds["p_cap"],
             )
             if bounded_scale <= 0.0:
-                distribution_state.gate[action] = 0.0
+                bookkeeping.setdefault("gate", {})
+                bookkeeping["gate"][action] = 0.0
+                gate[action] = 0.0
+                hard_masked.add(action)
+        for action in hard_blocked_actions or []:
+            if action not in distribution:
+                continue
+            bookkeeping.setdefault("risk_suppressor", {})
+            bookkeeping.setdefault("gate", {})
+            bookkeeping["risk_suppressor"][action] = 0.0
+            bookkeeping["gate"][action] = 0.0
+            distribution[action] = thresholds["p_floor"]
+            gate[action] = 0.0
+            hard_masked.add(action)
+        action_truth["winner_posterior"] = distribution
+        action_truth["gate"] = gate
+        action_truth["hard_masked_targets"] = sorted(hard_masked)
+        return action_truth
 
     def _top_action_name(self, distribution: dict[str, float]) -> str | None:
         if not distribution:
@@ -2702,18 +3452,31 @@ class RuntimeController:
         self,
         *,
         state: RuntimeState,
-        bundles: list[ProposalBundle],
-        distribution_state: ActionDistributionState,
+        signals: list[ActionEvidenceSignal],
+        control_ledger: dict[str, Any],
+        action_truth: dict[str, Any] | None,
         thresholds: dict[str, Any],
         skill_traces: list[dict[str, Any]],
         runtime_context: SkillRuntimeContext,
         gate_decisions: list[dict[str, Any]],
         round_seed: int,
-    ) -> float:
+    ) -> tuple[float, dict[str, Any], dict[str, Any]]:
         conflict_agent = self.agent_map["ConflictMonitorAgent"]
         hot_active = state.conflict_hot_rounds > 0
         safe_mode_before = state.safe_mode
-        top_action_before = self._top_action_name(distribution_state.p_raw)
+        current_action_truth = dict(action_truth or {})
+        if not current_action_truth:
+            current_action_truth = self._action_truth_from_field(
+                {
+                    "winner_posterior": {},
+                    "final_energy": {},
+                },
+                gate=dict(control_ledger.get("gate", {}) or {}),
+                conflict_mode=str(control_ledger.get("conflict_mode", "none") or "none"),
+            )
+        top_action_before = self._top_action_name(
+            dict(current_action_truth.get("winner_posterior", {}) or {})
+        )
         assessment: dict[str, Any] = {"score": 0.0, "components": {}, "priority_signals": {}, "critical_conflict": False}
         resolution: dict[str, Any] = {
             "flag": False,
@@ -2729,17 +3492,22 @@ class RuntimeController:
         }
         resample_policy: dict[str, Any] = {"flag": False, "allowed_resamples": 0, "force_compromise": False}
         peak_assessment: dict[str, Any] = dict(assessment)
+        effective_resolution: dict[str, Any] = dict(resolution)
         critical_seen = False
         force_compromise_seen = False
         max_allowed_resamples = 0
         pass_records: list[dict[str, Any]] = []
 
         for pass_index in range(3):
+            probability_field_view = {
+                "action": dict(current_action_truth or {}),
+                "source_chain": ["conflict_runtime"],
+            }
             assessment = self._execute_skill(
                 round_id=state.round_count,
                 skill_name="score_conflict",
-                inputs={"proposals": bundles, "distribution_state": distribution_state},
-                provider=lambda proposals, distribution_state: conflict_agent.run_skill("score_conflict", proposals, distribution_state),
+                inputs={"signals": signals, "probability_field": probability_field_view},
+                provider=lambda signals, probability_field: conflict_agent.run_skill("score_conflict", signals, probability_field),
                 skill_traces=skill_traces,
                 runtime_context=runtime_context,
                 seed_ref=round_seed,
@@ -2760,14 +3528,15 @@ class RuntimeController:
                 skill_name="trigger_control_escalation",
                 inputs={
                     "assessment": assessment,
-                    "distribution_state": distribution_state,
+                    "probability_field": probability_field_view,
+                    "conflict_arbitration": dict(control_ledger.get("conflict", {}) or {}),
                     "attempts": pass_index,
                     "hot_active": hot_active,
                 },
-                provider=lambda assessment, distribution_state, attempts, hot_active: conflict_agent.run_skill(
+                provider=lambda assessment, probability_field, conflict_arbitration, attempts, hot_active: conflict_agent.run_skill(
                     "trigger_control_escalation",
                     assessment,
-                    distribution_state,
+                    probability_field,
                     attempts,
                     hot_active,
                 ),
@@ -2787,7 +3556,15 @@ class RuntimeController:
             force_compromise_seen = force_compromise_seen or bool(resample_policy.get("force_compromise"))
             max_allowed_resamples = max(max_allowed_resamples, int(resample_policy.get("allowed_resamples", 0)))
             if resolution.get("flag"):
-                self._apply_conflict_scales(distribution_state, resolution.get("action_scales", {}), thresholds)
+                effective_resolution = dict(resolution)
+                current_action_truth = self._apply_conflict_scales(
+                    current_action_truth,
+                    control_ledger,
+                    resolution.get("action_scales", {}),
+                    thresholds,
+                    hard_blocked_actions=list(resolution.get("blocked_actions", []) or []),
+                )
+                current_action_truth["conflict_mode"] = str(control_ledger.get("conflict_mode", "monitor") or "monitor")
                 gate_decisions.append(
                     {
                         "stage": "conflict",
@@ -2809,10 +3586,23 @@ class RuntimeController:
             )
             if not resample_policy.get("flag"):
                 break
-            distribution_state.resample_idx += 1
+            control_ledger["resample_idx"] = int(control_ledger.get("resample_idx", 0) or 0) + 1
 
         effective_assessment = dict(peak_assessment)
-        effective_assessment["critical_conflict"] = critical_seen or bool(effective_assessment.get("critical_conflict"))
+        sustained_critical = (
+            (bool(state.repair_state.active) or bool(state.repair_ledger))
+            and (
+                bool(effective_resolution.get("flag"))
+                or float(effective_assessment.get("score", 0.0))
+                >= max(0.62, float(conflict_agent.conflict_high) - 0.08)
+            )
+        )
+        effective_assessment["critical_conflict"] = (
+            critical_seen
+            or bool(effective_assessment.get("critical_conflict"))
+            or sustained_critical
+        )
+        resolution = dict(effective_resolution if effective_resolution.get("flag") else resolution)
         effective_resample_policy = {
             "flag": bool(resample_policy.get("flag")),
             "allowed_resamples": max_allowed_resamples,
@@ -2837,7 +3627,8 @@ class RuntimeController:
             }
             resolution["applied_template"] = template
             self._apply_conflict_scales(
-                distribution_state,
+                current_action_truth,
+                control_ledger,
                 TEMPLATE_ACTION_SCALES.get(template, {}),
                 thresholds,
             )
@@ -2852,13 +3643,22 @@ class RuntimeController:
         if circuit["active"]:
             high_risk_actions = ("connect", "plan", "wander")
             for action in high_risk_actions:
-                if action in distribution_state.p_raw:
-                    distribution_state.gate[action] = 0.0
-                    distribution_state.p_raw[action] = thresholds["p_floor"]
-                    blocked_by_circuit.append(action)
+                control_ledger.setdefault("gate", {})
+                control_ledger["gate"][action] = 0.0
+                current_action_truth.setdefault("gate", {})[action] = 0.0
+                if action in dict(current_action_truth.get("winner_posterior", {}) or {}):
+                    current_action_truth.setdefault("winner_posterior", {})[action] = thresholds["p_floor"]
+                    hard_masked_targets = {
+                        str(name)
+                        for name in list(current_action_truth.get("hard_masked_targets", []) or [])
+                    }
+                    hard_masked_targets.add(action)
+                    current_action_truth["hard_masked_targets"] = sorted(hard_masked_targets)
+                blocked_by_circuit.append(action)
+        current_action_truth["conflict_mode"] = str(control_ledger.get("conflict_mode", "monitor") or "monitor")
 
         deadlock_fuse_triggered = bool(circuit["triggered"])
-        top_action_after = self._top_action_name(distribution_state.p_raw)
+        top_action_after = self._top_action_name(dict(current_action_truth.get("winner_posterior", {}) or {}))
         repair_output = self._execute_skill(
             round_id=state.round_count,
             skill_name="mark_post_error_adjustment",
@@ -2897,7 +3697,7 @@ class RuntimeController:
                     "conflict_score": effective_assessment.get("score", 0.0),
                     "dominant_conflicts": list(effective_assessment.get("dominant_conflicts", [])),
                     "pass_count": len(pass_records),
-                    "resample_count": distribution_state.resample_idx,
+                    "resample_count": int(control_ledger.get("resample_idx", 0) or 0),
                     "safe_mode_owned": state.conflict_safe_mode_owner == "conflict",
                     "stage_before": state.repair_state.stage,
                 },
@@ -2909,7 +3709,7 @@ class RuntimeController:
         resolution["repair_state_snapshot"] = repair_state_snapshot
         resolution["repair_ledger_tail"] = repair_ledger_tail
 
-        distribution_state.conflict = {
+        control_ledger["conflict"] = {
             "score": effective_assessment.get("score", 0.0),
             "total_score": effective_assessment.get("score", 0.0),
             "components": dict(effective_assessment.get("components", {})),
@@ -2930,16 +3730,31 @@ class RuntimeController:
             "repair_ledger_tail": repair_ledger_tail,
             "conflict_safe_mode_owned": state.conflict_safe_mode_owner == "conflict",
         }
-        distribution_state.conflict_mode = (
+        control_ledger["conflict_mode"] = (
             "repair"
             if state.repair_state.active
             else ("recovered" if state.repair_state.stage == "recovered" else "monitor")
         )
-        return float(effective_assessment.get("score", 0.0))
+        return float(effective_assessment.get("score", 0.0)), current_action_truth, control_ledger
 
     def _normalize(self, distribution: dict[str, float]) -> dict[str, float]:
         total = sum(max(value, 0.0) for value in distribution.values()) or 1.0
         return {action: max(value, 0.0) / total for action, value in distribution.items()}
+
+    def _sample_action_from_distribution(self, distribution: dict[str, float], sample_value: float = 0.5) -> ActionCandidate:
+        threshold = _clip(float(sample_value), 0.0, 1.0)
+        cumulative = 0.0
+        sampled_name = max(distribution, key=distribution.get)
+        for action_name, probability in sorted(distribution.items()):
+            cumulative += max(float(probability), 0.0)
+            if threshold <= cumulative:
+                sampled_name = action_name
+                break
+        return ActionCandidate(
+            name=sampled_name,
+            probability=float(distribution.get(sampled_name, 0.0) or 0.0),
+            rationale="controller sample",
+        )
 
     def _softmax(self, utilities: dict[str, float]) -> dict[str, float]:
         if not utilities:
@@ -2979,16 +3794,25 @@ class RuntimeController:
     def _apply_stochastic_layer(
         self,
         deterministic: dict[str, float],
-        distribution_state: ActionDistributionState,
+        action_bookkeeping: ActionBookkeepingState,
+        control_ledger: dict[str, Any] | None,
         state: RuntimeState,
         event: RoundEvent,
         scenario_cfg: dict[str, Any],
         relation_state: dict[str, float],
         conflict_score: float,
         round_seed: int,
+        action_energy: dict[str, float],
     ) -> tuple[dict[str, float], StochasticState]:
-        base_stochastic = self._softmax(distribution_state.u_shifted or {action: math.log(max(value, 1e-9)) for action, value in deterministic.items()})
-        distribution_state.p_base_stochastic = dict(base_stochastic)
+        base_energy = (
+            {
+                str(action): float(value)
+                for action, value in dict(action_energy or {}).items()
+                if float(value) != float("-inf")
+            }
+            or {action: math.log(max(value, 1e-9)) for action, value in deterministic.items()}
+        )
+        base_stochastic = self._softmax(base_energy)
         emo_channel = self._stochastic_channel(base_stochastic)
         novelty = _clip(1.0 - max(base_stochastic.values(), default=0.0), 0.0, 1.0)
         emotion_volatility = _clip(abs(event.valence - (state.mood - 0.5)), 0.0, 1.0)
@@ -3003,7 +3827,17 @@ class RuntimeController:
         circadian_offset = _clip(abs(circadian_hour - 14) / 14.0, 0.0, 1.0)
         resource_scarcity = _clip(float(state.resource_state.get("scarcity_index", 1.0 - state.budget_remaining)), 0.0, 1.0)
         salience_lock = _clip(state.focus_lock_count / 6.0, 0.0, 1.0)
-        habit_strength = _clip(1.0 - (sum(distribution_state.ci.values()) / max(len(distribution_state.ci), 1)) / 0.55, 0.0, 1.0)
+        ci_payload = (
+            dict(control_ledger.get("ci", {}) or {})
+            if isinstance(control_ledger, dict)
+            else dict(action_bookkeeping.ci or {})
+        )
+        ci_state = {
+            str(action): float(value)
+            for action, value in ci_payload.items()
+            if isinstance(action, str) and action
+        }
+        habit_strength = _clip(1.0 - (sum(ci_state.values()) / max(len(ci_state), 1)) / 0.55, 0.0, 1.0)
         v_t_components = {
             "novelty": round(novelty, 4),
             "emotion_volatility": round(emotion_volatility, 4),
@@ -3087,7 +3921,6 @@ class RuntimeController:
             lambda_noise = max(0.0, lambda_noise * 0.5)
             guard_reason = f"{guard_reason}+kl_guard" if guard_reason else "kl_guard"
             q_noise = dict(base_stochastic)
-        distribution_state.q_noise = dict(q_noise)
         mixed = {action: (1 - lambda_noise) * base_stochastic[action] + lambda_noise * q_noise[action] for action in base_stochastic}
 
         affect_load = abs(event.valence)
@@ -3154,54 +3987,172 @@ class RuntimeController:
             lambda_noise_pre_guard=round(lambda_noise_pre_guard, 6),
             log_m_guard_triggered=log_m_guard_triggered,
             guard_reason=guard_reason,
+            base_stochastic_distribution={key: round(value, 6) for key, value in base_stochastic.items()},
+            q_noise_distribution={key: round(value, 6) for key, value in q_noise.items()},
             q_noise_pre_guard_summary={key: round(value, 6) for key, value in q_noise_pre_guard.items()},
             entropy_refs_by_node=entropy_refs_by_node,
             entropy_ref=entropy_ref,
         )
         return self._normalize(mixed), stochastic
 
-    def _build_contributions(self, bundles: list[ProposalBundle], state: RuntimeState, selected_action: str, conflict_score: float, fail_score: float, resample_idx: int) -> tuple[list[AgentContribution], list[dict[str, Any]]]:
+    def _build_contributions(
+        self,
+        signals: list[ActionEvidenceSignal],
+        state: RuntimeState,
+        selected_action: str,
+        conflict_score: float,
+        fail_score: float,
+        resample_idx: int,
+    ) -> tuple[list[AgentContribution], list[dict[str, Any]]]:
         contributions: list[AgentContribution] = []
         proposal_records: list[dict[str, Any]] = []
-        for bundle in bundles:
-            if bundle.veto:
+        for signal in signals:
+            if signal.veto:
                 continue
-            top_action = max(bundle.delta_p, key=bundle.delta_p.get) if bundle.delta_p else None
-            weight_applied = self._agent_weight(bundle.owner, state)
+            top_action = max(signal.action_delta, key=signal.action_delta.get) if signal.action_delta else None
+            weight_applied = self._agent_weight(signal.module_name, state)
             selected = selected_action == top_action
             if top_action is not None:
                 contributions.append(
                     AgentContribution(
-                        agent_name=bundle.owner,
+                        agent_name=signal.module_name,
                         action_name=top_action,
-                        score=round(bundle.delta_p[top_action] * bundle.confidence * weight_applied, 4),
-                        reason=bundle.reason,
+                        score=round(signal.action_delta[top_action] * signal.confidence * weight_applied, 4),
+                        reason=signal.trace_reason,
                     )
                 )
             proposal_records.append(
                 {
-                    "stage": next((stage for stage, owners in PIPELINE_ORDER if bundle.owner in owners), "unknown"),
-                    "agent_name": bundle.owner,
+                    "stage": ACTION_STAGE_BY_OWNER.get(signal.module_name, "unknown"),
+                    "agent_name": signal.module_name,
                     "top_action": top_action,
-                    "action_preferences": bundle.action_preferences,
-                    "confidence": round(bundle.confidence, 4),
-                    "veto": bundle.veto,
-                    "delta_p": bundle.delta_p,
-                    "sigma_scale": round(bundle.sigma_scale, 4),
+                    "action_preferences": signal.action_delta,
+                    "confidence": round(signal.confidence, 4),
+                    "veto": signal.veto,
+                    "delta_p": signal.action_delta,
+                    "sigma_scale": round(signal.sigma_scale, 4),
                     "weight_applied": round(weight_applied, 4),
                     "selected": selected,
                     "conflict_score": round(conflict_score, 4),
                     "plausibility_fail_score": round(fail_score, 4),
                     "resample_idx": resample_idx,
-                    "tags": list(bundle.trace_tags),
-                    "priority_bucket": getattr(bundle, "priority_bucket", "task_goal"),
-                    "control_domain": getattr(bundle, "control_domain", "task"),
-                    "gated_actions": list(getattr(bundle, "gated_actions", [])),
-                    "risk_hints": dict(getattr(bundle, "risk_hints", {})),
+                    "tags": list(signal.trace_tags),
+                    "priority_bucket": signal.priority_bucket,
+                    "control_domain": signal.control_domain,
+                    "gated_actions": list(signal.gated_actions),
+                    "risk_hints": dict(signal.risk_hints),
                 }
             )
         contributions = sorted(contributions, key=lambda item: item.score, reverse=True)
         return contributions, proposal_records
+
+    def _build_renderer_token_contribution(
+        self,
+        render_plan: RenderPlan,
+        context: dict[str, Any],
+    ) -> ProbabilisticContribution:
+        cue = str(context.get("cue") or "")
+        action = str(render_plan.action or "respond")
+        modulated_delta = {
+            f"act:{action}": 0.32,
+            f"tone:direct:{round(float(render_plan.expression.directness_level), 2)}": round(float(render_plan.expression.directness_level) * 0.18, 6),
+            f"tone:warm:{round(float(render_plan.expression.warmth_level), 2)}": round(float(render_plan.expression.warmth_level) * 0.16, 6),
+        }
+        if bool(render_plan.safety_constraints.get("conflict_hot", False)):
+            modulated_delta["safety:guarded"] = 0.22
+        if cue:
+            modulated_delta[f"cue:{cue}"] = round(0.14 + float(context.get("recall_strength", 0.0) or 0.0) * 0.18, 6)
+        dependency_trace = [
+            f"action:{action}",
+            f"gate:{round(float(render_plan.safety_constraints.get('gate', 1.0) or 0.0), 4)}",
+            f"query_kind:{render_plan.identity_context.query_kind or 'none'}",
+        ]
+        if cue:
+            dependency_trace.append(f"cue:{cue}")
+        return ProbabilisticContribution(
+            module_name="Renderer",
+            module_type="token",
+            level="token",
+            target_space="token",
+            raw_signal=dict(modulated_delta),
+            modulated_delta=modulated_delta,
+            confidence=0.68,
+            confidence_calibrated=0.68,
+            trace_reason="render plan unfolds action and expression into token field",
+            projection_reason="render plan projected into token field",
+            applied_at_stage="render_token_unfold",
+            native_operator="token_render_plan",
+            dependency_trace=dependency_trace,
+            projection=EnergyProjectionSpec(module_type="token", target_space="token", module_temperature=0.92),
+        )
+
+    def _build_tool_affordance_contribution(
+        self,
+        state: RuntimeState,
+        context: dict[str, Any],
+    ) -> ProbabilisticContribution | None:
+        if not state.active_run_id or state.run_status not in {"running", "paused"}:
+            return None
+        current_step = self._current_task_node(
+            {
+                "current_step_id": state.current_step_id,
+                "pending_steps": state.pending_steps,
+                "completed_steps": state.completed_steps,
+            }
+        )
+        if current_step is None:
+            return None
+        tool_choice = str(current_step.tool_choice or "repo_scan")
+        matched_files = list(current_step.metadata.get("matched_files", []) or state.last_tool_result.get("matched_files", []) or [])
+        matched_count = len(matched_files)
+        scarcity = float(state.resource_state.get("scarcity_index", 0.0) or 0.0)
+        dirty = bool(state.dirty_worktree_detected)
+        drive_source = str(context.get("run_context", {}).get("drive_source") or "")
+
+        tool_affordance_prior = min(1.0, 0.28 + matched_count * 0.08 + (0.12 if drive_source == "active_task" else 0.0))
+        tool_expected_value = min(1.0, tool_affordance_prior * (0.75 + min(matched_count, 4) * 0.08))
+        tool_cost_penalty = min(1.0, scarcity * 0.45 + (0.18 if dirty else 0.0))
+
+        modulated_delta = {
+            "plan": round(0.18 * tool_expected_value, 6),
+            "recall": round(0.10 * tool_affordance_prior, 6),
+            "clarify": round(0.06 * max(tool_expected_value - tool_cost_penalty * 0.4, 0.0), 6),
+            "wander": round(-0.12 * max(tool_affordance_prior, tool_expected_value), 6),
+        }
+        if tool_cost_penalty > 0.0:
+            modulated_delta["short_reply"] = round(0.08 * tool_cost_penalty, 6)
+            modulated_delta["rest"] = round(0.04 * tool_cost_penalty, 6)
+        if tool_choice != "repo_scan":
+            modulated_delta["respond"] = round(0.05 * tool_affordance_prior, 6)
+
+        dependency_trace = [
+            f"tool_choice:{tool_choice}",
+            f"tool_affordance_prior:{round(tool_affordance_prior, 4)}",
+            f"tool_expected_value:{round(tool_expected_value, 4)}",
+            f"tool_cost_penalty:{round(tool_cost_penalty, 4)}",
+            f"matched_files:{matched_count}",
+            f"dirty_worktree:{str(dirty).lower()}",
+        ]
+        if drive_source:
+            dependency_trace.append(f"drive_source:{drive_source}")
+        temperature = max(0.55, min(1.2, 1.0 - tool_expected_value * 0.18 + tool_cost_penalty * 0.22))
+        confidence = max(0.35, min(0.9, 0.42 + tool_expected_value * 0.35 - tool_cost_penalty * 0.12))
+        return ProbabilisticContribution(
+            module_name="SkillExecutor",
+            module_type="tooling",
+            level="action",
+            target_space="action",
+            raw_signal=dict(modulated_delta),
+            modulated_delta=modulated_delta,
+            confidence=round(confidence, 4),
+            confidence_calibrated=round(confidence, 4),
+            trace_reason="active run tool context biases action field toward executable next steps",
+            projection_reason="tool affordance prior projected from active run context",
+            applied_at_stage="tool_affordance",
+            native_operator="tool_affordance_prior",
+            dependency_trace=dependency_trace,
+            projection=EnergyProjectionSpec(module_type="tooling", target_space="action", module_temperature=temperature),
+        )
 
     def _collapse_internal_sampled_action(self, sampled_action: ActionCandidate) -> ActionCandidate:
         if sampled_action.name != "short_reply":
@@ -3264,6 +4215,9 @@ class RuntimeController:
         if cue:
             recall_payload = self.memory_store.recall(cue, tier_budget=memory_retrieval_budget)
             context["interference"] = recall_payload.get("interference", 0.0)
+            context["episode_id"] = recall_payload.get("episode_id", "")
+            context["separation_id"] = recall_payload.get("separation_id", "")
+            context["memory_prior_vector"] = dict(recall_payload.get("prior_vector", {}) or {})
         relation_state = self._relation_state(event, context)
         context["chronic_signal"] = self._build_chronic_signal(
             event,
@@ -3275,7 +4229,7 @@ class RuntimeController:
         round_seed = self._round_seed(state, event)
         return state, requested_mode, mode_cfg, scenario_cfg, context, relation_state, round_seed
 
-    def _collect_probe_bundles(
+    def _collect_probe_signals(
         self,
         *,
         event: RoundEvent,
@@ -3284,13 +4238,11 @@ class RuntimeController:
         scenario_cfg: dict[str, Any],
         context: dict[str, Any],
         relation_state: dict[str, float],
-    ) -> tuple[list[ProposalBundle], dict[str, Any], dict[str, float]]:
-        bundles: list[ProposalBundle] = []
+    ) -> tuple[list[ActionEvidenceSignal], dict[str, ProbabilisticContribution], dict[str, Any], dict[str, float]]:
+        direct_action_contributions: dict[str, ProbabilisticContribution] = {}
+        direct_action_signal_metadata: dict[str, dict[str, Any]] = {}
 
-        for stage_name, owners in PIPELINE_ORDER:
-            if stage_name in {"state_update", "conflict", "thalamus", "plausibility_guard", "forced_mode_switch", "output_gate", "late_perspective", "renderer", "writeback"} or not owners:
-                continue
-            owner = owners[0]
+        for stage_name, owner in ACTION_HEAD_STAGE_ORDER:
             if not state.agents_enabled.get(owner, True):
                 continue
             agent = self.agent_map[owner]
@@ -3298,20 +4250,42 @@ class RuntimeController:
             if owner == "BodyStateAgent":
                 patch = agent.update_body_state(event, state, scenario_cfg, context)
                 self._apply_state_patch(state, patch.get("state_patch", {}))
-                bundle = agent.compute_body_bias(event, state, scenario_cfg, context)
+                contribution = agent.build_direct_action_contribution(event, state, scenario_cfg, context)
                 veto_info = agent.apply_body_veto(event, state, scenario_cfg, context)
-                bundle.veto = veto_info.get("veto", False)
-                bundle.gated_actions = list(veto_info.get("gated_actions", []))
-                bundles.append(self._enrich_bundle_metadata(bundle, state, relation_state, context))
+                contribution.hard_mask = {
+                    **dict(contribution.hard_mask or {}),
+                    **{action: True for action in list(veto_info.get("gated_actions", []))},
+                }
+                direct_action_contributions[owner] = contribution
+                direct_action_signal_metadata[owner] = self._action_signal_metadata(
+                    owner=owner,
+                    state=state,
+                    relation_state=relation_state,
+                    context=context,
+                    module_type=contribution.module_type,
+                    projected_delta=self._projected_action_delta_from_contribution(contribution),
+                    utility_shift=self._projected_action_delta_from_contribution(contribution),
+                    gated_actions=list(veto_info.get("gated_actions", [])),
+                    veto=bool(veto_info.get("veto", False)),
+                )
                 continue
 
             if owner == "EmotionAgent":
                 patch = agent.update_affect_state(event, state, scenario_cfg, context)
                 self._apply_state_patch(state, patch.get("state_patch", {}))
-                bundle = agent.compute_affect_bias(event, state, scenario_cfg, context)
+                contribution = agent.build_direct_action_contribution(event, state, scenario_cfg, context)
                 veto_info = agent.trigger_affect_veto(event, state, scenario_cfg, context)
-                bundle.veto = veto_info.get("veto", False)
-                bundles.append(self._enrich_bundle_metadata(bundle, state, relation_state, context))
+                direct_action_contributions[owner] = contribution
+                direct_action_signal_metadata[owner] = self._action_signal_metadata(
+                    owner=owner,
+                    state=state,
+                    relation_state=relation_state,
+                    context=context,
+                    module_type=contribution.module_type,
+                    projected_delta=self._projected_action_delta_from_contribution(contribution),
+                    utility_shift=self._projected_action_delta_from_contribution(contribution),
+                    veto=bool(veto_info.get("veto", False)),
+                )
                 continue
 
             if owner == "RelationshipAgent":
@@ -3325,38 +4299,106 @@ class RuntimeController:
                     0.0,
                     1.0,
                 )
-                bundle = agent.propose(event, state, scenario_cfg, context)
-                bundles.append(self._enrich_bundle_metadata(bundle, state, relation_state, context))
+                contribution = agent.build_direct_action_contribution(event, state, scenario_cfg, context)
+                direct_action_contributions[owner] = contribution
+                direct_action_signal_metadata[owner] = self._action_signal_metadata(
+                    owner=owner,
+                    state=state,
+                    relation_state=relation_state,
+                    context=context,
+                    module_type=contribution.module_type,
+                    projected_delta=self._projected_action_delta_from_contribution(contribution),
+                    utility_shift=self._projected_action_delta_from_contribution(contribution),
+                )
                 continue
 
             if owner == "ResourceAgent":
                 scarcity = agent.compute_scarcity_index(event, state, scenario_cfg, context)
                 state.resource_state = {**state.resource_state, "scarcity_index": round(float(scarcity.get("scalar", 0.0)), 4)}
                 state.resource_state = {**state.resource_state, **self._resource_bias_snapshot(state, context)}
-                bundle = agent.map_budget_to_bias(event, state, scenario_cfg, context)
-                state.resource_state = {**state.resource_state, **dict(getattr(bundle, "risk_hints", {}))}
+                contribution = agent.build_direct_action_contribution(event, state, scenario_cfg, context)
+                direct_action_contributions[owner] = contribution
                 mode_hint = agent.suggest_resource_mode(event, state, scenario_cfg, context)
                 if mode_hint.get("resource_mode"):
                     state.resource_state = {**state.resource_state, "resource_mode": mode_hint["resource_mode"]}
                 if mode_hint.get("mode_flag") == "safe":
                     state.safe_mode = True
-                bundles.append(self._enrich_bundle_metadata(bundle, state, relation_state, context))
+                direct_action_signal_metadata[owner] = self._action_signal_metadata(
+                    owner=owner,
+                    state=state,
+                    relation_state=relation_state,
+                    context=context,
+                    module_type=contribution.module_type,
+                    projected_delta=self._projected_action_delta_from_contribution(contribution),
+                    utility_shift=self._projected_action_delta_from_contribution(contribution),
+                )
                 continue
 
             if owner == "PFCAgent":
                 reasoning_state, reasoning_meta = self._state_for_reasoning(state, event, scenario, state.mode)
                 context = {**context, **reasoning_meta}
                 try:
-                    bundle = self._generate_pfc_candidates_via_model(event, reasoning_state, scenario_cfg, context)
+                    contribution = self._generate_pfc_candidates_via_model(event, reasoning_state, scenario_cfg, context)
                 except Exception:
-                    bundle = agent.fallback_generate_candidates(event, reasoning_state, scenario_cfg, context)
-                bundles.append(self._enrich_bundle_metadata(bundle, state, relation_state, context))
+                    contribution = agent.build_direct_action_contribution(event, reasoning_state, scenario_cfg, context)
+                direct_action_contributions[owner] = contribution
+                direct_action_signal_metadata[owner] = self._action_signal_metadata(
+                    owner=owner,
+                    state=state,
+                    relation_state=relation_state,
+                    context=context,
+                    module_type=contribution.module_type,
+                    projected_delta=self._projected_action_delta_from_contribution(contribution),
+                    utility_shift=self._projected_action_delta_from_contribution(contribution),
+                )
                 continue
 
-            bundle = agent.propose(event, state, scenario_cfg, context)
-            bundles.append(self._enrich_bundle_metadata(bundle, state, relation_state, context))
+            if owner == "HippocampusAgent":
+                agent.encode_episode(event, state, scenario_cfg, context)
+                recall_set = agent.retrieve_by_cue(event, state, scenario_cfg, context)
+                agent.apply_cue_weighted_decay(event, state, scenario_cfg, context)
+                agent.compute_memory_interference(event, state, scenario_cfg, context)
+                if not recall_set.get("recall_set"):
+                    agent.fallback_to_gist_when_trace_weak(event, state, scenario_cfg, context)
+                contribution = agent.build_direct_action_contribution(event, state, scenario_cfg, context)
+                direct_action_contributions[owner] = contribution
+                direct_action_signal_metadata[owner] = self._action_signal_metadata(
+                    owner=owner,
+                    state=state,
+                    relation_state=relation_state,
+                    context=context,
+                    module_type=contribution.module_type,
+                    projected_delta=self._projected_action_delta_from_contribution(contribution),
+                    utility_shift=self._projected_action_delta_from_contribution(contribution),
+                )
+                continue
 
-        return bundles, context, relation_state
+            if hasattr(agent, "build_direct_action_contribution"):
+                contribution = agent.build_direct_action_contribution(event, state, scenario_cfg, context)
+                direct_action_contributions[owner] = contribution
+                direct_action_signal_metadata[owner] = self._action_signal_metadata(
+                    owner=owner,
+                    state=state,
+                    relation_state=relation_state,
+                    context=context,
+                    module_type=contribution.module_type,
+                    projected_delta=self._projected_action_delta_from_contribution(contribution),
+                    utility_shift=self._projected_action_delta_from_contribution(contribution),
+                )
+
+        action_signals = [
+            self._action_evidence_from_contribution(
+                contribution,
+                **direct_action_signal_metadata.get(owner, {}),
+            )
+            for owner, contribution in direct_action_contributions.items()
+        ]
+        return (
+            action_signals,
+            direct_action_contributions,
+            context,
+            relation_state,
+        )
 
     def _probe_distribution_for_scenario(
         self,
@@ -3366,7 +4408,7 @@ class RuntimeController:
         mode: str,
     ) -> dict[str, Any]:
         state, requested_mode, mode_cfg, scenario_cfg, context, relation_state, round_seed = self._probe_context(event, scenario, mode)
-        bundles, context, relation_state = self._collect_probe_bundles(
+        probe_signals, probe_direct_contributions, context, relation_state = self._collect_probe_signals(
             event=event,
             state=state,
             scenario=scenario,
@@ -3394,9 +4436,18 @@ class RuntimeController:
             relation_state=relation_state,
             slow_variables=slow_variables,
         )
-
-        distribution_state = self._build_distribution_state(
-            bundles,
+        identity_context = self._build_identity_context(
+            query_state=query_state,
+            disclosure_state=disclosure_state,
+            scenario=scenario,
+            state=state,
+            shaping_events=[],
+            slow_variables=slow_variables,
+            state_sources=[],
+            rename_event=None,
+        )
+        probe_action_bookkeeping = self._build_action_bookkeeping(
+            probe_signals,
             state,
             scenario_cfg,
             mode_cfg,
@@ -3405,55 +4456,103 @@ class RuntimeController:
             query_state=query_state,
             disclosure_state=disclosure_state,
         )
-        thalamus = self.agent_map["ThalamusAttentionAgent"]
-        deterministic = thalamus.normalize_distribution(distribution_state.p_raw)["distribution"]
-        distribution_state.p_mix = deterministic
-        thresholds = self.config["thresholds"]["thresholds"]
-        post_risk = {
-            action: _clip(deterministic[action], thresholds["p_floor"], thresholds["p_cap"]) * distribution_state.risk_suppressor.get(action, 1.0)
-            for action in deterministic
-        }
-        distribution_state.p_final = self._normalize(
-            {
-                action: post_risk[action] * distribution_state.gate.get(action, 1.0)
-                for action in post_risk
-            }
+        online_long_run_projection = self.long_run_analyzer.build_online_projection(
+            round_id=state.round_count,
+            slow_variables=slow_variables,
+            shaping_events=[],
         )
-        distribution_state.p_final, _, _ = self.authenticity_policy.apply_sampling_penalties(
-            distribution_state.p_final,
+        online_long_run_contribution = self.long_run_analyzer.build_long_run_prior_contribution(
+            online_long_run_projection
+        )
+        probe_snapshot, probe_contributions, token_state = self._integrate_probability_field_snapshot(
+            direct_action_contributions=probe_direct_contributions,
+            action_base=dict(probe_action_bookkeeping.u_base),
+            event=event,
+            state=state,
+            scenario_cfg=scenario_cfg,
+            context=context,
+            identity_context=identity_context,
+            long_run_contribution=online_long_run_contribution,
+        )
+        current_distribution = dict(probe_snapshot.action.winner_posterior or {})
+        penalized_distribution, candidate_penalties, sampling_penalty_applied = self.authenticity_policy.apply_sampling_penalties(
+            current_distribution,
             query_kind=query_state.legacy_query_kind,
             disclosure_intent=disclosure_state.posterior.top_intent,
             slow_variables=slow_variables,
             memory_cue=context.get("cue"),
             shaping_events=[],
         )
+        authenticity_contribution = None
+        if candidate_penalties or sampling_penalty_applied > 0.0:
+            authenticity_contribution = self.authenticity_policy.build_action_penalty_contribution(
+                AuthenticityRecord(
+                    self_grounding_score=0.0,
+                    guard_action="probe_sampling_penalty",
+                    disclosure_detail=disclosure_state.posterior.top_intent or "none",
+                    state_sources=[],
+                    candidate_penalties=dict(candidate_penalties),
+                    sampling_penalty_applied=float(sampling_penalty_applied),
+                )
+            )
+        if authenticity_contribution is not None:
+            probe_contributions.append(authenticity_contribution)
+            probe_snapshot = self._reintegrate_probability_snapshot(
+                snapshot=probe_snapshot,
+                contributions=probe_contributions,
+                token_state=token_state,
+                source_chain=["probe_after_authenticity"],
+            )
 
         plausibility_guard = self.agent_map["BehaviorPlausibilityGuard"]
         output_gate = self.agent_map["OutputGate"]
         gated_distribution: dict[str, float] = {}
-        for action_name, probability in distribution_state.p_final.items():
+        hard_mask: dict[str, bool] = {}
+        for action_name, probability in dict(probe_snapshot.action.winner_posterior or {}).items():
             if probability <= 0.0:
                 continue
             plausibility = plausibility_guard.check_behavior_plausibility(action_name, scenario, relation_state)
             gate = 1.0 if plausibility.get("pass", True) else 0.0
             gate *= float(output_gate.apply_output_gate(action_name, state, scenario, relation_state).get("gate", 1.0))
             gated_distribution[action_name] = probability * gate
-        distribution_state.p_final = self._normalize(gated_distribution or distribution_state.p_final)
-        top_action = max(distribution_state.p_final, key=distribution_state.p_final.get)
-        sampled_action = self._collapse_internal_sampled_action(
-            ActionCandidate(
-                name=top_action,
-                probability=distribution_state.p_final[top_action],
-                rationale="probe argmax",
-            )
+            if gate <= 0.0:
+                hard_mask[action_name] = True
+        gate_contribution = self._build_distribution_delta_contribution(
+            module_name="ProbeGuard",
+            module_type="guard",
+            from_distribution=dict(probe_snapshot.action.winner_posterior or {}),
+            to_distribution=self._normalize(gated_distribution or dict(probe_snapshot.action.winner_posterior or {})),
+            hard_mask=hard_mask,
+            trace_reason="probe guard projected from plausibility and output gates",
+            projection_reason="probe guard projected from field-native gating",
+            applied_at_stage="probe_guard",
+            native_operator="probe_gate",
+            dependency_trace=[
+                f"scenario:{scenario}",
+                f"blocked:{','.join(sorted(action for action, flag in hard_mask.items() if flag))}",
+            ],
+            confidence=1.0,
         )
-        task_mass = round(sum(distribution_state.p_final.get(action, 0.0) for action in ("plan", "recall", "clarify")), 6)
-        chat_mass = round(sum(distribution_state.p_final.get(action, 0.0) for action in ("respond", "connect", "rest")), 6)
+        if gate_contribution is not None:
+            probe_contributions.append(gate_contribution)
+            probe_snapshot = self._reintegrate_probability_snapshot(
+                snapshot=probe_snapshot,
+                contributions=probe_contributions,
+                token_state=token_state,
+                source_chain=["probe_after_guard"],
+            )
+        top_action = probe_snapshot.action.winner_target or max(probe_snapshot.action.winner_posterior, key=probe_snapshot.action.winner_posterior.get)
+        sampled_action = self._collapse_internal_sampled_action(
+            ActionCandidate(name=top_action, probability=probe_snapshot.action.winner_posterior[top_action], rationale="probe argmax")
+        )
+        final_distribution = dict(probe_snapshot.action.winner_posterior or {})
+        task_mass = round(sum(final_distribution.get(action, 0.0) for action in ("plan", "recall", "clarify")), 6)
+        chat_mass = round(sum(final_distribution.get(action, 0.0) for action in ("respond", "connect", "rest")), 6)
         return {
             "scenario": scenario,
             "mode": requested_mode,
             "top_action": sampled_action.name,
-            "action_distribution": distribution_state.p_final,
+            "action_distribution": final_distribution,
             "task_mass": task_mass,
             "chat_mass": chat_mass,
         }
@@ -3873,6 +4972,7 @@ class RuntimeController:
         self._normalize_temperament_runtime_state(state)
         prior_state = RuntimeState(**to_dict(state))
         requested_mode = "safe" if state.safe_mode else mode
+        endogenous_turn = event.source == "endogenous" or requested_mode.startswith("endogenous")
         mode_cfg = self.config["modes"]["modes"].get(requested_mode, self.config["modes"]["modes"]["interactive"])
         scenario_cfg = self.config["scenarios"]["scenarios"][scenario]
         thresholds = self.config["thresholds"]["thresholds"]
@@ -3894,6 +4994,8 @@ class RuntimeController:
         state.budget_remaining = _clip(state.budget_remaining - 0.001 + (0.01 if requested_mode in {"idle", "sleep"} else 0.0))
         recorded_at = utc_now_iso()
         recorded_date = iso_date(recorded_at)
+        resource_telemetry = self._compute_resource_telemetry(state)
+        state.resource_state = {**state.resource_state, **resource_telemetry}
 
         cue = self.memory_store.ingest_event(
             event,
@@ -3902,10 +5004,10 @@ class RuntimeController:
             recorded_at=recorded_at,
             update_habit=False,
             cue_quality=event.cue_quality,
+            resource_pressure=float(resource_telemetry.get("scarcity_pressure", 0.0) or 0.0),
         )
+        memory_write_gate = self.memory_store.last_ingest_diagnostics()
         memory_retrieval_budget = self._memory_retrieval_budget(event, scenario_cfg)
-        resource_telemetry = self._compute_resource_telemetry(state)
-        state.resource_state = {**state.resource_state, **resource_telemetry}
         context = {
             "cue": cue,
             "memory_retrieval_budget": memory_retrieval_budget,
@@ -3922,10 +5024,14 @@ class RuntimeController:
             "low_balance_ratio": resource_telemetry["low_balance_ratio"],
             "queue_pressure": resource_telemetry["queue_pressure"],
             "latency_pressure": resource_telemetry["latency_pressure"],
+            "memory_write_gate": memory_write_gate,
         }
         if cue:
             recall_payload = self.memory_store.recall(cue, tier_budget=memory_retrieval_budget)
             context["interference"] = recall_payload.get("interference", 0.0)
+            context["episode_id"] = recall_payload.get("episode_id", "")
+            context["separation_id"] = recall_payload.get("separation_id", "")
+            context["memory_prior_vector"] = dict(recall_payload.get("prior_vector", {}) or {})
         relation_state = self._relation_state(event, context)
         context["chronic_signal"] = self._build_chronic_signal(
             event,
@@ -3938,12 +5044,19 @@ class RuntimeController:
         rename_event = self._maybe_update_identity_from_evidence(state)
         identity_evidence = self._augment_identity_evidence(state, self.memory_store.identity_evidence())
 
-        pipeline_stages: list[str] = []
         gate_decisions: list[dict[str, Any]] = []
+        gate_decisions.append(
+            {
+                "stage": "memory_write_gate",
+                "owner": "MemoryWriteGate",
+                "allowed": not bool(memory_write_gate.get("suppressed", False)),
+                "reason": memory_write_gate.get("reason", "unknown"),
+                "cue": memory_write_gate.get("cue"),
+            }
+        )
         skill_traces: list[dict[str, Any]] = []
         model_call_traces: list[dict[str, Any]] = []
         parallel_traces: list[dict[str, Any]] = []
-        bundles: list[ProposalBundle] = []
         previous_focus = state.focus
         round_seed = self._round_seed(state, event)
         reasoning_state, reasoning_meta = self._state_for_reasoning(state, event, scenario, requested_mode)
@@ -4010,6 +5123,19 @@ class RuntimeController:
             relation_state=relation_state,
             slow_variables=slow_variables,
         )
+        context["relation_risk"] = float(relation_state.get("relationship_risk", 0.0) or 0.0)
+        context["disclosure_sensitivity"] = float(
+            disclosure_state.posterior.posterior.get("withhold", 0.0)
+            if hasattr(disclosure_state.posterior, "posterior")
+            else 0.0
+        )
+        context["authenticity_risk"] = round(
+            max(
+                float(state.affect_residue or 0.0),
+                float(relation_state.get("relationship_risk", 0.0) or 0.0) * 0.5,
+            ),
+            6,
+        )
         grounding_capsule = intent_prefetch.get("grounding_capsule")
         if not isinstance(grounding_capsule, dict):
             grounding_capsule = self._build_grounding_capsule(
@@ -4026,18 +5152,26 @@ class RuntimeController:
             round_id=state.round_count,
             tasks=[
                 {
-                    "name": "salience_bundle",
+                    "name": "salience_contribution",
                     "skill_name": "score_salience",
                     "inputs": runtime_inputs,
-                    "provider": lambda event, state, scenario, context: self._score_salience_via_model(
+                    "provider": lambda event, state, scenario, context: self.agent_map["SalienceAgent"].build_direct_action_contribution(
                         event,
                         state,
                         scenario,
                         context,
-                        model_call_traces=model_call_traces,
-                        parallel_group="salience_value_prefetch",
                     ),
-                    "fallback_value": ProposalBundle(owner="SalienceAgent", confidence=0.1, delta_p={"respond": 0.02}, action_preferences={"respond": 0.02}),
+                    "fallback_value": ProbabilisticContribution(
+                        module_name="SalienceAgent",
+                        module_type="salience",
+                        level="action",
+                        target_space="action",
+                        raw_signal={"respond": 0.02},
+                        modulated_delta={"respond": 0.02},
+                        confidence=0.1,
+                        trace_reason="typed fallback",
+                        projection_reason="typed fallback",
+                    ),
                     "parallel_group": "salience_value_prefetch",
                     "agent_tier": self._agent_tier("SalienceAgent"),
                 },
@@ -4061,31 +5195,90 @@ class RuntimeController:
             runtime_context=runtime_context,
             parallel_traces=parallel_traces,
         )
+        prefetched_action_heads: dict[str, dict[str, Any]] = {}
+        direct_action_contributions: dict[str, ProbabilisticContribution] = {}
+        direct_action_signal_metadata: dict[str, dict[str, Any]] = {}
 
-        for stage_name, owners in PIPELINE_ORDER:
-            pipeline_stages.append(stage_name)
-            if stage_name in {"state_update", "conflict", "thalamus", "plausibility_guard", "forced_mode_switch", "output_gate", "late_perspective", "renderer", "writeback"} or not owners:
-                continue
-            owner = owners[0]
+        for stage_name, owner in ACTION_HEAD_STAGE_ORDER:
             agent = self.agent_map[owner]
             if not state.agents_enabled.get(owner, True):
                 continue
             if owner == "BodyStateAgent":
                 patch = self._execute_skill(round_id=state.round_count, skill_name="update_body_state", inputs=runtime_inputs, provider=self._agent_provider(agent, "update_body_state"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
                 self._apply_state_patch(state, patch.get("state_patch", {}))
-                bundle = self._execute_skill(round_id=state.round_count, skill_name="compute_body_bias", inputs=runtime_inputs, provider=self._agent_provider(agent, "compute_body_bias"), skill_traces=skill_traces, runtime_context=runtime_context, fallback_value=ProposalBundle(owner=owner, confidence=0.1, delta_p={"respond": 0.01}, action_preferences={"respond": 0.01}), seed_ref=round_seed)
+                contribution = self._execute_skill(
+                    round_id=state.round_count,
+                    skill_name="compute_body_bias",
+                    inputs=runtime_inputs,
+                    provider=lambda event, state, scenario, context: agent.build_direct_action_contribution(event, state, scenario, context),
+                    skill_traces=skill_traces,
+                    runtime_context=runtime_context,
+                    fallback_value=ProbabilisticContribution(
+                        module_name=owner,
+                        module_type="body",
+                        level="action",
+                        target_space="action",
+                        raw_signal={"respond": 0.01},
+                        modulated_delta={"respond": 0.01},
+                        confidence=0.1,
+                        trace_reason="typed fallback",
+                        projection_reason="typed fallback",
+                    ),
+                    seed_ref=round_seed,
+                )
                 veto_info = self._execute_skill(round_id=state.round_count, skill_name="apply_body_veto", inputs=runtime_inputs, provider=self._agent_provider(agent, "apply_body_veto"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
-                bundle.veto = veto_info.get("veto", False)
-                bundle.gated_actions = list(veto_info.get("gated_actions", []))
-                bundles.append(bundle)
+                contribution.hard_mask = {
+                    **dict(contribution.hard_mask or {}),
+                    **{action: True for action in list(veto_info.get("gated_actions", []))},
+                }
+                direct_action_contributions[owner] = contribution
+                direct_action_signal_metadata[owner] = self._action_signal_metadata(
+                    owner=owner,
+                    state=state,
+                    relation_state=relation_state,
+                    context=context,
+                    module_type=contribution.module_type,
+                    projected_delta=self._projected_action_delta_from_contribution(contribution),
+                    utility_shift=self._projected_action_delta_from_contribution(contribution),
+                    gated_actions=list(veto_info.get("gated_actions", [])),
+                    veto=bool(veto_info.get("veto", False)),
+                )
                 continue
             if owner == "EmotionAgent":
                 patch = self._execute_skill(round_id=state.round_count, skill_name="update_affect_state", inputs=runtime_inputs, provider=self._agent_provider(agent, "update_affect_state"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
                 self._apply_state_patch(state, patch.get("state_patch", {}))
-                bundle = self._execute_skill(round_id=state.round_count, skill_name="compute_affect_bias", inputs=runtime_inputs, provider=self._agent_provider(agent, "compute_affect_bias"), skill_traces=skill_traces, runtime_context=runtime_context, fallback_value=ProposalBundle(owner=owner, confidence=0.1, delta_p={"respond": 0.01}, action_preferences={"respond": 0.01}), seed_ref=round_seed)
+                contribution = self._execute_skill(
+                    round_id=state.round_count,
+                    skill_name="compute_affect_bias",
+                    inputs=runtime_inputs,
+                    provider=lambda event, state, scenario, context: agent.build_direct_action_contribution(event, state, scenario, context),
+                    skill_traces=skill_traces,
+                    runtime_context=runtime_context,
+                    fallback_value=ProbabilisticContribution(
+                        module_name=owner,
+                        module_type="emotion",
+                        level="action",
+                        target_space="action",
+                        raw_signal={"respond": 0.01},
+                        modulated_delta={"respond": 0.01},
+                        confidence=0.1,
+                        trace_reason="typed fallback",
+                        projection_reason="typed fallback",
+                    ),
+                    seed_ref=round_seed,
+                )
                 veto_info = self._execute_skill(round_id=state.round_count, skill_name="trigger_affect_veto", inputs=runtime_inputs, provider=self._agent_provider(agent, "trigger_affect_veto"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
-                bundle.veto = veto_info.get("veto", False)
-                bundles.append(bundle)
+                direct_action_contributions[owner] = contribution
+                direct_action_signal_metadata[owner] = self._action_signal_metadata(
+                    owner=owner,
+                    state=state,
+                    relation_state=relation_state,
+                    context=context,
+                    module_type=contribution.module_type,
+                    projected_delta=self._projected_action_delta_from_contribution(contribution),
+                    utility_shift=self._projected_action_delta_from_contribution(contribution),
+                    veto=bool(veto_info.get("veto", False)),
+                )
                 continue
             if owner == "RelationshipAgent":
                 closeness = self._execute_skill(round_id=state.round_count, skill_name="score_closeness", inputs=runtime_inputs, provider=self._agent_provider(agent, "score_closeness"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
@@ -4093,23 +5286,72 @@ class RuntimeController:
                 gate_info = self._execute_skill(round_id=state.round_count, skill_name="compute_boundary_gate", inputs=runtime_inputs, provider=self._agent_provider(agent, "compute_boundary_gate"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
                 relation_state["boundary_level"] = gate_info.get("boundary_level", relation_state["boundary_level"])
                 self._execute_skill(round_id=state.round_count, skill_name="update_relation_trace", inputs=runtime_inputs, provider=self._agent_provider(agent, "update_relation_trace"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
-                bundles.append(agent.propose(event, state, scenario_cfg, context))
+                contribution = agent.build_direct_action_contribution(event, state, scenario_cfg, context)
+                direct_action_contributions[owner] = contribution
+                direct_action_signal_metadata[owner] = self._action_signal_metadata(
+                    owner=owner,
+                    state=state,
+                    relation_state=relation_state,
+                    context=context,
+                    module_type=contribution.module_type,
+                    projected_delta=self._projected_action_delta_from_contribution(contribution),
+                    utility_shift=self._projected_action_delta_from_contribution(contribution),
+                )
                 continue
             if owner == "ResourceAgent":
                 scarcity = self._execute_skill(round_id=state.round_count, skill_name="compute_scarcity_index", inputs=runtime_inputs, provider=self._agent_provider(agent, "compute_scarcity_index"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
                 state.resource_state = {**state.resource_state, "scarcity_index": round(float(scarcity.get("scalar", 0.0)), 4)}
                 state.resource_state = {**state.resource_state, **self._resource_bias_snapshot(state, context)}
-                bundle = self._execute_skill(round_id=state.round_count, skill_name="map_budget_to_bias", inputs=runtime_inputs, provider=self._agent_provider(agent, "map_budget_to_bias"), skill_traces=skill_traces, runtime_context=runtime_context, fallback_value=ProposalBundle(owner=owner, confidence=0.1, delta_p={"respond": 0.01}, action_preferences={"respond": 0.01}), seed_ref=round_seed)
-                state.resource_state = {**state.resource_state, **dict(getattr(bundle, "risk_hints", {}))}
+                contribution = self._execute_skill(
+                    round_id=state.round_count,
+                    skill_name="map_budget_to_bias",
+                    inputs=runtime_inputs,
+                    provider=lambda event, state, scenario, context: agent.build_direct_action_contribution(event, state, scenario, context),
+                    skill_traces=skill_traces,
+                    runtime_context=runtime_context,
+                    fallback_value=ProbabilisticContribution(
+                        module_name=owner,
+                        module_type="resource",
+                        level="action",
+                        target_space="action",
+                        raw_signal={"respond": 0.01},
+                        modulated_delta={"respond": 0.01},
+                        confidence=0.1,
+                        trace_reason="typed fallback",
+                        projection_reason="typed fallback",
+                    ),
+                    seed_ref=round_seed,
+                )
+                direct_action_contributions[owner] = contribution
                 mode_hint = self._execute_skill(round_id=state.round_count, skill_name="suggest_resource_mode", inputs=runtime_inputs, provider=self._agent_provider(agent, "suggest_resource_mode"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
                 if mode_hint.get("resource_mode"):
                     state.resource_state = {**state.resource_state, "resource_mode": mode_hint["resource_mode"]}
                 if mode_hint.get("mode_flag") == "safe":
                     state.safe_mode = True
-                bundles.append(bundle)
+                direct_action_signal_metadata[owner] = self._action_signal_metadata(
+                    owner=owner,
+                    state=state,
+                    relation_state=relation_state,
+                    context=context,
+                    module_type=contribution.module_type,
+                    projected_delta=self._projected_action_delta_from_contribution(contribution),
+                    utility_shift=self._projected_action_delta_from_contribution(contribution),
+                )
                 continue
             if owner == "PFCAgent":
-                bundle = self._execute_skill(
+                if not prefetched_action_heads:
+                    prefetched_action_heads = self._prefetch_action_bias_heads(
+                        round_id=state.round_count,
+                        event=event,
+                        state_snapshot=reasoning_state,
+                        live_state=state,
+                        scenario_cfg=scenario_cfg,
+                        context=context,
+                        skill_traces=skill_traces,
+                        runtime_context=runtime_context,
+                        parallel_traces=parallel_traces,
+                    )
+                contribution = self._execute_skill(
                     round_id=state.round_count,
                     skill_name="generate_candidates",
                     inputs=runtime_inputs,
@@ -4122,7 +5364,7 @@ class RuntimeController:
                     ),
                     skill_traces=skill_traces,
                     runtime_context=runtime_context,
-                    fallback_provider=lambda **skill_inputs: agent.fallback_generate_candidates(
+                    fallback_provider=lambda **skill_inputs: agent.build_direct_action_contribution(
                         skill_inputs["event"],
                         skill_inputs["state"],
                         skill_inputs["scenario"],
@@ -4132,7 +5374,16 @@ class RuntimeController:
                 )
                 self._execute_skill(round_id=state.round_count, skill_name="estimate_plan_depth", inputs=runtime_inputs, provider=self._agent_provider(agent, "estimate_plan_depth"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
                 self._execute_skill(round_id=state.round_count, skill_name="bind_working_memory", inputs=runtime_inputs, provider=self._agent_provider(agent, "bind_working_memory"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
-                bundles.append(bundle)
+                direct_action_contributions[owner] = contribution
+                direct_action_signal_metadata[owner] = self._action_signal_metadata(
+                    owner=owner,
+                    state=state,
+                    relation_state=relation_state,
+                    context=context,
+                    module_type=contribution.module_type,
+                    projected_delta=self._projected_action_delta_from_contribution(contribution),
+                    utility_shift=self._projected_action_delta_from_contribution(contribution),
+                )
                 continue
             if owner == "HabitAgent":
                 self._execute_skill(round_id=state.round_count, skill_name="compute_feedback_decay", inputs=runtime_inputs, provider=self._agent_provider(agent, "compute_feedback_decay"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
@@ -4146,21 +5397,48 @@ class RuntimeController:
                 )
                 if updated_habit is not None:
                     context["habit_strength"] = float(updated_habit.get("strength", context.get("habit_strength", 0.0)))
-                bundle = self._execute_skill(round_id=state.round_count, skill_name="suggest_default_action", inputs=runtime_inputs, provider=self._agent_provider(agent, "suggest_default_action"), skill_traces=skill_traces, runtime_context=runtime_context, fallback_value=ProposalBundle(owner=owner, confidence=0.1, delta_p={}, action_preferences={}), seed_ref=round_seed)
+                habit_contribution = agent.build_direct_action_contribution(event, state, scenario_cfg, context)
+                direct_action_contributions[owner] = habit_contribution
                 self._execute_skill(round_id=state.round_count, skill_name="estimate_override_cost", inputs=runtime_inputs, provider=self._agent_provider(agent, "estimate_override_cost"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
-                bundles.append(bundle)
+                direct_action_signal_metadata[owner] = self._action_signal_metadata(
+                    owner=owner,
+                    state=state,
+                    relation_state=relation_state,
+                    context=context,
+                    module_type=habit_contribution.module_type,
+                    projected_delta=self._projected_action_delta_from_contribution(habit_contribution),
+                    utility_shift=self._projected_action_delta_from_contribution(habit_contribution),
+                )
                 continue
             if owner == "DesireAgent":
                 self._execute_skill(round_id=state.round_count, skill_name="score_immediate_reward", inputs=runtime_inputs, provider=self._agent_provider(agent, "score_immediate_reward"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
-                bundle = self._execute_skill(round_id=state.round_count, skill_name="compute_effort_avoidance", inputs=runtime_inputs, provider=self._agent_provider(agent, "compute_effort_avoidance"), skill_traces=skill_traces, runtime_context=runtime_context, fallback_value=ProposalBundle(owner=owner, confidence=0.1, delta_p={}, action_preferences={}), seed_ref=round_seed)
+                desire_contribution = agent.build_direct_action_contribution(event, state, scenario_cfg, context)
+                direct_action_contributions[owner] = desire_contribution
                 self._execute_skill(round_id=state.round_count, skill_name="suggest_low_cost_action", inputs=runtime_inputs, provider=self._agent_provider(agent, "suggest_low_cost_action"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
-                bundles.append(bundle)
+                direct_action_signal_metadata[owner] = self._action_signal_metadata(
+                    owner=owner,
+                    state=state,
+                    relation_state=relation_state,
+                    context=context,
+                    module_type=desire_contribution.module_type,
+                    projected_delta=self._projected_action_delta_from_contribution(desire_contribution),
+                    utility_shift=self._projected_action_delta_from_contribution(desire_contribution),
+                )
                 continue
             if owner == "DMNAgent":
-                bundle = self._execute_skill(round_id=state.round_count, skill_name="sample_dmn_intrusion", inputs=runtime_inputs, provider=self._agent_provider(agent, "sample_dmn_intrusion"), skill_traces=skill_traces, runtime_context=runtime_context, fallback_value=ProposalBundle(owner=owner, confidence=0.1, delta_p={}, action_preferences={}), seed_ref=round_seed)
+                dmn_contribution = agent.build_direct_action_contribution(event, state, scenario_cfg, context)
+                direct_action_contributions[owner] = dmn_contribution
                 self._execute_skill(round_id=state.round_count, skill_name="score_rumination_pull", inputs=runtime_inputs, provider=self._agent_provider(agent, "score_rumination_pull"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
                 self._execute_skill(round_id=state.round_count, skill_name="select_spontaneous_topic", inputs=runtime_inputs, provider=self._agent_provider(agent, "select_spontaneous_topic"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
-                bundles.append(bundle)
+                direct_action_signal_metadata[owner] = self._action_signal_metadata(
+                    owner=owner,
+                    state=state,
+                    relation_state=relation_state,
+                    context=context,
+                    module_type=dmn_contribution.module_type,
+                    projected_delta=self._projected_action_delta_from_contribution(dmn_contribution),
+                    utility_shift=self._projected_action_delta_from_contribution(dmn_contribution),
+                )
                 continue
             if owner == "HippocampusAgent":
                 self._execute_skill(round_id=state.round_count, skill_name="encode_episode", inputs=runtime_inputs, provider=self._agent_provider(agent, "encode_episode"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
@@ -4169,13 +5447,32 @@ class RuntimeController:
                 self._execute_skill(round_id=state.round_count, skill_name="compute_memory_interference", inputs=runtime_inputs, provider=self._agent_provider(agent, "compute_memory_interference"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
                 if not recall_set.get("recall_set"):
                     self._execute_skill(round_id=state.round_count, skill_name="fallback_to_gist_when_trace_weak", inputs=runtime_inputs, provider=self._agent_provider(agent, "fallback_to_gist_when_trace_weak"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
-                bundles.append(agent.propose(event, state, scenario_cfg, context))
+                contribution = agent.build_direct_action_contribution(event, state, scenario_cfg, context)
+                direct_action_contributions[owner] = contribution
+                direct_action_signal_metadata[owner] = self._action_signal_metadata(
+                    owner=owner,
+                    state=state,
+                    relation_state=relation_state,
+                    context=context,
+                    module_type=contribution.module_type,
+                    projected_delta=self._projected_action_delta_from_contribution(contribution),
+                    utility_shift=self._projected_action_delta_from_contribution(contribution),
+                )
                 continue
             if owner == "PerspectiveModel":
                 if state.resource_state.get("resource_mode") == "starvation":
                     continue
-                bundle = self._execute_skill(round_id=state.round_count, skill_name="adjust_social_interpretation", inputs=runtime_inputs, provider=self._agent_provider(agent, "adjust_social_interpretation"), skill_traces=skill_traces, runtime_context=runtime_context, fallback_value=ProposalBundle(owner=owner, confidence=0.1, delta_p={}, action_preferences={}), seed_ref=round_seed)
-                bundles.append(bundle)
+                perspective_contribution = agent.build_direct_action_contribution(event, state, scenario_cfg, context)
+                direct_action_contributions[owner] = perspective_contribution
+                direct_action_signal_metadata[owner] = self._action_signal_metadata(
+                    owner=owner,
+                    state=state,
+                    relation_state=relation_state,
+                    context=context,
+                    module_type=perspective_contribution.module_type,
+                    projected_delta=self._projected_action_delta_from_contribution(perspective_contribution),
+                    utility_shift=self._projected_action_delta_from_contribution(perspective_contribution),
+                )
                 continue
             if owner == "ValueAgent":
                 value_scores = prefetched_outputs.get("value_scores") or self._execute_skill(
@@ -4196,60 +5493,165 @@ class RuntimeController:
                 self._execute_skill(round_id=state.round_count, skill_name="discount_delayed_reward", inputs=runtime_inputs, provider=self._agent_provider(agent, "discount_delayed_reward"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
                 self._execute_skill(round_id=state.round_count, skill_name="price_social_cost", inputs=runtime_inputs, provider=self._agent_provider(agent, "price_social_cost"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
                 self._execute_skill(round_id=state.round_count, skill_name="score_uncertainty_penalty", inputs=runtime_inputs, provider=self._agent_provider(agent, "score_uncertainty_penalty"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
-                bundles.append(
-                    ProposalBundle(
-                        owner=owner,
-                        confidence=0.59,
-                        action_preferences=value_scores.get("scores", {}),
-                        delta_p=value_scores.get("scores", {}),
-                        sigma_scale=0.98,
-                        utility_shift=value_scores.get("scores", {}),
-                        trace_tags=["value"],
-                        reason="subjective value re-rank",
-                    )
+                value_contribution = self._build_value_action_contribution(value_scores)
+                direct_action_contributions[owner] = value_contribution
+                direct_action_signal_metadata[owner] = self._action_signal_metadata(
+                    owner=owner,
+                    state=state,
+                    relation_state=relation_state,
+                    context=context,
+                    module_type=value_contribution.module_type,
+                    projected_delta=self._projected_action_delta_from_contribution(value_contribution),
+                    utility_shift=self._projected_action_delta_from_contribution(value_contribution),
                 )
                 continue
             if owner == "SalienceAgent":
-                bundle = prefetched_outputs.get("salience_bundle") or self._execute_skill(
+                contribution = prefetched_outputs.get("salience_contribution") or self._execute_skill(
                     round_id=state.round_count,
                     skill_name="score_salience",
                     inputs=runtime_inputs,
-                    provider=lambda event, state, scenario, context: self._score_salience_via_model(
-                        event,
-                        state,
-                        scenario,
-                        context,
-                        model_call_traces=model_call_traces,
-                    ),
+                    provider=lambda event, state, scenario, context: agent.build_direct_action_contribution(event, state, scenario, context),
                     skill_traces=skill_traces,
                     runtime_context=runtime_context,
-                    fallback_value=ProposalBundle(owner=owner, confidence=0.1, delta_p={"respond": 0.02}, action_preferences={"respond": 0.02}),
+                    fallback_value=ProbabilisticContribution(
+                        module_name=owner,
+                        module_type="salience",
+                        level="action",
+                        target_space="action",
+                        raw_signal={"respond": 0.02},
+                        modulated_delta={"respond": 0.02},
+                        confidence=0.1,
+                        trace_reason="typed fallback",
+                        projection_reason="typed fallback",
+                    ),
                     seed_ref=round_seed,
                 )
+                direct_action_contributions[owner] = contribution
                 self._execute_skill(round_id=state.round_count, skill_name="switch_mode", inputs=runtime_inputs, provider=self._agent_provider(agent, "switch_mode"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
                 self._execute_skill(round_id=state.round_count, skill_name="interrupt_current_focus", inputs=runtime_inputs, provider=self._agent_provider(agent, "interrupt_current_focus"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
                 self._execute_skill(round_id=state.round_count, skill_name="promote_event_to_workspace", inputs=runtime_inputs, provider=self._agent_provider(agent, "promote_event_to_workspace"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
-                bundles.append(bundle)
+                direct_action_signal_metadata[owner] = self._action_signal_metadata(
+                    owner=owner,
+                    state=state,
+                    relation_state=relation_state,
+                    context=context,
+                    module_type=contribution.module_type,
+                    projected_delta=self._projected_action_delta_from_contribution(contribution),
+                    utility_shift=self._projected_action_delta_from_contribution(contribution),
+                )
                 continue
             if owner == "UnconsciousAgent":
                 baseline = self._execute_skill(round_id=state.round_count, skill_name="load_temperament", inputs=runtime_inputs, provider=self._agent_provider(agent, "load_temperament"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
                 self._normalize_temperament_runtime_state(state, baseline.get("baseline", {}))
-                bundle = self._execute_skill(round_id=state.round_count, skill_name="compute_trait_bias", inputs=runtime_inputs, provider=self._agent_provider(agent, "compute_trait_bias"), skill_traces=skill_traces, runtime_context=runtime_context, fallback_value=ProposalBundle(owner=owner, confidence=0.1, delta_p={"respond": 0.01}, action_preferences={"respond": 0.01}), seed_ref=round_seed)
+                contribution = self._execute_skill(
+                    round_id=state.round_count,
+                    skill_name="compute_trait_bias",
+                    inputs=runtime_inputs,
+                    provider=lambda event, state, scenario, context: agent.build_direct_action_contribution(event, state, scenario, context),
+                    skill_traces=skill_traces,
+                    runtime_context=runtime_context,
+                    fallback_value=ProbabilisticContribution(
+                        module_name=owner,
+                        module_type="trait",
+                        level="action",
+                        target_space="action",
+                        raw_signal={"respond": 0.01},
+                        modulated_delta={"respond": 0.01},
+                        confidence=0.1,
+                        trace_reason="typed fallback",
+                        projection_reason="typed fallback",
+                    ),
+                    seed_ref=round_seed,
+                )
                 patch = self._execute_skill(round_id=state.round_count, skill_name="apply_chronic_shift", inputs=runtime_inputs, provider=self._agent_provider(agent, "apply_chronic_shift"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
                 self._apply_state_patch(state, patch.get("state_patch", {}))
                 self._normalize_temperament_runtime_state(state)
-                bundles.append(bundle)
+                direct_action_contributions[owner] = contribution
+                direct_action_signal_metadata[owner] = self._action_signal_metadata(
+                    owner=owner,
+                    state=state,
+                    relation_state=relation_state,
+                    context=context,
+                    module_type=contribution.module_type,
+                    projected_delta=self._projected_action_delta_from_contribution(contribution),
+                    utility_shift=self._projected_action_delta_from_contribution(contribution),
+                )
                 continue
             if owner == "CerebellarPredictor":
                 self._execute_skill(round_id=state.round_count, skill_name="predict_next_state", inputs=runtime_inputs, provider=self._agent_provider(agent, "predict_next_state"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
                 self._execute_skill(round_id=state.round_count, skill_name="compute_prediction_error", inputs=runtime_inputs, provider=self._agent_provider(agent, "compute_prediction_error"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
                 self._execute_skill(round_id=state.round_count, skill_name="smooth_response_timing", inputs=runtime_inputs, provider=self._agent_provider(agent, "smooth_response_timing"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
-                bundle = self._execute_skill(round_id=state.round_count, skill_name="micro_adjust_action", inputs=runtime_inputs, provider=self._agent_provider(agent, "micro_adjust_action"), skill_traces=skill_traces, runtime_context=runtime_context, fallback_value=ProposalBundle(owner=owner, confidence=0.1, delta_p={}, action_preferences={}), seed_ref=round_seed)
-                bundles.append(bundle)
+                contribution = self._execute_skill(
+                    round_id=state.round_count,
+                    skill_name="micro_adjust_action",
+                    inputs=runtime_inputs,
+                    provider=lambda event, state, scenario, context: agent.build_direct_action_contribution(event, state, scenario, context),
+                    skill_traces=skill_traces,
+                    runtime_context=runtime_context,
+                    fallback_value=ProbabilisticContribution(
+                        module_name=owner,
+                        module_type="predictive",
+                        level="action",
+                        target_space="action",
+                        raw_signal={},
+                        modulated_delta={},
+                        confidence=0.1,
+                        trace_reason="typed fallback",
+                        projection_reason="typed fallback",
+                    ),
+                    seed_ref=round_seed,
+                )
+                direct_action_contributions[owner] = contribution
+                direct_action_signal_metadata[owner] = self._action_signal_metadata(
+                    owner=owner,
+                    state=state,
+                    relation_state=relation_state,
+                    context=context,
+                    module_type=contribution.module_type,
+                    projected_delta=self._projected_action_delta_from_contribution(contribution),
+                    utility_shift=self._projected_action_delta_from_contribution(contribution),
+                )
 
-        bundles = [self._enrich_bundle_metadata(bundle, state, relation_state, context) for bundle in bundles]
-        distribution_state = self._build_distribution_state(
-            bundles,
+        online_long_run_projection = self.long_run_analyzer.build_online_projection(
+            round_id=state.round_count,
+            slow_variables=slow_variables,
+            shaping_events=shaping_events,
+        )
+        motivation_pool_state = self.endogenous_motivation_pool.evaluate(
+            state=state,
+            context=context,
+            relation_state=relation_state,
+            slow_variables=slow_variables,
+            long_run_projection=online_long_run_projection,
+        )
+        state.motivation_pool_state = motivation_pool_state
+        motivation_contribution = self.endogenous_motivation_pool.build_action_contribution(
+            state=state,
+            pool_state=motivation_pool_state,
+        )
+        if motivation_contribution is not None:
+            direct_action_contributions["EndogenousMotivationPool"] = motivation_contribution
+            direct_action_signal_metadata["EndogenousMotivationPool"] = self._action_signal_metadata(
+                owner="EndogenousMotivationPool",
+                state=state,
+                relation_state=relation_state,
+                context=context,
+                module_type=motivation_contribution.module_type,
+                projected_delta=self._projected_action_delta_from_contribution(motivation_contribution),
+                utility_shift=self._projected_action_delta_from_contribution(motivation_contribution),
+                trace_tags=["motivation", *[item.motivation_type for item in motivation_pool_state.active_motivations]],
+            )
+
+        action_signals: list[ActionEvidenceSignal] = []
+        for owner, contribution in direct_action_contributions.items():
+            action_signals.append(
+                self._action_evidence_from_contribution(
+                    contribution,
+                    **direct_action_signal_metadata.get(owner, {}),
+                )
+            )
+        action_bookkeeping = self._build_action_bookkeeping(
+            action_signals,
             state,
             scenario_cfg,
             mode_cfg,
@@ -4258,66 +5660,141 @@ class RuntimeController:
             query_state=query_state,
             disclosure_state=disclosure_state,
         )
-        conflict_score = self._run_conflict_controller(
+        identity_context = self._build_identity_context(
+            query_state=query_state,
+            disclosure_state=disclosure_state,
+            scenario=scenario,
             state=state,
-            bundles=bundles,
-            distribution_state=distribution_state,
+            shaping_events=shaping_events,
+            slow_variables=slow_variables,
+            state_sources=list(grounding_capsule.get("state_sources", [])),
+            rename_event=rename_event,
+        )
+        online_long_run_contribution = self.long_run_analyzer.build_long_run_prior_contribution(
+            online_long_run_projection
+        )
+        action_snapshot, action_contributions, token_state = self._integrate_probability_field_snapshot(
+            direct_action_contributions=direct_action_contributions,
+            action_base=dict(action_bookkeeping.u_base),
+            event=event,
+            state=state,
+            scenario_cfg=scenario_cfg,
+            context=context,
+            identity_context=identity_context,
+            long_run_contribution=online_long_run_contribution,
+        )
+        control_ledger = self._control_ledger_from_action_bookkeeping(action_bookkeeping)
+        action_truth = self._refresh_action_truth(
+            action_snapshot.action,
+            {
+                "gate": dict(control_ledger.get("gate", {}) or {}),
+                "conflict_mode": str(control_ledger.get("conflict_mode", "none") or "none"),
+            },
+            conflict_mode=str(control_ledger.get("conflict_mode", "none") or "none"),
+        )
+
+        conflict_score, conflict_action_truth, control_ledger = self._run_conflict_controller(
+            state=state,
+            signals=action_signals,
+            control_ledger=control_ledger,
+            action_truth=action_truth,
             thresholds=thresholds,
             skill_traces=skill_traces,
             runtime_context=runtime_context,
             gate_decisions=gate_decisions,
             round_seed=round_seed,
         )
+        action_truth = dict(conflict_action_truth)
+        conflict_contribution = self.agent_map["ConflictMonitorAgent"].build_arbitration_contribution(
+            dict(control_ledger.get("conflict", {}) or {}),
+            conflict_action_truth,
+        )
+        if conflict_contribution.modulated_delta or conflict_contribution.inhibitory_drive or conflict_contribution.hard_mask:
+            action_contributions.append(conflict_contribution)
+            action_snapshot = self._reintegrate_probability_snapshot(
+                snapshot=action_snapshot,
+                contributions=action_contributions,
+                token_state=token_state,
+                source_chain=["action_field_after_conflict"],
+            )
+            action_truth = self._refresh_action_truth(action_snapshot.action, action_truth)
 
-        thalamus = self.agent_map["ThalamusAttentionAgent"]
-        aggregated = self._execute_skill(
-            round_id=state.round_count,
-            skill_name="aggregate_proposals",
-            inputs={"distribution_state": distribution_state},
-            provider=lambda distribution_state: thalamus.run_skill("aggregate_proposals", distribution_state),
-            skill_traces=skill_traces,
-            runtime_context=runtime_context,
-            seed_ref=round_seed,
-        )["distribution"]
-        deterministic = self._execute_skill(
-            round_id=state.round_count,
-            skill_name="normalize_distribution",
-            inputs={"distribution": aggregated},
-            provider=lambda distribution: thalamus.run_skill("normalize_distribution", distribution),
-            skill_traces=skill_traces,
-            runtime_context=runtime_context,
-            seed_ref=round_seed,
-        )["distribution"]
+        deterministic = dict(action_snapshot.action.winner_posterior or {})
 
         stochastic_distribution, stochastic_state = self._apply_stochastic_layer(
             deterministic,
-            distribution_state,
+            action_bookkeeping,
+            control_ledger,
             state,
             event,
             scenario_cfg,
             relation_state,
             conflict_score,
             round_seed,
+            action_energy=dict(action_truth.get("final_energy", {}) or dict(action_snapshot.action.final_energy or {})),
         )
-        distribution_state.p_mix = stochastic_distribution
-        post_risk = {
-            action: _clip(stochastic_distribution[action], thresholds["p_floor"], thresholds["p_cap"]) * distribution_state.risk_suppressor.get(action, 1.0)
-            for action in stochastic_distribution
-        }
-        distribution_state.p_final = self._normalize(
-            {
-                action: post_risk[action] * distribution_state.gate.get(action, 1.0)
-                for action in post_risk
-            }
+        stochastic_contribution = self._build_distribution_delta_contribution(
+            module_name="StochasticPolicy",
+            module_type="stochastic",
+            from_distribution=deterministic,
+            to_distribution=stochastic_distribution,
+            trace_reason=(
+                f"stochastic mixing lambda={stochastic_state.lambda_noise:.4f} "
+                f"channel={stochastic_state.emo_channel}"
+            ),
+            projection_reason="stochastic action mixing projected from entropy-controlled noise",
+            applied_at_stage="stochastic_mixing",
+            native_operator="posterior_reweight",
+            dependency_trace=[
+                f"lambda_noise:{stochastic_state.lambda_noise:.4f}",
+                f"emo_channel:{stochastic_state.emo_channel}",
+                f"kl:{stochastic_state.kl_divergence:.4f}",
+                f"v_t:{stochastic_state.v_t:.4f}",
+            ],
+            confidence=max(0.25, min(1.0, stochastic_state.lambda_noise + 0.2)),
+            module_temperature=0.9,
         )
-        distribution_state.p_final, candidate_penalties, sampling_penalty_applied = self.authenticity_policy.apply_sampling_penalties(
-            distribution_state.p_final,
+        if stochastic_contribution is not None:
+            action_contributions.append(stochastic_contribution)
+            action_snapshot = self._reintegrate_probability_snapshot(
+                snapshot=action_snapshot,
+                contributions=action_contributions,
+                token_state=token_state,
+                source_chain=["action_field_after_stochastic"],
+            )
+            action_truth = self._refresh_action_truth(action_snapshot.action, action_truth)
+
+        current_final_distribution = dict(action_snapshot.action.winner_posterior or {})
+        current_final_distribution, candidate_penalties, sampling_penalty_applied = self.authenticity_policy.apply_sampling_penalties(
+            current_final_distribution,
             query_kind=query_state.legacy_query_kind,
             disclosure_intent=disclosure_state.posterior.top_intent,
             slow_variables=slow_variables,
             memory_cue=context.get("cue"),
             shaping_events=shaping_events,
         )
+        if candidate_penalties or sampling_penalty_applied > 0.0:
+            authenticity_contribution = self.authenticity_policy.build_action_penalty_contribution(
+                AuthenticityRecord(
+                    self_grounding_score=float(
+                        context.get("grounding_capsule", {}).get("state_summary", {}).get("body_energy", state.body_energy)
+                        or 0.0
+                    ),
+                    guard_action="sampling_penalty",
+                    disclosure_detail=disclosure_state.posterior.top_intent or "none",
+                    state_sources=list(context.get("grounding_capsule", {}).get("state_sources", [])),
+                    candidate_penalties=dict(candidate_penalties),
+                    sampling_penalty_applied=float(sampling_penalty_applied),
+                )
+            )
+            action_contributions.append(authenticity_contribution)
+            action_snapshot = self._reintegrate_probability_snapshot(
+                snapshot=action_snapshot,
+                contributions=action_contributions,
+                token_state=token_state,
+                source_chain=["action_field_after_authenticity"],
+            )
+        action_truth = self._refresh_action_truth(action_snapshot.action, action_truth)
         if candidate_penalties:
             gate_decisions.append(
                 {
@@ -4337,22 +5814,18 @@ class RuntimeController:
             purpose=f"round-{round_seed}-action-sample",
             node_name="action_sample",
         )
-        sampled_action = self._execute_skill(
-            round_id=state.round_count,
-            skill_name="sample_action",
-            inputs={"distribution": distribution_state.p_final, "sample_value": sample_value},
-            provider=lambda distribution, sample_value: thalamus.run_skill("sample_action", distribution, sample_value),
-            skill_traces=skill_traces,
-            runtime_context=runtime_context,
-            seed_ref=round_seed,
-        )["action"]
+        current_action_sample_value = sample_value
+        sampled_action = self._sample_action_from_distribution(
+            dict(action_snapshot.action.winner_posterior or {}),
+            sample_value,
+        )
         sampled_action = self._collapse_internal_sampled_action(sampled_action)
         stochastic_state.entropy_ref = action_entropy_ref if not stochastic_state.entropy_ref.source else stochastic_state.entropy_ref
         stochastic_state.entropy_refs_by_node["action_sample"] = to_dict(action_entropy_ref)
 
         plausibility_guard = self.agent_map["BehaviorPlausibilityGuard"]
         plausibility_by_action: dict[str, dict[str, Any]] = {}
-        for action_name, probability in distribution_state.p_final.items():
+        for action_name, probability in dict(action_snapshot.action.winner_posterior or {}).items():
             if probability <= thresholds["p_floor"]:
                 continue
             plausibility_by_action[action_name] = self._execute_skill(
@@ -4372,9 +5845,10 @@ class RuntimeController:
         }
         dominant_blocked_action = None
         dominant_blocked_probability = 0.0
+        field_distribution = dict(action_snapshot.action.winner_posterior or {})
         if blocked_actions:
-            dominant_blocked_action = max(blocked_actions, key=lambda action_name: distribution_state.p_final.get(action_name, 0.0))
-            dominant_blocked_probability = distribution_state.p_final.get(dominant_blocked_action, 0.0)
+            dominant_blocked_action = max(blocked_actions, key=lambda action_name: field_distribution.get(action_name, 0.0))
+            dominant_blocked_probability = field_distribution.get(dominant_blocked_action, 0.0)
         selected_plausibility = plausibility_by_action.get(
             sampled_action.name,
             {"pass": True, "plausibility_fail_score": 0.0},
@@ -4383,12 +5857,13 @@ class RuntimeController:
             selected_plausibility.get("plausibility_fail_score", 0.0),
             blocked_actions.get(dominant_blocked_action, {}).get("plausibility_fail_score", 0.0) if dominant_blocked_action else 0.0,
         )
-        top_probability = max(distribution_state.p_final.values()) if distribution_state.p_final else 0.0
+        top_probability = max(field_distribution.values()) if field_distribution else 0.0
         preemptive_guard = dominant_blocked_action is not None and dominant_blocked_probability >= max(0.10, top_probability * 0.50)
+        plausibility_resample_idx = 0
         second_sampling = self._execute_skill(
             round_id=state.round_count,
             skill_name="request_second_sampling",
-            inputs={"fail_score": fail_score, "attempts": distribution_state.resample_idx},
+            inputs={"fail_score": fail_score, "attempts": plausibility_resample_idx},
             provider=lambda fail_score, attempts: plausibility_guard.run_skill("request_second_sampling", fail_score, attempts),
             skill_traces=skill_traces,
             runtime_context=runtime_context,
@@ -4405,28 +5880,57 @@ class RuntimeController:
             runtime_context=runtime_context,
             seed_ref=round_seed,
         )
+        plausibility_reason_actions = [dominant_blocked_action] if dominant_blocked_action is not None else [sampled_action.name]
         if second_sampling and (not selected_plausibility.get("pass", True) or preemptive_guard):
             gated_actions = [
                 action_name
                 for action_name, plausibility in blocked_actions.items()
-                if distribution_state.p_final.get(action_name, 0.0) >= max(0.10, dominant_blocked_probability * 0.7)
+                if field_distribution.get(action_name, 0.0) >= max(0.10, dominant_blocked_probability * 0.7)
             ]
             if not gated_actions and dominant_blocked_action is not None:
                 gated_actions = [dominant_blocked_action]
-            for action_name in gated_actions:
-                distribution_state.gate[action_name] = 0.0
-            distribution_state.resample_idx += 1
-            filtered = {
-                action: distribution_state.p_final[action] * distribution_state.gate.get(action, 1.0)
-                for action in distribution_state.p_final
-            }
-            distribution_state.p_final = self._normalize(filtered)
+            plausibility_reason_actions = list(gated_actions or plausibility_reason_actions)
+            plausibility_contribution = self._build_distribution_delta_contribution(
+                module_name="BehaviorPlausibilityGuard",
+                module_type="guard",
+                from_distribution=dict(action_snapshot.action.winner_posterior or {}),
+                to_distribution={
+                    action: probability
+                    for action, probability in dict(action_snapshot.action.winner_posterior or {}).items()
+                    if action not in set(gated_actions)
+                },
+                hard_mask={action_name: True for action_name in gated_actions},
+                trace_reason=f"plausibility resample fail_score={fail_score:.4f}",
+                projection_reason="plausibility guard projected from blocked action set",
+                applied_at_stage="plausibility_guard",
+                native_operator="hard_mask",
+                dependency_trace=[
+                    f"fail_score:{fail_score:.4f}",
+                    f"blocked:{','.join(sorted(gated_actions))}",
+                ],
+                confidence=max(0.4, min(1.0, fail_score + 0.2)),
+            )
+            if plausibility_contribution is not None:
+                action_contributions.append(plausibility_contribution)
+                action_snapshot = self._reintegrate_probability_snapshot(
+                    snapshot=action_snapshot,
+                    contributions=action_contributions,
+                    token_state=token_state,
+                    source_chain=["action_field_after_plausibility"],
+                )
+                action_truth = self._refresh_action_truth(action_snapshot.action, action_truth)
+            control_ledger["resample_idx"] = int(control_ledger.get("resample_idx", 0) or 0) + 1
+            plausibility_resample_idx += 1
             resample_value, resample_ref = self.entropy_pool.uniform(
                 purpose=f"round-{round_seed}-action-resample",
                 node_name="action_resample",
             )
             stochastic_state.entropy_refs_by_node["action_resample"] = to_dict(resample_ref)
-            sampled_action = thalamus.run_skill("sample_action", distribution_state.p_final, resample_value)["action"]
+            current_action_sample_value = resample_value
+            sampled_action = self._sample_action_from_distribution(
+                dict(action_snapshot.action.winner_posterior or {}),
+                resample_value,
+            )
             sampled_action = self._collapse_internal_sampled_action(sampled_action)
         gate_decisions.append(
             {
@@ -4435,7 +5939,7 @@ class RuntimeController:
                 "allowed": not (second_sampling and (not selected_plausibility.get("pass", True) or preemptive_guard)),
                 "requires_resample": second_sampling,
                 "reason": (
-                    f"fail_score={fail_score:.2f}; blocked={dominant_blocked_action or sampled_action.name}; "
+                    f"fail_score={fail_score:.2f}; blocked={','.join(sorted(action for action in plausibility_reason_actions if action))}; "
                     f"blocked_p={dominant_blocked_probability:.3f}"
                 ),
             }
@@ -4466,7 +5970,40 @@ class RuntimeController:
             seed_ref=round_seed,
         )["switch_flag"]
         if force_switch:
-            sampled_action = ActionCandidate(name="respond", probability=sampled_action.probability, rationale="forced mode switch")
+            forced_distribution = dict(action_snapshot.action.winner_posterior or {})
+            if sampled_action.name in forced_distribution and sampled_action.name != "respond":
+                shifted_mass = forced_distribution.pop(sampled_action.name, 0.0)
+                forced_distribution["respond"] = forced_distribution.get("respond", 0.0) + max(shifted_mass, 0.25)
+            forced_mode_contribution = self._build_distribution_delta_contribution(
+                module_name="ForcedModeSwitch",
+                module_type="guard",
+                from_distribution=dict(action_snapshot.action.winner_posterior or {}),
+                to_distribution=self._normalize(forced_distribution),
+                hard_mask={sampled_action.name: sampled_action.name != "respond"},
+                trace_reason=f"forced focus switch lock_score={lock_score:.4f}",
+                projection_reason="forced mode switch projected from focus-lock override",
+                applied_at_stage="forced_mode_switch",
+                native_operator="focus_override",
+                dependency_trace=[
+                    f"lock_score:{lock_score:.4f}",
+                    f"blocked_action:{sampled_action.name}",
+                ],
+                confidence=max(0.45, min(1.0, lock_score)),
+            )
+            if forced_mode_contribution is not None:
+                action_contributions.append(forced_mode_contribution)
+                action_snapshot = self._reintegrate_probability_snapshot(
+                    snapshot=action_snapshot,
+                    contributions=action_contributions,
+                    token_state=token_state,
+                    source_chain=["action_field_after_forced_switch"],
+                )
+                action_truth = self._refresh_action_truth(action_snapshot.action, action_truth)
+                sampled_action = self._sample_action_from_distribution(
+                    dict(action_snapshot.action.winner_posterior or {}),
+                    current_action_sample_value,
+                )
+                sampled_action = self._collapse_internal_sampled_action(sampled_action)
             gate_decisions.append({"stage": "forced_mode_switch", "owner": "ForcedModeSwitch", "allowed": False, "requires_resample": True, "reason": f"lock_score={lock_score:.2f}"})
 
         output_gate = self.agent_map["OutputGate"]
@@ -4479,21 +6016,97 @@ class RuntimeController:
             runtime_context=runtime_context,
             seed_ref=round_seed,
         )["gate"]
-        distribution_state.gate[sampled_action.name] = min(distribution_state.gate.get(sampled_action.name, 1.0), gate)
+        action_truth.setdefault("gate", {})
+        action_truth["gate"][sampled_action.name] = min(
+            float(action_truth["gate"].get(sampled_action.name, 1.0) or 1.0),
+            gate,
+        )
+        control_ledger.setdefault("gate", {})
+        control_ledger["gate"][sampled_action.name] = min(
+            float(control_ledger["gate"].get(sampled_action.name, 1.0) or 1.0),
+            gate,
+        )
+        if gate < 1.0:
+            gated_distribution = dict(action_snapshot.action.winner_posterior or {})
+            if gate == 0.0:
+                gated_distribution.pop(sampled_action.name, None)
+            else:
+                gated_distribution[sampled_action.name] = gated_distribution.get(sampled_action.name, 0.0) * gate
+            output_gate_contribution = self._build_distribution_delta_contribution(
+                module_name="OutputGate",
+                module_type="guard",
+                from_distribution=dict(action_snapshot.action.winner_posterior or {}),
+                to_distribution=self._normalize(gated_distribution or dict(action_snapshot.action.winner_posterior or {})),
+                hard_mask={sampled_action.name: gate == 0.0},
+                trace_reason=f"output gate applied gate={gate:.4f}",
+                projection_reason="output gate projected from final action suppression",
+                applied_at_stage="output_gate",
+                native_operator="final_gate",
+                dependency_trace=[
+                    f"action:{sampled_action.name}",
+                    f"gate:{gate:.4f}",
+                ],
+                confidence=max(0.5, min(1.0, 1.0 - gate + 0.2)),
+            )
+            if output_gate_contribution is not None:
+                action_contributions.append(output_gate_contribution)
+                action_snapshot = self._reintegrate_probability_snapshot(
+                    snapshot=action_snapshot,
+                    contributions=action_contributions,
+                    token_state=token_state,
+                    source_chain=["action_field_after_output_gate"],
+                )
+                action_truth = self._refresh_action_truth(action_snapshot.action, action_truth)
         if gate == 0.0:
-            filtered = {
-                action: distribution_state.p_final[action] * distribution_state.gate.get(action, 1.0)
-                for action in distribution_state.p_final
-            }
-            distribution_state.p_final = self._normalize(filtered)
             regated_value, regate_ref = self.entropy_pool.uniform(
                 purpose=f"round-{round_seed}-action-regate",
                 node_name="action_regate",
             )
             stochastic_state.entropy_refs_by_node["action_regate"] = to_dict(regate_ref)
-            sampled_action = thalamus.run_skill("sample_action", distribution_state.p_final, regated_value)["action"]
+            current_action_sample_value = regated_value
+            sampled_action = self._sample_action_from_distribution(
+                dict(action_snapshot.action.winner_posterior or {}),
+                regated_value,
+            )
             sampled_action = self._collapse_internal_sampled_action(sampled_action)
         gate_decisions.append({"stage": "output_gate", "owner": "OutputGate", "allowed": gate > 0, "requires_resample": gate == 0.0, "reason": f"gate={gate:.2f}"})
+
+        contributions, proposal_records = self._build_contributions(
+            action_signals,
+            state,
+            sampled_action.name,
+            conflict_score,
+            fail_score,
+            int(control_ledger.get("resample_idx", 0) or 0),
+        )
+        vitality_snapshot = self._build_vitality_snapshot(
+            state=state,
+            context=context,
+            relation_state=relation_state,
+            prior_closeness=prior_closeness,
+            scenario=scenario,
+            sampled_action=sampled_action,
+            contributions=contributions,
+            gate_decisions=gate_decisions,
+            shaping_events=shaping_events,
+        )
+        vitality_contribution = self.vitality_engine.build_vitality_modulation_contribution(vitality_snapshot)
+        action_contributions.append(vitality_contribution)
+        action_snapshot = self._reintegrate_probability_snapshot(
+            snapshot=action_snapshot,
+            contributions=action_contributions,
+            token_state=token_state,
+            source_chain=["action_field_after_vitality"],
+        )
+        action_truth = self._refresh_action_truth(action_snapshot.action, action_truth)
+        sampled_action = self._sample_action_from_distribution(
+            dict(action_snapshot.action.winner_posterior or {}),
+            current_action_sample_value,
+        )
+        sampled_action = self._collapse_internal_sampled_action(sampled_action)
+        locked_action_before_render = sampled_action.name
+        locked_probability_before_render = round(float((action_snapshot.action.winner_posterior or {}).get(sampled_action.name, 0.0) or 0.0), 6)
+        gate_at_render = round(float(action_truth.get("gate", {}).get(sampled_action.name, 1.0) or 0.0), 6)
 
         expression = build_expression_profile(
             sampled_action=sampled_action.name,
@@ -4507,7 +6120,10 @@ class RuntimeController:
                 "disclosure_intent": disclosure_state.posterior.top_intent,
             },
         )
-        expression = self._apply_conflict_expression_adjustments(expression, distribution_state.conflict)
+        expression = self._apply_conflict_expression_adjustments(
+            expression,
+            dict(control_ledger.get("conflict", {}) or {}),
+        )
         output_profiles = self._execute_parallel_skills(
             round_id=state.round_count,
             tasks=[
@@ -4605,35 +6221,26 @@ class RuntimeController:
             sampled_action=sampled_action.name,
             expression=ExpressionProfile(**{**to_dict(expression)}),
             safety_constraints={
-                "gate": distribution_state.gate.get(sampled_action.name, 1.0),
+                "gate": action_truth.get("gate", {}).get(sampled_action.name, 1.0),
                 "tone_params": tone_params["tone_params"],
                 "delay_params": delay_params["delay_params"],
-                "conflict_hot": distribution_state.conflict.get("circuit_breaker", {}).get("active", False),
-                "compromise_template": distribution_state.conflict.get("compromise", {}).get("template"),
-                "winning_priority": distribution_state.conflict.get("winning_priority"),
-                "repair_stage": distribution_state.conflict.get("repair_state_snapshot", {}).get("stage"),
+                "conflict_hot": dict(control_ledger.get("conflict", {}) or {}).get("circuit_breaker", {}).get("active", False),
+                "compromise_template": dict(control_ledger.get("conflict", {}) or {}).get("compromise", {}).get("template"),
+                "winning_priority": dict(control_ledger.get("conflict", {}) or {}).get("winning_priority"),
+                "repair_stage": dict(control_ledger.get("conflict", {}) or {}).get("repair_state_snapshot", {}).get("stage"),
             },
             scenario=scenario,
             event_summary=event.content,
             target=event.target,
             relation_state=relation_state,
             perspective=late_perspective,
-            identity_context=self._build_identity_context(
-                query_state=query_state,
-                disclosure_state=disclosure_state,
-                scenario=scenario,
-                state=state,
-                shaping_events=shaping_events,
-                slow_variables=slow_variables,
-                state_sources=list(grounding_capsule.get("state_sources", [])),
-                rename_event=rename_event,
-            ),
+            identity_context=identity_context,
             state_focus=sampled_action.name,
             memory_cue=context.get("cue"),
             recall_strength=float(context.get("recall_strength", 0.0)),
             slow_variables=slow_variables,
             shaping_events=shaping_events,
-            repair_expression=self._build_repair_expression_policy(distribution_state.conflict),
+            repair_expression=self._build_repair_expression_policy(dict(control_ledger.get("conflict", {}) or {})),
         )
         rendered_output, rendered_result = self._execute_skill_with_result(
             round_id=state.round_count,
@@ -4695,6 +6302,17 @@ class RuntimeController:
         render_plan.identity_context.self_description_sources = sorted(
             set(render_plan.identity_context.self_description_sources + list(final_auth_payload.state_sources))
         )
+        renderer_decision_integrity = {
+            "locked_action": locked_action_before_render,
+            "render_plan_action": render_plan.action,
+            "post_render_action": sampled_action.name,
+            "locked_probability": locked_probability_before_render,
+            "gate_at_render": gate_at_render,
+            "auth_guard_action": guard_action,
+            "decision_mutated": False,
+            "renderer_consumes_final_field": render_plan.action == locked_action_before_render == sampled_action.name,
+            "mutation_reasons": [],
+        }
         gate_decisions.append(
             {
                 "stage": "authenticity_guard",
@@ -4718,7 +6336,7 @@ class RuntimeController:
         if sampled_action.name in {"respond", "plan", "clarify"}:
             state.budget_remaining = _clip(state.budget_remaining + 0.0016)
         starvation = self.config["resource_rules"]["resource_defaults"]["starvation_threshold"]
-        recovered_this_round = distribution_state.conflict.get("repair_transition", {}).get("to_stage") == "recovered"
+        recovered_this_round = dict(control_ledger.get("conflict", {}) or {}).get("repair_transition", {}).get("to_stage") == "recovered"
         if state.budget_remaining <= starvation / 10 and not recovered_this_round:
             state.safe_mode = True
             state.mode = "safe"
@@ -4728,26 +6346,6 @@ class RuntimeController:
         sampled_action.metadata["expression_profile"] = to_dict(expression)
         sampled_action.metadata["render_plan"] = to_dict(render_plan)
         sampled_action.metadata["rendered_expression"] = to_dict(rendered_expression)
-
-        contributions, proposal_records = self._build_contributions(
-            bundles,
-            state,
-            sampled_action.name,
-            conflict_score,
-            fail_score,
-            distribution_state.resample_idx,
-        )
-        vitality_snapshot = self._build_vitality_snapshot(
-            state=state,
-            context=context,
-            relation_state=relation_state,
-            prior_closeness=prior_closeness,
-            scenario=scenario,
-            sampled_action=sampled_action,
-            contributions=contributions,
-            gate_decisions=gate_decisions,
-            shaping_events=shaping_events,
-        )
         identity_evolution = self.identity_runtime.build_identity_evolution_payload(
             state=state,
             rename_event=rename_event,
@@ -4762,6 +6360,7 @@ class RuntimeController:
             identity_evolution=identity_evolution,
             shaping_events=shaping_events,
         )
+        long_run_projection["online_prior"] = dict(online_long_run_projection)
         for row in skill_traces:
             row["session_id"] = state.session_id
             row["recorded_at"] = recorded_at
@@ -4791,6 +6390,32 @@ class RuntimeController:
             "total_model_wait_ms": int(sum(int(row.get("latency_ms", 0) or 0) for row in model_call_traces)),
             "total_turn_ms": max(1, int((time.perf_counter() - turn_started) * 1000)),
         }
+        renderer_contribution = self._build_renderer_token_contribution(render_plan, context)
+        probability_field_snapshot = self._reintegrate_probability_snapshot(
+            snapshot=action_snapshot,
+            contributions=[*action_contributions, renderer_contribution],
+            token_state=token_state,
+            source_chain=[
+                "probability_field_native",
+                "context_memory_action_token",
+                "field_first_tick",
+            ],
+        )
+        probability_field_snapshot.action.winner_target = sampled_action.name
+        self._finalize_action_bookkeeping_from_action_layer(
+            action_bookkeeping,
+            probability_field_snapshot.action,
+            finalize_stage="final",
+        )
+        self._merge_control_ledger_into_action_bookkeeping(action_bookkeeping, control_ledger)
+        probability_field = to_dict(probability_field_snapshot)
+        trace_action_bookkeeping = self._action_bookkeeping_payload(
+            action_bookkeeping=action_bookkeeping,
+            probability_field_snapshot=probability_field_snapshot,
+            control_ledger=control_ledger,
+            action_truth=action_truth,
+            stochastic_state=stochastic_state,
+        )
 
         trace = RoundTrace(
             session_id=state.session_id,
@@ -4806,16 +6431,27 @@ class RuntimeController:
             top_drivers=contributions[:3],
             style_profile=style_profile,
             state_snapshot=to_dict(state),
-            cause_type="external_stimulus",
+            cause_type="endogenous" if endogenous_turn else "external_stimulus",
             boundary_action="allow_internal",
-            pipeline_stages=[stage for stage, _ in PIPELINE_ORDER],
+            pipeline_stages=list(PIPELINE_TELEMETRY_STAGES),
             proposal_summaries=proposal_records,
             gate_decisions=gate_decisions,
             skill_traces=skill_traces,
-            distribution_state=to_dict(distribution_state),
+            parallel_traces=parallel_traces,
+            action_bookkeeping=trace_action_bookkeeping,
+            candidate_distribution=dict(probability_field_snapshot.action.winner_posterior or {}),
+            probability_field=probability_field,
             stochastic_state=to_dict(stochastic_state),
+            conflict_arbitration={
+                **dict(control_ledger.get("conflict", {}) or {}),
+                "hard_masked_targets": list(conflict_action_truth.get("hard_masked_targets", []) or []),
+                "winner_peak_posterior": dict(conflict_action_truth.get("winner_posterior", {}) or {}),
+                "conflict_mode": str(conflict_action_truth.get("conflict_mode") or control_ledger.get("conflict_mode", "monitor")),
+            },
             render_plan=to_dict(render_plan),
             rendered_expression=to_dict(rendered_expression),
+            renderer_decision_integrity=renderer_decision_integrity,
+            memory_write_gate=memory_write_gate,
             authenticity=to_dict(final_auth_payload),
             identity_evolution=identity_evolution,
             vitality_snapshot=vitality_snapshot,
@@ -4856,15 +6492,35 @@ class RuntimeController:
             dream_effect_summary=dream_payload.get("effect_summary", {}),
             model_call_traces=model_call_traces,
             runtime_metrics=runtime_metrics,
-            resample_count=distribution_state.resample_idx,
+            resample_count=int(control_ledger.get("resample_idx", 0) or 0),
         )
+
+        updated_learning_state, motivation_feedback_payload = self.motivation_feedback_updater.update(
+            learning_state=state.motivation_learning_state,
+            pool_state=motivation_pool_state,
+            trace_payload=to_dict(trace),
+        )
+        state.motivation_learning_state = updated_learning_state
+        state.motivation_pool_state.last_feedback_update_at = recorded_at
+        trace.motivation_pool = self.endogenous_motivation_pool.trace_payload(motivation_pool_state)
+        trace.motivation_feedback = motivation_feedback_payload
+        latest_trigger = (
+            state.endogenous_scheduler_state.recent_triggers[-1]
+            if state.endogenous_scheduler_state.recent_triggers
+            else None
+        )
+        trace.endogenous_tick_reason = self.endogenous_scheduler.trace_payload(
+            state.endogenous_scheduler_state,
+            latest_trigger,
+        )
+        trace.endogenous_policy_shift = dict(updated_learning_state.endogenous_policy_shift)
 
         health = HealthEvent(event="tick", status="ok", detail=f"budget={state.budget_remaining:.2f}")
         state.entropy_health_state = self.entropy_pool.health_snapshot()
         state.last_entropy_failure = {}
         self._save_state(state)
         self.trace_store.write_round(trace)
-        if distribution_state.conflict.get("post_error_adjustment", {}).get("triggered") and state.repair_ledger:
+        if dict(control_ledger.get("conflict", {}) or {}).get("post_error_adjustment", {}).get("triggered") and state.repair_ledger:
             latest_repair_entry = state.repair_ledger[-1]
             if latest_repair_entry.round_id == state.round_count:
                 self.trace_store.append_repair_entry(
@@ -4891,83 +6547,98 @@ class RuntimeController:
             self._record_entropy_failure(state, exc)
             raise
 
-    def run_endogenous_tick(self, *, trigger: str = "idle") -> dict[str, Any]:
+    def run_endogenous_tick(self, *, trigger: str = "idle", mode: str | None = None) -> dict[str, Any]:
         state = self.load_runtime_state()
         self._ensure_subject_core(state)
-        state.round_count += 1
-
-        if state.body_energy <= 0.6 or state.budget_remaining <= 0.5:
-            intent_name = "rest_and_reduce_output_density"
-        elif state.affect_residue >= 0.14:
-            intent_name = "seek_closure_on_memory"
-        elif state.mood <= 0.48:
-            intent_name = "increase_disclosure_resistance"
-        else:
-            intent_name = "avoid_social_interaction"
-
-        evidence = {
-            "affect_residue": round(float(state.affect_residue), 4),
-            "body_energy": round(float(state.body_energy), 4),
-            "budget_remaining": round(float(state.budget_remaining), 4),
-            "mood": round(float(state.mood), 4),
+        rounds = self.trace_store.list_rounds()
+        latest_round = rounds[-1] if rounds else {}
+        latest_vitality = dict(latest_round.get("vitality_snapshot", {}) or {})
+        latest_context = {
+            "cue": latest_vitality.get("cue"),
+            "recall_strength": float(latest_vitality.get("memory_activation", 0.0) or 0.0),
+            "closeness": self.memory_store.closeness("self"),
+            "interference": float(latest_vitality.get("memory_interference", 0.0) or 0.0),
         }
-        previous_intent = state.endogenous_state.get("current_intent")
-        stability = int(state.endogenous_state.get("stability", 0) or 0)
-        if isinstance(previous_intent, dict) and previous_intent.get("name") == intent_name:
+        relation_state = {
+            "relationship_risk": float(latest_vitality.get("relationship_drift", 0.0) or 0.0),
+            "closeness": float(latest_context["closeness"]),
+        }
+        slow_variables = {
+            "affect_residue": float(state.affect_residue),
+            "memory_activation": float(latest_vitality.get("memory_activation", 0.0) or 0.0),
+            "relationship_drift": float(latest_vitality.get("relationship_drift", 0.0) or 0.0),
+            "resource_scarcity": float(latest_vitality.get("resource_scarcity", 0.0) or 0.0),
+        }
+        scheduler_trigger = self.endogenous_scheduler.build_trigger(
+            state=state,
+            context=latest_context,
+            relation_state=relation_state,
+            slow_variables=slow_variables,
+            pool_state=state.motivation_pool_state,
+        )
+        if scheduler_trigger is None:
+            scheduler_trigger = EndogenousTickTrigger(
+                trigger_type=trigger,
+                trigger_score=round(float(state.motivation_pool_state.endogenous_activation_score or 0.0), 6),
+                source_metrics={key: round(float(value), 6) for key, value in slow_variables.items()},
+                selected_mode=mode or "endogenous_light",
+                audit_reason=f"manual endogenous trigger fallback: {trigger}",
+            )
+        if trigger and trigger != scheduler_trigger.trigger_type:
+            scheduler_trigger.trigger_type = trigger
+            scheduler_trigger.audit_reason = f"manual trigger override: {trigger}"
+        if mode is not None:
+            scheduler_trigger.selected_mode = mode
+        scheduler_state = self.endogenous_scheduler.update_state(
+            scheduler_state=state.endogenous_scheduler_state,
+            trigger=scheduler_trigger,
+        )
+        state.endogenous_scheduler_state = scheduler_state
+        state.endogenous_state["last_trigger"] = scheduler_trigger.trigger_type
+        self._save_state(state)
+
+        result = self.tick(
+            RoundEvent(
+                source="endogenous",
+                content=f"endogenous trigger {scheduler_trigger.trigger_type}",
+                target="self",
+                cue=f"endogenous:{scheduler_trigger.trigger_type}",
+                cue_quality=0.45,
+            ),
+            scenario="companion",
+            mode=scheduler_trigger.selected_mode or mode or "endogenous_light",
+        )
+        pool_state = result.state.motivation_pool_state
+        first_motivation = pool_state.active_motivations[0].motivation_type if pool_state.active_motivations else "latent"
+        previous_intent = result.state.endogenous_state.get("current_intent")
+        stability = int(result.state.endogenous_state.get("stability", 0) or 0)
+        if isinstance(previous_intent, dict) and previous_intent.get("name") == first_motivation:
             stability += 1
         else:
             stability = 1
-        current_intent = {
-            "name": intent_name,
-            "trigger": trigger,
-            "bias": {"rest": 0.12 if "rest" in intent_name else 0.04, "wander": 0.06 if intent_name == "avoid_social_interaction" else 0.0},
-            "evidence": evidence,
+        micro_intent = {
+            "name": first_motivation,
+            "trigger": scheduler_trigger.trigger_type,
+            "bias": pool_state.active_motivations[0].target_actions if pool_state.active_motivations else {},
+            "evidence": scheduler_trigger.source_metrics,
             "stability": stability,
         }
-        state.endogenous_state["current_intent"] = current_intent
-        state.endogenous_state["stability"] = stability
-        state.endogenous_state["last_trigger"] = trigger
-        state.endogenous_state["history"] = (list(state.endogenous_state.get("history", [])) + [current_intent])[-20:]
-
-        if intent_name == "rest_and_reduce_output_density":
-            state.focus = "rest"
-            state.body_energy = round(_clip(state.body_energy + 0.02), 4)
-        elif intent_name == "seek_closure_on_memory":
-            state.focus = "recall"
-            state.affect_residue = round(_clip(state.affect_residue * 0.96), 4)
-        else:
-            state.focus = "wander"
-
-        recorded_at = utc_now_iso()
-        trace = RoundTrace(
-            session_id=state.session_id,
-            recorded_at=recorded_at,
-            recorded_date=iso_date(recorded_at),
-            round_id=state.round_count,
-            subject_id=state.subject_core.subject_id,
-            continuity_nonce=state.subject_core.continuity_nonce,
-            scenario="endogenous",
-            mode=trigger,
-            sampled_action="rest",
-            contributions=[],
-            top_drivers=[],
-            style_profile={},
-            state_snapshot=to_dict(state),
-            cause_type="endogenous",
-            boundary_action="allow_internal",
-            render_plan={"micro_intent": current_intent},
-            rendered_expression={},
-            vitality_snapshot=self._default_vitality_anchor(state),
-            long_run_projection={},
-            runtime_metrics={"route_type": "endogenous_tick", "micro_intent_stability": stability},
+        result.state.endogenous_state["current_intent"] = micro_intent
+        result.state.endogenous_state["stability"] = stability
+        result.state.endogenous_state["history"] = (list(result.state.endogenous_state.get("history", [])) + [micro_intent])[-20:]
+        result.state.endogenous_scheduler_state = self.endogenous_scheduler.update_state(
+            scheduler_state=result.state.endogenous_scheduler_state,
+            trigger=scheduler_trigger,
+            recorded_at=result.trace.recorded_at,
         )
-        self._save_state(state)
-        self.trace_store.write_round(trace)
+        self._save_state(result.state)
         return {
-            "round_id": state.round_count,
-            "micro_intent": current_intent,
-            "cause_type": "endogenous",
-            "boundary_action": "allow_internal",
+            "round_id": result.round_id,
+            "micro_intent": micro_intent,
+            "cause_type": result.trace.cause_type,
+            "boundary_action": result.trace.boundary_action,
+            "trigger": to_dict(scheduler_trigger),
+            "selected_mode": scheduler_trigger.selected_mode,
         }
 
     def execute_command(self, envelope: CommandEnvelope) -> CommandResult:
@@ -5849,6 +7520,14 @@ class RuntimeController:
         self.trace_store.flush(raise_on_error=False)
         payload, read_source = self.trace_store.read_round_record(self.resolve_round_ref(round_ref))
         enriched = dict(payload)
+        enriched.setdefault("motivation_pool", {})
+        enriched.setdefault("motivation_feedback", {})
+        enriched.setdefault("endogenous_tick_reason", {})
+        enriched.setdefault("endogenous_policy_shift", {})
+        enriched["token_state"] = self._token_state_from_trace(enriched)
+        enriched["cross_layer_coupling_verdict"] = self._cross_layer_coupling_verdict(enriched)
+        enriched["renderer_decision_integrity"] = self._renderer_decision_integrity(enriched)
+        enriched["conflict_arbitration"] = self._conflict_arbitration_summary(enriched)
         enriched["storage"] = self._trace_storage_payload(read_source=read_source)
         dream = self._dream_summary_from_trace(enriched)
         if dream is not None:
@@ -5866,7 +7545,6 @@ class RuntimeController:
             "sampled_action": trace["sampled_action"],
             "top_drivers": trace["top_drivers"],
             "style_profile": trace["style_profile"],
-            "distribution_state": trace.get("distribution_state", {}),
             "stochastic_state": trace.get("stochastic_state", {}),
             "render_plan": trace.get("render_plan", {}),
             "rendered_expression": trace.get("rendered_expression", {}),
@@ -5875,6 +7553,10 @@ class RuntimeController:
             "vitality_snapshot": trace.get("vitality_snapshot", {}),
             "vitality_events": trace.get("vitality_events", []),
             "long_run_projection": trace.get("long_run_projection", {}),
+            "motivation_pool": trace.get("motivation_pool", {}),
+            "motivation_feedback": trace.get("motivation_feedback", {}),
+            "endogenous_tick_reason": trace.get("endogenous_tick_reason", {}),
+            "endogenous_policy_shift": trace.get("endogenous_policy_shift", {}),
             "appraisal_snapshot": trace.get("appraisal_snapshot", {}),
             "state_delta_before_clip": trace.get("state_delta_before_clip", {}),
             "state_delta_after_clip": trace.get("state_delta_after_clip", {}),
@@ -5884,6 +7566,17 @@ class RuntimeController:
             "identity_evidence_score": trace.get("identity_evidence_score", 0.0),
             "identity_trigger_blockers": trace.get("identity_trigger_blockers", []),
             "temperament_window_summary": trace.get("temperament_window_summary", {}),
+            "probability_field": trace.get("probability_field", {}),
+            "token_state": trace.get("token_state", {}),
+            "cross_layer_coupling_verdict": trace.get("cross_layer_coupling_verdict", {}),
+            "renderer_decision_integrity": trace.get("renderer_decision_integrity", {}),
+            "memory_write_gate": trace.get("memory_write_gate", {}),
+            "failure_taxonomy": self._failure_taxonomy_from_trace(trace),
+            "conflict_arbitration": trace.get("conflict_arbitration", self._conflict_arbitration_summary(trace)),
+            "action_probability_explanation": self._action_probability_explanation(
+                trace,
+                target_action=str(trace.get("sampled_action", "")),
+            ),
             "dream": self._dream_summary_from_trace(trace),
             "state_snapshot": {
                 "mode": trace["state_snapshot"]["mode"],
@@ -5894,9 +7587,286 @@ class RuntimeController:
             "storage": trace.get("storage", self._trace_storage_payload()),
         }
 
+    def _action_layer_from_trace(self, trace: dict[str, Any]) -> dict[str, Any]:
+        probability_field = canonical_probability_field_payload(trace)
+        action_layer = probability_field.get("action", {})
+        return action_layer if isinstance(action_layer, dict) else {}
+
+    def _token_state_from_trace(self, trace: dict[str, Any]) -> dict[str, Any]:
+        probability_field = canonical_probability_field_payload(trace)
+        token_state = probability_field.get("token_state", {})
+        return token_state if isinstance(token_state, dict) else {}
+
+    def _cross_layer_coupling_verdict(self, trace: dict[str, Any]) -> dict[str, Any]:
+        probability_field = canonical_probability_field_payload(trace)
+        couplings = probability_field.get("couplings", []) if isinstance(probability_field, dict) else []
+        allowed_pairs = {
+            ("context", "memory", "context_route"),
+            ("memory", "action", "memory_prior"),
+            ("action", "token", "render_plan"),
+        }
+        observed_pairs: list[str] = []
+        illegal_pairs: list[str] = []
+        for row in couplings:
+            if not isinstance(row, dict):
+                continue
+            pair = (
+                str(row.get("source_layer", "")),
+                str(row.get("target_layer", "")),
+                str(row.get("carrier_signal", "")),
+            )
+            joined = "->".join(pair)
+            observed_pairs.append(joined)
+            if pair not in allowed_pairs or not bool(row.get("enabled", True)):
+                illegal_pairs.append(joined)
+        return {
+            "observed_pairs": observed_pairs,
+            "illegal_pairs": illegal_pairs,
+            "legal": not illegal_pairs,
+        }
+
+    def _renderer_decision_integrity(self, trace: dict[str, Any]) -> dict[str, Any]:
+        raw = dict(trace.get("renderer_decision_integrity", {}) or {})
+        sampled_action = str(trace.get("sampled_action") or "")
+        render_plan = dict(trace.get("render_plan", {}) or {})
+        probability_field = dict(trace.get("probability_field", {}) or {})
+        action_layer = probability_field.get("action", {}) if isinstance(probability_field.get("action", {}), dict) else {}
+        winner_posterior = dict(action_layer.get("winner_posterior", {}) or {})
+        locked_action = str(raw.get("locked_action") or sampled_action)
+        render_plan_action = str(raw.get("render_plan_action") or render_plan.get("action") or "")
+        post_render_action = str(raw.get("post_render_action") or sampled_action)
+        winner_target = str(raw.get("winner_target") or action_layer.get("winner_target") or sampled_action)
+        mutation_reasons: list[str] = []
+        if locked_action and render_plan_action and render_plan_action != locked_action:
+            mutation_reasons.append("render_plan_action_mismatch")
+        if locked_action and post_render_action and post_render_action != locked_action:
+            mutation_reasons.append("post_render_action_mismatch")
+        if locked_action and winner_target and winner_target != locked_action:
+            mutation_reasons.append("probability_field_winner_mismatch")
+        return {
+            "locked_action": locked_action,
+            "render_plan_action": render_plan_action,
+            "post_render_action": post_render_action,
+            "winner_target": winner_target,
+            "locked_probability": round(float(raw.get("locked_probability", winner_posterior.get(locked_action or sampled_action, 0.0) or 0.0)), 6),
+            "gate_at_render": round(float(raw.get("gate_at_render", render_plan.get("safety_constraints", {}).get("gate", 1.0) or 0.0)), 6),
+            "auth_guard_action": str(raw.get("auth_guard_action") or trace.get("authenticity", {}).get("guard_action") or ""),
+            "decision_mutated": bool(mutation_reasons),
+            "renderer_consumes_final_field": not mutation_reasons,
+            "mutation_reasons": mutation_reasons,
+        }
+
+    def _competing_peaks(self, action_layer: dict[str, Any], *, limit: int = 3) -> list[dict[str, Any]]:
+        peak_rows = action_layer.get("counterfactual_top_peaks", [])
+        if isinstance(peak_rows, list) and peak_rows:
+            rows: list[dict[str, Any]] = []
+            for item in peak_rows[:limit]:
+                if not isinstance(item, dict):
+                    continue
+                rows.append(
+                    {
+                        "action": str(item.get("target", "")),
+                        "final_energy": round(float(item.get("final_energy", 0.0) or 0.0), 6),
+                        "posterior": round(float(item.get("posterior", 0.0) or 0.0), 6),
+                    }
+                )
+            if rows:
+                return rows
+        final_energy = action_layer.get("final_energy", {})
+        if not isinstance(final_energy, dict):
+            return []
+        rows = []
+        for action_name, value in final_energy.items():
+            if value == float("-inf"):
+                continue
+            rows.append(
+                {
+                    "action": action_name,
+                    "final_energy": round(float(value), 6),
+                    "posterior": round(float(action_layer.get("winner_posterior", {}).get(action_name, 0.0) or 0.0), 6),
+                }
+            )
+        rows.sort(key=lambda item: (item["posterior"], item["final_energy"]), reverse=True)
+        return rows[:limit]
+
+    def _stacked_action_contributions(
+        self,
+        action_layer: dict[str, Any],
+        target_action: str,
+        *,
+        limit: int = 16,
+    ) -> list[dict[str, Any]]:
+        audit_rows = action_layer.get("contribution_audit", [])
+        if not isinstance(audit_rows, list):
+            return []
+        stacked: list[dict[str, Any]] = []
+        for row in audit_rows:
+            if not isinstance(row, dict):
+                continue
+            projected = row.get("delta_projected", {}) if isinstance(row.get("delta_projected"), dict) else {}
+            normalized = row.get("delta_normalized", {}) if isinstance(row.get("delta_normalized"), dict) else {}
+            hard_masked = list(row.get("hard_masked_targets", []) or [])
+            touched = target_action in projected or target_action in normalized or target_action in hard_masked
+            if not touched:
+                continue
+            normalized_value = round(float(normalized.get(target_action, 0.0) or 0.0), 6)
+            projected_value = round(float(projected.get(target_action, 0.0) or 0.0), 6)
+            if target_action in hard_masked:
+                direction = "block"
+            elif normalized_value > 0.0:
+                direction = "support"
+            elif normalized_value < 0.0 or projected_value < 0.0:
+                direction = "suppress"
+            else:
+                direction = "neutral"
+            stacked.append(
+                {
+                    "module_name": row.get("module_name", ""),
+                    "module_type": row.get("module_type", ""),
+                    "direction": direction,
+                    "delta_projected": projected_value,
+                    "delta_normalized": normalized_value,
+                    "hard_masked": target_action in hard_masked,
+                    "trace_reason": row.get("trace_reason", ""),
+                    "projection_reason": row.get("projection_reason", ""),
+                }
+            )
+        seen_modules = {item["module_name"] for item in stacked}
+        if len(stacked) < limit:
+            background_rows: list[dict[str, Any]] = []
+            for row in audit_rows:
+                if not isinstance(row, dict):
+                    continue
+                module_name = str(row.get("module_name", "") or "")
+                if not module_name or module_name in seen_modules:
+                    continue
+                projected = row.get("delta_projected", {}) if isinstance(row.get("delta_projected"), dict) else {}
+                normalized = row.get("delta_normalized", {}) if isinstance(row.get("delta_normalized"), dict) else {}
+                background_rows.append(
+                    {
+                        "module_name": module_name,
+                        "module_type": row.get("module_type", ""),
+                        "direction": "background",
+                        "delta_projected": round(
+                            max((abs(float(value)) for value in projected.values()), default=0.0),
+                            6,
+                        ),
+                        "delta_normalized": round(
+                            max((abs(float(value)) for value in normalized.values()), default=0.0),
+                            6,
+                        ),
+                        "hard_masked": False,
+                        "trace_reason": row.get("trace_reason", ""),
+                        "projection_reason": row.get("projection_reason", ""),
+                    }
+                )
+            background_rows.sort(
+                key=lambda item: (
+                    0 if item["module_name"] in {"SkillExecutor", "LongRunAnalyzer"} else 1,
+                    -abs(float(item["delta_normalized"])),
+                    -abs(float(item["delta_projected"])),
+                )
+            )
+            stacked.extend(background_rows[: max(0, limit - len(stacked))])
+        stacked.sort(
+            key=lambda item: (
+                0 if item["hard_masked"] else 1,
+                -abs(float(item["delta_normalized"])),
+                -abs(float(item["delta_projected"])),
+            )
+        )
+        return stacked[:limit]
+
+    def _action_probability_explanation(self, trace: dict[str, Any], *, target_action: str) -> dict[str, Any]:
+        action_layer = self._action_layer_from_trace(trace)
+        final_energy = action_layer.get("final_energy", {}) if isinstance(action_layer.get("final_energy"), dict) else {}
+        winner_target = str(action_layer.get("winner_target") or trace.get("sampled_action") or "")
+        stacked = self._stacked_action_contributions(action_layer, target_action)
+        competing_peaks = self._competing_peaks(action_layer)
+        if winner_target:
+            winner_peak = next((item for item in competing_peaks if item.get("action") == winner_target), None)
+            if winner_peak is None:
+                winner_peak = {
+                    "action": winner_target,
+                    "final_energy": round(float(final_energy.get(winner_target, 0.0) or 0.0), 6)
+                    if final_energy.get(winner_target) != float("-inf")
+                    else float("-inf"),
+                    "posterior": round(float(action_layer.get("winner_posterior", {}).get(winner_target, 0.0) or 0.0), 6),
+                }
+            competing_peaks = [winner_peak] + [
+                item
+                for item in competing_peaks
+                if item.get("action") != winner_target
+            ]
+        return {
+            "target_action": target_action,
+            "winner_target": winner_target,
+            "winner_posterior": dict(action_layer.get("winner_posterior", {}) or {}),
+            "winner_energy": round(float(final_energy.get(winner_target, 0.0) or 0.0), 6) if winner_target else 0.0,
+            "target_final_energy": round(float(final_energy.get(target_action, 0.0) or 0.0), 6)
+            if target_action in final_energy and final_energy.get(target_action) != float("-inf")
+            else None,
+            "hard_masked": target_action in list(action_layer.get("hard_masked_targets", []) or []),
+            "stacked_contributions": stacked,
+            "competing_peaks": competing_peaks[:3],
+        }
+
+    def _conflict_arbitration_summary(self, trace: dict[str, Any]) -> dict[str, Any]:
+        explicit = dict(trace.get("conflict_arbitration", {}) or {})
+        action_layer = self._action_layer_from_trace(trace)
+        audit_rows = action_layer.get("contribution_audit", [])
+        conflict_row = next(
+            (
+                row
+                for row in audit_rows
+                if isinstance(row, dict) and row.get("module_name") == "ConflictMonitorAgent"
+            ),
+            {},
+        )
+        posterior = dict(conflict_row.get("posterior", {}) or {})
+        peak_clusters = list(conflict_row.get("peak_clusters", []) or [])
+        compromise_template_prior = dict(conflict_row.get("compromise_template_prior", {}) or {})
+        dependency_trace = [str(item) for item in list(conflict_row.get("dependency_trace", []) or [])]
+        winning_priority = ""
+        for item in dependency_trace:
+            if item.startswith("winning_priority:"):
+                winning_priority = item.split(":", 1)[1].strip()
+                break
+        if not winning_priority:
+            gate_rows = [item for item in trace.get("gate_decisions", []) if isinstance(item, dict) and item.get("stage") == "conflict"]
+            for row in gate_rows:
+                winning_priority = str(row.get("winning_priority") or "").strip()
+                if winning_priority:
+                    break
+        if not compromise_template_prior:
+            for row in trace.get("gate_decisions", []):
+                if not isinstance(row, dict):
+                    continue
+                template = str(row.get("template") or "").strip()
+                if template:
+                    compromise_template_prior = {template: 1.0}
+                    break
+        winner_peak = max(posterior, key=posterior.get) if posterior else ""
+        summary = {
+            "winning_priority": winning_priority,
+            "winner_peak": winner_peak,
+            "winner_peak_posterior": posterior,
+            "compromise_template_prior": compromise_template_prior,
+            "peak_clusters": peak_clusters,
+            "hard_masked_targets": list(conflict_row.get("hard_masked_targets", []) or []),
+            "trace_reason": str(conflict_row.get("trace_reason", "")),
+        }
+        if explicit:
+            merged = dict(explicit)
+            for key, value in summary.items():
+                if key not in merged or merged.get(key) in ({}, [], "", None):
+                    merged[key] = value
+            return merged
+        return summary
+
     def contribution_breakdown(self, round_ref: int | str) -> dict[str, Any]:
         trace = self.trace_round(round_ref)
-        conflict = trace.get("distribution_state", {}).get("conflict", {})
+        conflict = dict(trace.get("conflict_arbitration", {}) or {})
         return {
             "round_id": trace["round_id"],
             "sampled_action": trace["sampled_action"],
@@ -5908,6 +7878,53 @@ class RuntimeController:
                 "post_error_adjustment": conflict.get("post_error_adjustment", {}),
                 "ledger_tail": conflict.get("repair_ledger_tail", []),
             },
+            "storage": trace.get("storage", self._trace_storage_payload()),
+        }
+
+    def trace_probability_field(self, round_ref: int | str) -> dict[str, Any]:
+        trace = self.trace_round(round_ref)
+        return {
+            "round_id": trace["round_id"],
+            "sampled_action": trace["sampled_action"],
+            "probability_field": trace.get("probability_field", {}),
+            "token_state": trace.get("token_state", self._token_state_from_trace(trace)),
+            "cross_layer_coupling_verdict": trace.get(
+                "cross_layer_coupling_verdict",
+                self._cross_layer_coupling_verdict(trace),
+            ),
+            "storage": trace.get("storage", self._trace_storage_payload()),
+        }
+
+    def trace_probability_layer(self, round_ref: int | str, *, layer: str) -> dict[str, Any]:
+        normalized_layer = str(layer or "").strip().lower()
+        if normalized_layer not in {"context", "memory", "action", "token"}:
+            raise ValueError(f"unsupported probability layer: {layer}")
+        trace = self.trace_round(round_ref)
+        probability_field = dict(trace.get("probability_field", {}) or {})
+        layer_state = probability_field.get(normalized_layer, {})
+        return {
+            "round_id": trace["round_id"],
+            "sampled_action": trace["sampled_action"],
+            "layer": normalized_layer,
+            "layer_state": layer_state if isinstance(layer_state, dict) else {},
+            "token_state": trace.get("token_state", self._token_state_from_trace(trace)),
+            "storage": trace.get("storage", self._trace_storage_payload()),
+        }
+
+    def trace_action_probability(self, round_ref: int | str, *, action: str) -> dict[str, Any]:
+        target_action = str(action or "").strip()
+        if not target_action:
+            raise ValueError("action is required")
+        trace = self.trace_round(round_ref)
+        return {
+            "round_id": trace["round_id"],
+            "sampled_action": trace["sampled_action"],
+            "action": target_action,
+            "action_probability_explanation": self._action_probability_explanation(trace, target_action=target_action),
+            "conflict_arbitration": trace.get(
+                "conflict_arbitration",
+                self._conflict_arbitration_summary(trace),
+            ),
             "storage": trace.get("storage", self._trace_storage_payload()),
         }
 
@@ -6035,11 +8052,16 @@ class RuntimeController:
 
     def metrics_summary(self) -> dict[str, Any]:
         payload = self.long_run_analyzer.metrics_summary()
+        motivation = self.motivation_metrics()
+        endogenous = self.endogenous_metrics()
         payload.update(
             {
                 "boundary_violation_count": self._subjectivity_metrics()["boundary_violation_count"],
                 "external_to_internal_ratio": self._subjectivity_metrics()["external_to_internal_ratio"],
                 "endogenous_intent_rate": self._subjectivity_metrics()["endogenous_intent_rate"],
+                "motivation_active_rate": motivation["active_rate"],
+                "motivation_activation_score_avg": motivation["activation_score_avg"],
+                "endogenous_round_rate": endogenous["endogenous_round_rate"],
             }
         )
         payload["storage"] = self._trace_storage_payload()
@@ -6054,6 +8076,42 @@ class RuntimeController:
         payload = self.long_run_analyzer.vitality_timeline()
         payload["storage"] = self._trace_storage_payload()
         return payload
+
+    def motivation_metrics(self) -> dict[str, Any]:
+        rounds = self.trace_store.list_rounds()
+        active_rounds = [row for row in rounds if dict(row.get("motivation_pool", {}) or {}).get("active_motivations")]
+        activation_scores = [
+            float(dict(row.get("motivation_pool", {}) or {}).get("endogenous_activation_score", 0.0) or 0.0)
+            for row in active_rounds
+        ]
+        latest = active_rounds[-1] if active_rounds else {}
+        return {
+            "total_rounds": len(rounds),
+            "active_rounds": len(active_rounds),
+            "active_rate": round(len(active_rounds) / max(len(rounds), 1), 4),
+            "activation_score_avg": round(sum(activation_scores) / max(len(activation_scores), 1), 4),
+            "latest_pool": dict(latest.get("motivation_pool", {}) or {}),
+            "storage": self._trace_storage_payload(),
+        }
+
+    def endogenous_metrics(self) -> dict[str, Any]:
+        rounds = self.trace_store.list_rounds()
+        endogenous_rounds = [row for row in rounds if row.get("cause_type") == "endogenous"]
+        trigger_types: dict[str, int] = {}
+        for row in endogenous_rounds:
+            reason = dict(row.get("endogenous_tick_reason", {}) or {})
+            latest = dict(reason.get("latest_trigger", {}) or {})
+            trigger_type = str(latest.get("trigger_type", row.get("mode", "")) or "")
+            if trigger_type:
+                trigger_types[trigger_type] = trigger_types.get(trigger_type, 0) + 1
+        return {
+            "total_rounds": len(rounds),
+            "endogenous_rounds": len(endogenous_rounds),
+            "endogenous_round_rate": round(len(endogenous_rounds) / max(len(rounds), 1), 4),
+            "trigger_types": trigger_types,
+            "subjectivity": self._subjectivity_metrics(),
+            "storage": self._trace_storage_payload(),
+        }
 
     def agent_list(self) -> list[dict[str, Any]]:
         state = self.load_runtime_state()
@@ -6201,27 +8259,63 @@ class RuntimeController:
             "round_id": round_id,
             "original_action": trace["sampled_action"],
             "replayed_action": trace["sampled_action"],
-            "candidate_distribution": trace.get("candidate_distribution", trace.get("distribution_state", {}).get("p_final", {})),
+            "candidate_distribution": self._candidate_distribution_from_trace(trace),
             "ablations": ablations,
             "seed": seed,
             "storage": self._trace_storage_payload(),
         }
 
+    def replay_motivation(self, round_id: int) -> dict[str, Any]:
+        trace = self.trace_round(round_id)
+        return {
+            "round_id": round_id,
+            "sampled_action": trace["sampled_action"],
+            "motivation_pool": trace.get("motivation_pool", {}),
+            "motivation_feedback": trace.get("motivation_feedback", {}),
+            "endogenous_tick_reason": trace.get("endogenous_tick_reason", {}),
+            "endogenous_policy_shift": trace.get("endogenous_policy_shift", {}),
+            "storage": trace.get("storage", self._trace_storage_payload()),
+        }
+
+    def why_motivation(self, round_ref: int | str) -> dict[str, Any]:
+        trace = self.trace_round(round_ref)
+        return {
+            "round_id": trace["round_id"],
+            "sampled_action": trace["sampled_action"],
+            "cause_type": trace.get("cause_type", "external_stimulus"),
+            "motivation_pool": trace.get("motivation_pool", {}),
+            "motivation_feedback": trace.get("motivation_feedback", {}),
+            "endogenous_tick_reason": trace.get("endogenous_tick_reason", {}),
+            "endogenous_policy_shift": trace.get("endogenous_policy_shift", {}),
+            "storage": trace.get("storage", self._trace_storage_payload()),
+        }
+
     def why_not(self, round_id: int, action: str) -> dict[str, Any]:
         trace = self.trace_round(round_id)
-        candidate_distribution = trace.get("candidate_distribution", trace.get("distribution_state", {}).get("p_final", {}))
+        candidate_distribution = self._candidate_distribution_from_trace(trace)
+        action_explanation = self._action_probability_explanation(trace, target_action=action)
         blocked_by = []
         if action not in candidate_distribution:
             blocked_by.append("not_proposed")
-        if trace.get("distribution_state", {}).get("plausibility_fail_score", 0.0) >= self.config["thresholds"]["thresholds"]["plausibility_fail"]:
-            blocked_by.append("plausibility_guard")
+        gate_decisions = [item for item in trace.get("gate_decisions", []) if isinstance(item, dict)]
+        for item in gate_decisions:
+            if not item.get("allowed", True):
+                blocked_by.append(str(item.get("owner") or item.get("stage") or "gate"))
+        blocked_by.extend(
+            item["module_name"]
+            for item in action_explanation["stacked_contributions"]
+            if item["hard_masked"] or item["direction"] in {"block", "suppress"}
+        )
         blocked_by.extend(item["agent_name"] for item in trace.get("top_drivers", [])[:2])
         return {
             "round_id": round_id,
             "action": action,
             "selected_action": trace["sampled_action"],
             "candidate_score": candidate_distribution.get(action, 0.0),
-            "blocked_by": blocked_by,
+            "blocked_by": list(dict.fromkeys(blocked_by)),
+            "stacked_contributions": action_explanation["stacked_contributions"],
+            "competing_peaks": action_explanation["competing_peaks"],
+            "conflict_arbitration": self._conflict_arbitration_summary(trace),
             "storage": self._trace_storage_payload(),
         }
 
@@ -6247,7 +8341,7 @@ class RuntimeController:
     def conflict_timeline(self) -> dict[str, Any]:
         points = []
         for trace in self.trace_store.list_rounds():
-            conflict = trace.get("distribution_state", {}).get("conflict", {})
+            conflict = dict(trace.get("conflict_arbitration", {}) or self._conflict_arbitration_summary(trace))
             ledger_tail = conflict.get("repair_ledger_tail", [])
             points.append(
                 {
@@ -6305,31 +8399,23 @@ class RuntimeController:
             appearances = 0
             approx_deltas: list[float] = []
             for trace in rounds:
-                proposal_rows = [item for item in trace.get("proposal_summaries", []) if item.get("agent_name") == module_name]
-                if not proposal_rows:
+                action_layer = self._action_layer_from_trace(trace)
+                audit_rows = [
+                    item
+                    for item in action_layer.get("contribution_audit", [])
+                    if isinstance(item, dict) and item.get("module_name") == module_name
+                ]
+                if not audit_rows:
                     continue
                 appearances += 1
                 sampled_action = trace.get("sampled_action")
-                distribution_state = trace.get("distribution_state", {})
-                p_with = distribution_state.get("p_final", {})
-                p_without = dict(distribution_state.get("p_raw", {}))
-                for row in proposal_rows:
-                    for action_name, delta in row.get("delta_p", {}).items():
-                        p_without[action_name] = max(
-                            0.0,
-                            p_without.get(action_name, 0.0) - row.get("weight_applied", 1.0) * row.get("confidence", 0.0) * delta,
-                        )
-                filtered = {
-                    action_name: p_without.get(action_name, 0.0) * distribution_state.get("gate", {}).get(action_name, 1.0)
-                    for action_name in p_without
-                }
-                normalized_without = self._normalize(filtered)
-                approx_deltas.append(
-                    round(
-                        p_with.get(sampled_action, 0.0) - normalized_without.get(sampled_action, 0.0),
-                        6,
-                    )
-                )
+                module_gain = 0.0
+                for row in audit_rows:
+                    normalized = dict(row.get("delta_normalized", {}) or {})
+                    if sampled_action in list(row.get("hard_masked_targets", []) or []):
+                        module_gain -= 1.0
+                    module_gain += float(normalized.get(sampled_action, 0.0) or 0.0)
+                approx_deltas.append(round(module_gain, 6))
             modules.append(
                 {
                     "module": module_name,
@@ -6350,7 +8436,7 @@ class RuntimeController:
                     "sampled_action": row["sampled_action"],
                     "mode": row["mode"],
                     "budget_remaining": row.get("state_snapshot", {}).get("budget_remaining"),
-                    "conflict_score": row.get("distribution_state", {}).get("conflict", {}).get("total_score", 0.0),
+                    "conflict_score": (row.get("conflict_arbitration", {}) or {}).get("total_score", 0.0),
                     "cause_type": row.get("cause_type", "external_stimulus"),
                 }
                 for row in rounds
@@ -6362,10 +8448,500 @@ class RuntimeController:
     def metrics_heatmap(self) -> dict[str, Any]:
         rounds = self.trace_store.list_rounds()
         actions: dict[str, int] = {}
+        action_module_heatmap: dict[str, dict[str, float]] = {}
+        action_block_heatmap: dict[str, dict[str, int]] = {}
         for row in rounds:
             action = str(row.get("sampled_action", "unknown"))
             actions[action] = actions.get(action, 0) + 1
-        return {"actions": actions, "storage": self._trace_storage_payload()}
+            action_layer = self._action_layer_from_trace(row)
+            for audit in action_layer.get("contribution_audit", []) or []:
+                if not isinstance(audit, dict):
+                    continue
+                module_name = str(audit.get("module_name", "") or "unknown")
+                for target, value in dict(audit.get("delta_normalized", {}) or {}).items():
+                    module_map = action_module_heatmap.setdefault(str(target), {})
+                    module_map[module_name] = round(module_map.get(module_name, 0.0) + float(value), 6)
+                for target in list(audit.get("hard_masked_targets", []) or []):
+                    block_map = action_block_heatmap.setdefault(str(target), {})
+                    block_map[module_name] = block_map.get(module_name, 0) + 1
+        return {
+            "actions": actions,
+            "action_module_heatmap": action_module_heatmap,
+            "action_block_heatmap": action_block_heatmap,
+            "storage": self._trace_storage_payload(),
+        }
+
+    def _bypass_detection_summary(self, rounds: list[dict[str, Any]]) -> dict[str, Any]:
+        violations: list[dict[str, Any]] = []
+        legacy_bridge_residues: list[dict[str, Any]] = []
+        for trace in rounds:
+            action_layer = self._action_layer_from_trace(trace)
+            audit_rows = [item for item in action_layer.get("contribution_audit", []) if isinstance(item, dict)]
+            action_modules = {
+                str(item.get("module_name", ""))
+                for item in audit_rows
+                if item.get("module_name")
+            }
+            proposal_modules = {
+                str(item.get("agent_name", ""))
+                for item in trace.get("proposal_summaries", [])
+                if not item.get("veto", False) and item.get("agent_name")
+            }
+            missing_modules = sorted(module for module in proposal_modules if module not in action_modules)
+            if missing_modules:
+                violations.append(
+                    {
+                        "round_id": trace.get("round_id"),
+                        "type": "missing_action_contribution",
+                        "modules": missing_modules,
+                    }
+                )
+            if not trace.get("probability_field", {}).get("action", {}).get("contribution_audit"):
+                violations.append(
+                    {
+                        "round_id": trace.get("round_id"),
+                        "type": "empty_action_audit",
+                        "modules": [],
+                    }
+                )
+            legacy_rows = [
+                {
+                    "round_id": trace.get("round_id"),
+                    "module_name": str(item.get("module_name", "")),
+                    "projection_reason": str(item.get("projection_reason", "")),
+                }
+                for item in audit_rows
+                if str(item.get("projection_reason", "")).startswith("legacy_bundle:")
+            ]
+            legacy_bridge_residues.extend(legacy_rows)
+        return {
+            "violation_count": len(violations),
+            "violations": violations,
+            "legacy_bridge_residue_count": len(legacy_bridge_residues),
+            "legacy_bridge_residues": legacy_bridge_residues,
+            "clean_round_rate": round((len(rounds) - len({item["round_id"] for item in violations})) / max(len(rounds), 1), 4),
+        }
+
+    def _parallel_evidence_summary(self, rounds: list[dict[str, Any]]) -> dict[str, Any]:
+        observed_groups: set[str] = set()
+        groups_with_overlap: set[str] = set()
+        round_count_with_parallel = 0
+        samples: list[dict[str, Any]] = []
+        for trace in rounds:
+            parallel_rows = [row for row in trace.get("parallel_traces", []) if isinstance(row, dict) and row.get("parallel_group")]
+            if parallel_rows:
+                round_count_with_parallel += 1
+            by_group: dict[str, list[dict[str, Any]]] = {}
+            for row in parallel_rows:
+                group = str(row.get("parallel_group"))
+                observed_groups.add(group)
+                by_group.setdefault(group, []).append(row)
+            for group, items in by_group.items():
+                items = sorted(items, key=lambda item: float(item.get("started_at_ms", 0.0) or 0.0))
+                overlap = False
+                for idx, current in enumerate(items):
+                    current_start = float(current.get("started_at_ms", 0.0) or 0.0)
+                    current_end = float(current.get("finished_at_ms", current_start) or current_start)
+                    for later in items[idx + 1 :]:
+                        later_start = float(later.get("started_at_ms", 0.0) or 0.0)
+                        later_end = float(later.get("finished_at_ms", later_start) or later_start)
+                        if later_start <= current_end and current_start <= later_end:
+                            overlap = True
+                            break
+                    if overlap:
+                        groups_with_overlap.add(group)
+                        break
+                if len(samples) < 8:
+                    samples.append(
+                        {
+                            "round_id": trace.get("round_id"),
+                            "parallel_group": group,
+                            "task_count": len(items),
+                            "overlap_detected": overlap,
+                        }
+                    )
+        return {
+            "observed_groups": sorted(observed_groups),
+            "groups_with_overlap": sorted(groups_with_overlap),
+            "parallel_round_rate": round(round_count_with_parallel / max(len(rounds), 1), 4),
+            "true_parallel_group_rate": round(len(groups_with_overlap) / max(len(observed_groups), 1), 4),
+            "samples": samples,
+        }
+
+    def _scale_consistency_summary(self, rounds: list[dict[str, Any]]) -> dict[str, Any]:
+        rounds_evaluated = 0
+        clipped_contribution_count = 0
+        total_contribution_count = 0
+        overdominant_rounds = 0
+        max_module_shares: list[float] = []
+        samples: list[dict[str, Any]] = []
+        for trace in rounds:
+            action_layer = self._action_layer_from_trace(trace)
+            audit_rows = [row for row in action_layer.get("contribution_audit", []) if isinstance(row, dict)]
+            if not audit_rows:
+                continue
+            rounds_evaluated += 1
+            per_module_mass: dict[str, float] = {}
+            for row in audit_rows:
+                total_contribution_count += 1
+                stats = row.get("stats", {}) if isinstance(row.get("stats"), dict) else {}
+                if bool(stats.get("clipped", False)):
+                    clipped_contribution_count += 1
+                normalized = dict(row.get("delta_normalized", {}) or {})
+                mass = sum(abs(float(value)) for value in normalized.values())
+                module_name = str(row.get("module_name", "") or "unknown")
+                per_module_mass[module_name] = per_module_mass.get(module_name, 0.0) + mass
+            total_mass = sum(per_module_mass.values())
+            max_share = max((mass / total_mass) for mass in per_module_mass.values()) if total_mass > 0 else 0.0
+            max_module_shares.append(max_share)
+            if len(per_module_mass) >= 2 and max_share >= 0.85:
+                overdominant_rounds += 1
+            if len(samples) < 8:
+                dominant_module = max(per_module_mass, key=per_module_mass.get) if per_module_mass else ""
+                samples.append(
+                    {
+                        "round_id": trace.get("round_id"),
+                        "dominant_module": dominant_module,
+                        "max_module_share": round(max_share, 4),
+                        "module_count": len(per_module_mass),
+                    }
+                )
+        sorted_shares = sorted(max_module_shares)
+        p95_index = min(len(sorted_shares) - 1, max(0, math.ceil(len(sorted_shares) * 0.95) - 1)) if sorted_shares else 0
+        p95_share = sorted_shares[p95_index] if sorted_shares else 0.0
+        return {
+            "rounds_evaluated": rounds_evaluated,
+            "clipped_contribution_rate": round(clipped_contribution_count / max(total_contribution_count, 1), 4),
+            "overdominant_round_rate": round(overdominant_rounds / max(rounds_evaluated, 1), 4),
+            "max_module_share_p95": round(p95_share, 4),
+            "samples": samples,
+        }
+
+    def _cross_layer_coupling_summary(self, rounds: list[dict[str, Any]]) -> dict[str, Any]:
+        allowed_pairs = {
+            ("context", "memory", "context_route"),
+            ("memory", "action", "memory_prior"),
+            ("action", "token", "render_plan"),
+        }
+        pair_hits: dict[str, int] = {"->".join(pair): 0 for pair in allowed_pairs}
+        observed_pairs: set[str] = set()
+        illegal: list[dict[str, Any]] = []
+        compliant_rounds = 0
+        rounds_with_couplings = 0
+        for trace in rounds:
+            probability_field = trace.get("probability_field", {})
+            couplings = probability_field.get("couplings", []) if isinstance(probability_field, dict) else []
+            if not couplings:
+                continue
+            rounds_with_couplings += 1
+            round_illegal = False
+            round_pairs: set[str] = set()
+            for row in couplings:
+                if not isinstance(row, dict):
+                    continue
+                pair = (
+                    str(row.get("source_layer", "")),
+                    str(row.get("target_layer", "")),
+                    str(row.get("carrier_signal", "")),
+                )
+                joined = "->".join(pair)
+                observed_pairs.add(joined)
+                round_pairs.add(joined)
+                if pair not in allowed_pairs or not bool(row.get("enabled", True)) or not str(row.get("allowed_phase", "")):
+                    round_illegal = True
+                    illegal.append(
+                        {
+                            "round_id": trace.get("round_id"),
+                            "source_layer": pair[0],
+                            "target_layer": pair[1],
+                            "carrier_signal": pair[2],
+                        }
+                    )
+            for allowed in pair_hits:
+                if allowed in round_pairs:
+                    pair_hits[allowed] += 1
+            if not round_illegal:
+                compliant_rounds += 1
+        return {
+            "observed_pairs": sorted(observed_pairs),
+            "pair_coverage": {
+                pair: round(count / max(rounds_with_couplings, 1), 4)
+                for pair, count in sorted(pair_hits.items())
+            },
+            "illegal_count": len(illegal),
+            "illegal_couplings": illegal,
+            "compliant_round_rate": round(compliant_rounds / max(rounds_with_couplings, 1), 4),
+        }
+
+    def _renderer_decision_integrity_summary(self, rounds: list[dict[str, Any]]) -> dict[str, Any]:
+        violations: list[dict[str, Any]] = []
+        locked_rounds = 0
+        samples: list[dict[str, Any]] = []
+        for trace in rounds:
+            integrity = self._renderer_decision_integrity(trace)
+            if integrity["renderer_consumes_final_field"]:
+                locked_rounds += 1
+            else:
+                violations.append(
+                    {
+                        "round_id": trace.get("round_id"),
+                        "locked_action": integrity["locked_action"],
+                        "render_plan_action": integrity["render_plan_action"],
+                        "post_render_action": integrity["post_render_action"],
+                        "winner_target": integrity["winner_target"],
+                        "mutation_reasons": integrity["mutation_reasons"],
+                    }
+                )
+            if len(samples) < 8:
+                samples.append(
+                    {
+                        "round_id": trace.get("round_id"),
+                        "locked_action": integrity["locked_action"],
+                        "auth_guard_action": integrity["auth_guard_action"],
+                        "decision_mutated": integrity["decision_mutated"],
+                    }
+                )
+        return {
+            "violation_count": len(violations),
+            "violations": violations,
+            "decision_lock_rate": round(locked_rounds / max(len(rounds), 1), 4),
+            "samples": samples,
+        }
+
+    def _memory_write_gate_summary(self, rounds: list[dict[str, Any]]) -> dict[str, Any]:
+        observed = 0
+        blocked = 0
+        reasons: dict[str, int] = {}
+        samples: list[dict[str, Any]] = []
+        for trace in rounds:
+            gate = dict(trace.get("memory_write_gate", {}) or {})
+            if not gate:
+                continue
+            observed += 1
+            reason = str(gate.get("reason", "unknown"))
+            if bool(gate.get("suppressed", False)):
+                blocked += 1
+                reasons[reason] = reasons.get(reason, 0) + 1
+            if len(samples) < 8:
+                samples.append(
+                    {
+                        "round_id": trace.get("round_id"),
+                        "cue": gate.get("cue"),
+                        "suppressed": bool(gate.get("suppressed", False)),
+                        "reason": reason,
+                    }
+                )
+        return {
+            "observed_round_rate": round(observed / max(len(rounds), 1), 4),
+            "suppressed_round_count": blocked,
+            "suppressed_round_rate": round(blocked / max(len(rounds), 1), 4),
+            "suppressed_reasons": reasons,
+            "samples": samples,
+        }
+
+    def _failure_taxonomy_from_trace(self, trace: dict[str, Any]) -> list[str]:
+        probability_field = canonical_probability_field_payload(trace)
+        seen: set[str] = set()
+        ordered: list[str] = []
+
+        def collect(values: object) -> None:
+            if not isinstance(values, list):
+                return
+            for item in values:
+                label = str(item).strip()
+                if not label or label in seen:
+                    continue
+                seen.add(label)
+                ordered.append(label)
+
+        for layer_name in ("action", "token"):
+            layer = probability_field.get(layer_name, {}) if isinstance(probability_field, dict) else {}
+            if not isinstance(layer, dict):
+                continue
+            collect(layer.get("failure_taxonomy"))
+            for audit_row in list(layer.get("contribution_audit", []) or []):
+                if isinstance(audit_row, dict):
+                    collect(audit_row.get("failure_taxonomy"))
+        return ordered
+
+    def _failure_taxonomy_summary(self, rounds: list[dict[str, Any]]) -> dict[str, Any]:
+        observed = 0
+        counts: dict[str, int] = {}
+        round_counts: dict[str, int] = {}
+        samples: list[dict[str, Any]] = []
+        total = max(len(rounds), 1)
+        for trace in rounds:
+            labels = self._failure_taxonomy_from_trace(trace)
+            if not labels:
+                continue
+            observed += 1
+            for label in labels:
+                counts[label] = counts.get(label, 0) + 1
+                round_counts[label] = round_counts.get(label, 0) + 1
+            if len(samples) < 8:
+                samples.append({"round_id": trace.get("round_id"), "failure_taxonomy": labels})
+        return {
+            "observed_round_rate": round(observed / total, 4),
+            "counts": counts,
+            "round_rates": {label: round(count / total, 4) for label, count in sorted(round_counts.items())},
+            "samples": samples,
+        }
+
+    def _conflict_arbitration_acceptance_summary(self, rounds: list[dict[str, Any]]) -> dict[str, Any]:
+        observed = 0
+        winning_priority_count = 0
+        peak_cluster_count = 0
+        compromise_template_prior_count = 0
+        samples: list[dict[str, Any]] = []
+        for trace in rounds:
+            summary = self._conflict_arbitration_summary(trace)
+            if not summary:
+                continue
+            observed += 1
+            if str(summary.get("winning_priority", "")):
+                winning_priority_count += 1
+            if list(summary.get("peak_clusters", []) or []):
+                peak_cluster_count += 1
+            if dict(summary.get("compromise_template_prior", {}) or {}):
+                compromise_template_prior_count += 1
+            if len(samples) < 8:
+                samples.append(
+                    {
+                        "round_id": trace.get("round_id"),
+                        "winning_priority": summary.get("winning_priority"),
+                        "winner_peak": summary.get("winner_peak"),
+                        "peak_cluster_count": len(list(summary.get("peak_clusters", []) or [])),
+                        "compromise_template_prior": dict(summary.get("compromise_template_prior", {}) or {}),
+                    }
+                )
+        return {
+            "observed_round_rate": round(observed / max(len(rounds), 1), 4),
+            "winning_priority_coverage": round(winning_priority_count / max(observed, 1), 4),
+            "peak_cluster_coverage": round(peak_cluster_count / max(observed, 1), 4),
+            "compromise_template_prior_coverage": round(compromise_template_prior_count / max(observed, 1), 4),
+            "samples": samples,
+        }
+
+    def _long_run_prior_summary(self, rounds: list[dict[str, Any]]) -> dict[str, Any]:
+        observed = 0
+        online_projection_count = 0
+        blocked_action_rounds = 0
+        conflict_subordinated_rounds = 0
+        auth_penalty_rounds = 0
+        authenticity_subordinated_rounds = 0
+        continuity_windows: list[float] = []
+        consistency_scores: list[float] = []
+        volatility_signals: list[float] = []
+        samples: list[dict[str, Any]] = []
+        for trace in rounds:
+            projection = dict(trace.get("long_run_projection", {}) or {})
+            if not projection:
+                continue
+            observed += 1
+            online_prior = dict(projection.get("online_prior", {}) or {})
+            if online_prior:
+                online_projection_count += 1
+                continuity_windows.append(float(online_prior.get("continuity_window", 0.0) or 0.0))
+                consistency_scores.append(float(online_prior.get("self_consistency_score", 0.0) or 0.0))
+                volatility_signals.append(float(online_prior.get("volatility_signal", 0.0) or 0.0))
+            conflict_summary = self._conflict_arbitration_summary(trace)
+            blocked_actions = {
+                str(action)
+                for action in list(conflict_summary.get("hard_masked_targets", []) or [])
+                if str(action)
+            }
+            if blocked_actions:
+                blocked_action_rounds += 1
+                p_final = self._candidate_distribution_from_trace(trace)
+                if all(p_final.get(action, 0.0) <= 0.0001 for action in blocked_actions):
+                    conflict_subordinated_rounds += 1
+            authenticity = dict(trace.get("authenticity", {}) or {})
+            candidate_penalties = {
+                str(action): float(value)
+                for action, value in dict(authenticity.get("candidate_penalties", {}) or {}).items()
+                if float(value) > 0.0
+            }
+            if candidate_penalties or float(authenticity.get("sampling_penalty_applied", 0.0) or 0.0) > 0.0:
+                auth_penalty_rounds += 1
+                sampled_action = str(trace.get("sampled_action") or "")
+                if sampled_action not in candidate_penalties:
+                    authenticity_subordinated_rounds += 1
+            if len(samples) < 8:
+                samples.append(
+                    {
+                        "round_id": trace.get("round_id"),
+                        "self_consistency_score": online_prior.get("self_consistency_score"),
+                        "volatility_signal": online_prior.get("volatility_signal"),
+                        "continuity_window": online_prior.get("continuity_window"),
+                        "blocked_actions": sorted(blocked_actions),
+                        "candidate_penalties": dict(candidate_penalties),
+                    }
+                )
+        def _avg(values: list[float]) -> float:
+            return round(sum(values) / len(values), 4) if values else 0.0
+        return {
+            "observed_round_rate": round(observed / max(len(rounds), 1), 4),
+            "online_projection_coverage": round(online_projection_count / max(observed, 1), 4),
+            "blocked_action_round_count": blocked_action_rounds,
+            "conflict_subordination_rate": round(conflict_subordinated_rounds / max(blocked_action_rounds, 1), 4),
+            "auth_penalty_round_count": auth_penalty_rounds,
+            "authenticity_subordination_rate": round(authenticity_subordinated_rounds / max(auth_penalty_rounds, 1), 4),
+            "self_consistency_score_avg": _avg(consistency_scores),
+            "volatility_signal_avg": _avg(volatility_signals),
+            "continuity_window_avg": _avg(continuity_windows),
+            "samples": samples,
+        }
+
+    def acceptance_report(self, window: int = 20) -> dict[str, Any]:
+        rounds = self.trace_store.list_rounds()[-window:]
+        total = len(rounds) or 1
+        probability_field_rounds = [row for row in rounds if row.get("probability_field")]
+        action_audit_rounds = [
+            row
+            for row in rounds
+            if row.get("probability_field", {}).get("action", {}).get("contribution_audit")
+        ]
+        token_audit_rounds = [
+            row
+            for row in rounds
+            if row.get("probability_field", {}).get("token", {}).get("contribution_audit")
+        ]
+        renderer_token_rounds = [
+            row
+            for row in token_audit_rounds
+            if any(
+                isinstance(item, dict) and item.get("module_name") == "Renderer"
+                for item in row.get("probability_field", {}).get("token", {}).get("contribution_audit", [])
+            )
+        ]
+        token_source_integrity_passes = 0
+        for row in rounds:
+            token_field = row.get("probability_field", {}).get("token", {})
+            token_audit = token_field.get("contribution_audit", []) if isinstance(token_field, dict) else []
+            if not token_audit:
+                token_source_integrity_passes += 1
+                continue
+            if all((not item.get("dependency_trace") or item.get("module_name")) for item in token_audit if isinstance(item, dict)):
+                token_source_integrity_passes += 1
+        return {
+            "window": window,
+            "rounds_considered": len(rounds),
+            "probability_field_coverage": round(len(probability_field_rounds) / total, 4),
+            "action_audit_coverage": round(len(action_audit_rounds) / total, 4),
+            "token_audit_coverage": round(len(token_audit_rounds) / total, 4),
+            "renderer_token_coverage": round(len(renderer_token_rounds) / total, 4),
+            "token_source_integrity_rate": round(token_source_integrity_passes / total, 4),
+            "bypass_detection": self._bypass_detection_summary(rounds),
+            "parallel_evidence": self._parallel_evidence_summary(rounds),
+            "scale_consistency": self._scale_consistency_summary(rounds),
+            "cross_layer_coupling": self._cross_layer_coupling_summary(rounds),
+            "conflict_arbitration": self._conflict_arbitration_acceptance_summary(rounds),
+            "long_run_prior": self._long_run_prior_summary(rounds),
+            "renderer_decision_integrity": self._renderer_decision_integrity_summary(rounds),
+            "memory_write_gate": self._memory_write_gate_summary(rounds),
+            "failure_taxonomy": self._failure_taxonomy_summary(rounds),
+            "storage": self._trace_storage_payload(),
+        }
 
     def compact_traces(self) -> dict[str, Any]:
         payload = self.export_trace_parquet(overwrite=True)
@@ -6394,9 +8970,37 @@ class RuntimeController:
         critical_conflicts = [
             item
             for item in generated_rounds
-            if item.get("distribution_state", {}).get("conflict", {}).get("total_score", 0.0)
+            if (item.get("conflict_arbitration", {}) or {}).get("total_score", 0.0)
             >= self.config["thresholds"]["thresholds"]["conflict_critical"]
         ]
+        probability_field_rounds = [item for item in generated_rounds if item.get("probability_field")]
+        action_audit_rounds = [
+            item
+            for item in generated_rounds
+            if item.get("probability_field", {}).get("action", {}).get("contribution_audit")
+        ]
+        token_audit_rounds = [
+            item
+            for item in generated_rounds
+            if item.get("probability_field", {}).get("token", {}).get("contribution_audit")
+        ]
+        renderer_token_rounds = [
+            item
+            for item in token_audit_rounds
+            if any(
+                isinstance(row, dict) and row.get("module_name") == "Renderer"
+                for row in item.get("probability_field", {}).get("token", {}).get("contribution_audit", [])
+            )
+        ]
+        token_source_integrity_passes = 0
+        for item in generated_rounds:
+            token_field = item.get("probability_field", {}).get("token", {})
+            token_audit = token_field.get("contribution_audit", []) if isinstance(token_field, dict) else []
+            if not token_audit:
+                token_source_integrity_passes += 1
+                continue
+            if all(not row.get("dependency_trace", []) or row.get("module_name") for row in token_audit if isinstance(row, dict)):
+                token_source_integrity_passes += 1
         habit_strengths = [item["strength"] for item in self.habit_top(limit=10)]
         recall_gist = sum(1 for item in generated_rounds if item.get("decision_context", {}).get("recall", {}).get("mode") == "gist")
         recall_detail = sum(1 for item in generated_rounds if item.get("decision_context", {}).get("recall", {}).get("mode") == "detail")
@@ -6420,5 +9024,14 @@ class RuntimeController:
             "relation_consistency": round(sum(1 for item in relation_checks if item) / max(len(relation_checks), 1), 4),
             "task_success_rate": round(task_successes / max(len(task_rounds), 1), 4),
             "top_driver_coverage": round(sum(1 for item in generated_rounds if len(item.get("top_drivers", [])) >= 3) / total, 4),
+            "probability_field_coverage": round(len(probability_field_rounds) / total, 4),
+            "action_audit_coverage": round(len(action_audit_rounds) / total, 4),
+            "token_audit_coverage": round(len(token_audit_rounds) / total, 4),
+            "renderer_token_coverage": round(len(renderer_token_rounds) / total, 4),
+            "token_source_integrity_rate": round(token_source_integrity_passes / total, 4),
+            "cross_layer_coupling": self._cross_layer_coupling_summary(generated_rounds),
+            "conflict_arbitration": self._conflict_arbitration_acceptance_summary(generated_rounds),
+            "long_run_prior": self._long_run_prior_summary(generated_rounds),
+            "memory_write_gate": self._memory_write_gate_summary(generated_rounds),
             "storage": self._trace_storage_payload(),
         }

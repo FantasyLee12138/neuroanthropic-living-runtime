@@ -51,6 +51,7 @@ def test_observer_reads_state_and_trace(tmp_path):
 
 def test_default_observer_app_is_available():
     assert default_app.title == "NALR Observer"
+    assert default_app.version == "0.6.0"
 
 
 def test_observer_core_routes_are_async_handlers(tmp_path):
@@ -264,16 +265,29 @@ def test_observer_state_and_metrics_expose_subjectivity_boundary_metrics(tmp_pat
 
     state_response = client.get("/state")
     metrics_response = client.get("/metrics/summary")
+    motivation_response = client.get("/metrics/motivation")
+    endogenous_response = client.get("/metrics/endogenous")
     timeline_response = client.get("/metrics/timeline")
     trace_response = client.get("/trace/1")
+    why_motivation_response = client.get("/why-motivation/2")
+    replay_motivation_response = client.get("/replay/motivation/2")
 
     assert state_response.status_code == 200
     assert metrics_response.status_code == 200
+    assert motivation_response.status_code == 200
+    assert endogenous_response.status_code == 200
     assert timeline_response.status_code == 200
     assert trace_response.status_code == 200
+    assert why_motivation_response.status_code == 200
+    assert replay_motivation_response.status_code == 200
     assert state_response.json()["subjectivity"]["subject_core_integrity"] is True
     assert "boundary_violation_count" in state_response.json()["subjectivity"]
     assert "external_to_internal_ratio" in metrics_response.json()
     assert "endogenous_intent_rate" in metrics_response.json()
+    assert "motivation_active_rate" in metrics_response.json()
+    assert "active_rate" in motivation_response.json()
+    assert "endogenous_round_rate" in endogenous_response.json()
     assert "subjectivity" in timeline_response.json()
     assert "subject_id" in trace_response.json()
+    assert why_motivation_response.json()["cause_type"] == "endogenous"
+    assert "motivation_pool" in replay_motivation_response.json()

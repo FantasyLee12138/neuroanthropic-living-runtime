@@ -13,6 +13,96 @@ RUNNER = CliRunner()
 CONFIG_ROOT = Path(__file__).resolve().parents[2] / "config"
 
 
+def _write_legacy_round_parquet(home_path: Path) -> None:
+    canonical_dir = home_path / "traces" / "parquet" / "round_canonical" / "recorded_date=2026-04-06" / "round_id=1"
+    trace_dir = home_path / "traces" / "parquet" / "round_trace" / "recorded_date=2026-04-06"
+    canonical_dir.mkdir(parents=True, exist_ok=True)
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    legacy_payload = {
+        "session_id": "legacy-session",
+        "recorded_at": "2026-04-06T00:00:00Z",
+        "recorded_date": "2026-04-06",
+        "round_id": 1,
+        "scenario": "task",
+        "mode": "interactive",
+        "sampled_action": "plan",
+        "style_profile": {},
+        "state_snapshot": {"mode": "interactive", "safe_mode": False, "focus": "plan", "budget_remaining": 0.8},
+        "top_drivers": [],
+        "proposal_summaries": [
+            {
+                "stage": "pfc",
+                "agent_name": "PFCAgent",
+                "top_action": "plan",
+                "selected": True,
+                "confidence": 0.8,
+                "sigma_scale": 1.0,
+                "weight_applied": 1.0,
+                "delta_p": {"plan": 0.55},
+                "tags": ["legacy"],
+            }
+        ],
+        "distribution_state": {
+            "u_shifted": {"plan": 1.2, "respond": 0.2},
+            "p_final": {"plan": 0.75, "respond": 0.25},
+            "p_raw": {"plan": 0.75, "respond": 0.25},
+            "conflict": {"passes": []},
+        },
+        "gate_decisions": [],
+    }
+
+    conn = duckdb.connect()
+    try:
+        conn.execute("create table legacy_round_canonical (session_id varchar, recorded_at varchar, recorded_date varchar, round_id bigint, payload_json varchar)")
+        conn.execute(
+            "insert into legacy_round_canonical values (?, ?, ?, ?, ?)",
+            [
+                legacy_payload["session_id"],
+                legacy_payload["recorded_at"],
+                legacy_payload["recorded_date"],
+                legacy_payload["round_id"],
+                json.dumps(legacy_payload, ensure_ascii=False, sort_keys=True),
+            ],
+        )
+        conn.execute("copy legacy_round_canonical to ? (format parquet)", [str(canonical_dir / "legacy.parquet")])
+        conn.execute(
+            """
+            create table legacy_round_trace (
+                session_id varchar,
+                recorded_at varchar,
+                recorded_date varchar,
+                round_id bigint,
+                stage varchar,
+                agent_name varchar,
+                action varchar,
+                distribution_state_json varchar,
+                probability_field_json varchar,
+                token_state_json varchar,
+                conflict_arbitration_json varchar
+            )
+            """
+        )
+        conn.execute(
+            "insert into legacy_round_trace values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                legacy_payload["session_id"],
+                legacy_payload["recorded_at"],
+                legacy_payload["recorded_date"],
+                legacy_payload["round_id"],
+                "pfc",
+                "PFCAgent",
+                "plan",
+                json.dumps(legacy_payload["distribution_state"], ensure_ascii=False, sort_keys=True),
+                "{}",
+                "{}",
+                "{}",
+            ],
+        )
+        conn.execute("copy legacy_round_trace to ? (format parquet)", [str(trace_dir / "legacy.parquet")])
+    finally:
+        conn.close()
+
+
 def test_trace_rows_include_session_and_recorded_fields(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     controller.tick(
@@ -100,6 +190,41 @@ def test_cli_trace_export_parquet_writes_three_tables(tmp_path, monkeypatch):
     assert session_id == controller.load_runtime_state().session_id
 
 
+def test_cli_trace_export_parquet_rewrites_legacy_round_history(tmp_path, monkeypatch):
+    home_path = tmp_path / ".alive"
+    _write_legacy_round_parquet(home_path)
+    monkeypatch.setenv("NALR_HOME", str(home_path))
+    monkeypatch.setenv("NALR_CONFIG_DIR", str(CONFIG_ROOT))
+
+    result = RUNNER.invoke(app, ["trace", "export", "parquet", "--rewrite-history", "--overwrite"])
+
+    assert result.exit_code == 0
+
+    payload = json.loads(result.stdout)
+    assert payload["history_rewrite"]["rewritten"] is True
+    assert payload["history_rewrite"]["round_count"] == 1
+
+    round_trace_dataset = home_path / "traces" / "parquet" / "round_trace"
+    exported_round_trace = home_path / "traces" / "parquet" / "round_trace.parquet"
+
+    conn = duckdb.connect()
+    try:
+        trace_cursor = conn.execute("select * from read_parquet(?) limit 0", [str(round_trace_dataset / "**" / "*.parquet")])
+        trace_columns = [item[0] for item in trace_cursor.description]
+        exported_cursor = conn.execute("select * from read_parquet(?) limit 0", [str(exported_round_trace)])
+        exported_columns = [item[0] for item in exported_cursor.description]
+        payload_json = conn.execute(
+            "select payload_json from read_parquet(?) where round_id = 1 limit 1",
+            [str(home_path / "traces" / "parquet" / "round_canonical" / "**" / "*.parquet")],
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert "distribution_state_json" not in trace_columns
+    assert "distribution_state_json" not in exported_columns
+    assert "distribution_state" not in json.loads(payload_json)
+
+
 def test_cli_trace_export_parquet_includes_repair_ledger_table(tmp_path, monkeypatch):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     state = controller.load_runtime_state()
@@ -144,7 +269,7 @@ def test_cli_trace_export_parquet_includes_repair_ledger_table(tmp_path, monkeyp
         conn.close()
 
     assert repair_count == 1
-    assert reason == "top_action_shift"
+    assert reason == "forced_compromise"
     assert conflict_score > 0.0
 
 

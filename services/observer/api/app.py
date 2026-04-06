@@ -15,7 +15,7 @@ def create_app(project_root: Path | str | None = None, config_root: Path | str |
     effective_config_root = Path(config_root) if config_root else Path(os.environ.get("NALR_CONFIG_DIR", project_root_path / "config"))
     controller = RuntimeController(project_root=project_root_path, config_root=effective_config_root)
     terminal_sessions = TerminalSessionStore(controller.runtime_dir)
-    app = FastAPI(title="NALR Observer", version="0.1.0")
+    app = FastAPI(title="NALR Observer", version="0.6.0")
 
     @app.get("/state")
     async def state() -> dict:
@@ -111,6 +111,14 @@ def create_app(project_root: Path | str | None = None, config_root: Path | str |
     async def vitality_metrics() -> dict:
         return controller.vitality_timeline()
 
+    @app.get("/metrics/motivation")
+    async def motivation_metrics() -> dict:
+        return controller.motivation_metrics()
+
+    @app.get("/metrics/endogenous")
+    async def endogenous_metrics() -> dict:
+        return controller.endogenous_metrics()
+
     @app.get("/dream/status")
     async def dream_status() -> dict:
         return controller.dream_status()
@@ -148,10 +156,6 @@ def create_app(project_root: Path | str | None = None, config_root: Path | str |
     @app.get("/metrics/conflicts")
     async def conflict_timeline() -> dict:
         return controller.conflict_timeline()
-
-    @app.get("/metrics/entropy")
-    async def entropy_metrics() -> dict:
-        return controller.entropy_metrics()
 
     @app.get("/metrics/mode-switches")
     async def mode_switch_timeline() -> dict:
@@ -200,6 +204,20 @@ def create_app(project_root: Path | str | None = None, config_root: Path | str |
     async def replay(round_id: int, seed: int = 0) -> dict:
         try:
             return controller.replay(round_id, seed=seed)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/replay/motivation/{round_id}")
+    async def replay_motivation(round_id: int) -> dict:
+        try:
+            return controller.replay_motivation(round_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/why-motivation/{round_id}")
+    async def why_motivation(round_id: int) -> dict:
+        try:
+            return controller.why_motivation(round_id)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

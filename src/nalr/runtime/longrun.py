@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from nalr.schemas.models import EnergyProjectionSpec, ProbabilisticContribution
+
 
 def _clip(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return max(low, min(high, value))
@@ -12,6 +14,33 @@ class LongRunAnalyzer:
         self.trace_store = trace_store
         self.identity_payload = identity_payload
         self.core_actions = core_actions
+
+    def _conflict_arbitration_summary(self, trace: dict[str, Any]) -> dict[str, Any]:
+        summary = dict(trace.get("conflict_arbitration", {}) or {})
+        probability_field = dict(trace.get("probability_field", {}) or {})
+        action_layer = probability_field.get("action", {}) if isinstance(probability_field, dict) else {}
+        audit_rows = action_layer.get("contribution_audit", []) if isinstance(action_layer, dict) else []
+        conflict_row = next(
+            (
+                row
+                for row in audit_rows
+                if isinstance(row, dict) and row.get("module_name") == "ConflictMonitorAgent"
+            ),
+            {},
+        )
+        if not conflict_row:
+            return summary
+        fallback = {
+            "critical_conflict": bool(conflict_row.get("critical_conflict", False)),
+            "circuit_breaker": dict(conflict_row.get("circuit_breaker", {}) or {}),
+            "winning_priority": str(conflict_row.get("winning_priority") or ""),
+            "winner_peak_posterior": dict(conflict_row.get("posterior", {}) or {}),
+            "hard_masked_targets": list(conflict_row.get("hard_masked_targets", []) or []),
+        }
+        for key, value in fallback.items():
+            if key not in summary or summary.get(key) in ({}, [], "", None):
+                summary[key] = value
+        return summary
 
     def build_round_projection(
         self,
@@ -36,6 +65,78 @@ class LongRunAnalyzer:
             "non_interactive_shift": len([item for item in shaping_events if item.get("non_interactive")]),
             "rename_reason": identity_evolution.get("rename_reason", ""),
         }
+
+    def build_online_projection(
+        self,
+        *,
+        round_id: int,
+        slow_variables: dict[str, Any],
+        shaping_events: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        history = self.metrics_summary()
+        continuity_score = _clip(float(history.get("self_consistency_score", 0.5) or 0.0), 0.0, 1.0)
+        volatility_signal = max(
+            float(slow_variables.get("affect_residue", 0.0) or 0.0),
+            float(slow_variables.get("relationship_drift", 0.0) or 0.0),
+            float(slow_variables.get("resource_scarcity", 0.0) or 0.0),
+            float(slow_variables.get("memory_activation", 0.0) or 0.0) * 0.6,
+        )
+        return {
+            "continuity_window": min(max(round_id, 1), 8),
+            "self_consistency_score": round(continuity_score, 4),
+            "volatility_signal": round(_clip(volatility_signal, 0.0, 1.0), 4),
+            "non_interactive_shift": len([item for item in shaping_events if item.get("non_interactive")]),
+            "rename_reason": "",
+        }
+
+    def build_long_run_prior_contribution(self, projection: dict[str, Any]) -> ProbabilisticContribution:
+        self_consistency_score = float(projection.get("self_consistency_score", 0.0) or 0.0)
+        volatility_signal = float(projection.get("volatility_signal", 0.0) or 0.0)
+        continuity_window = float(projection.get("continuity_window", 0.0) or 0.0)
+        non_interactive_shift = float(projection.get("non_interactive_shift", 0.0) or 0.0)
+        continuity_strength = _clip(self_consistency_score * 0.7 + min(continuity_window, 8.0) / 8.0 * 0.3, 0.0, 1.0)
+        drift_pressure = _clip(volatility_signal * 0.7 + min(non_interactive_shift, 3.0) / 3.0 * 0.3, 0.0, 1.0)
+
+        modulated_delta = {
+            "plan": round(0.12 * continuity_strength, 6),
+            "respond": round(0.08 * continuity_strength, 6),
+            "clarify": round(0.05 * continuity_strength, 6),
+            "wander": round(-(0.10 * continuity_strength + 0.08 * drift_pressure), 6),
+        }
+        if volatility_signal >= 0.12:
+            modulated_delta["rest"] = round(0.04 * drift_pressure, 6)
+        if non_interactive_shift > 0.0:
+            modulated_delta["recall"] = round(0.03 * min(non_interactive_shift, 3.0), 6)
+
+        confidence = _clip(0.28 + continuity_strength * 0.42 + drift_pressure * 0.18, 0.0, 1.0)
+        dependency_trace = [
+            f"self_consistency_score:{round(self_consistency_score, 4)}",
+            f"volatility_signal:{round(volatility_signal, 4)}",
+            f"continuity_window:{int(round(continuity_window))}",
+            f"non_interactive_shift:{int(round(non_interactive_shift))}",
+        ]
+        rename_reason = str(projection.get("rename_reason", "") or "")
+        if rename_reason:
+            dependency_trace.append(f"rename_reason:{rename_reason}")
+        return ProbabilisticContribution(
+            module_name="LongRunAnalyzer",
+            module_type="longrun",
+            level="action",
+            target_space="action",
+            raw_signal=dict(modulated_delta),
+            modulated_delta=modulated_delta,
+            confidence=confidence,
+            confidence_calibrated=round(_clip(confidence * (0.92 - volatility_signal * 0.08), 0.0, 1.0), 4),
+            trace_reason=(
+                f"long-run continuity prior consistency={self_consistency_score:.2f} "
+                f"volatility={volatility_signal:.2f}"
+            ),
+            projection_reason="long-run prior projected from longitudinal continuity summary",
+            applied_at_stage="long_run_prior",
+            native_operator="longitudinal_prior",
+            dependency_trace=dependency_trace,
+            projection=EnergyProjectionSpec(module_type="longrun", target_space="action", module_temperature=0.9),
+        )
 
     def _average(self, values: list[float]) -> float:
         return round(sum(values) / len(values), 4) if values else 0.0
@@ -164,7 +265,7 @@ class LongRunAnalyzer:
             if any(item.get("stage") == "forced_mode_switch" for item in prev_trace.get("gate_decisions", [])):
                 forced_recovery_checks += 1
                 forced_recovery_hits += int(trace.get("sampled_action") != prev_trace.get("sampled_action"))
-            prev_conflict = prev_trace.get("distribution_state", {}).get("conflict", {})
+            prev_conflict = self._conflict_arbitration_summary(prev_trace)
             prev_critical = bool(prev_conflict.get("critical_conflict")) or bool(prev_conflict.get("circuit_breaker", {}).get("active"))
             if prev_critical:
                 conflict_repair_checks += 1

@@ -7,7 +7,7 @@ from nalr.runtime.controller import RuntimeController
 from nalr.schemas.models import (
     CircuitBreakerPolicy,
     FallbackRoute,
-    ProposalBundle,
+    ProbabilisticContribution,
     RoundEvent,
     SkillPermissionProfile,
     SkillRuntimeContext,
@@ -148,13 +148,13 @@ def test_skill_executor_coerces_typed_inputs_and_outputs(tmp_path):
         name="typed_demo",
         owner_module="demo",
         input_schema={"event": RoundEvent},
-        output_schema=ProposalBundle,
+        output_schema=ProbabilisticContribution,
         timeout_ms=20,
         cost_class="H",
         failure_policy="fallback_to_rules",
         trace_tags=["demo"],
         skill_kind="planning",
-        output_kind="candidate_actions",
+        output_kind="contribution",
         policy_check=True,
         permission=SkillPermissionProfile(external_io=True),
         fallback_route=FallbackRoute(strategy="fallback_to_rules", target="demo.fallback", cost_class="L"),
@@ -167,22 +167,35 @@ def test_skill_executor_coerces_typed_inputs_and_outputs(tmp_path):
         skill_name="typed_demo",
         inputs={"event": {"source": "user", "content": "help me plan", "cue": "plan"}},
         provider=lambda event: {
-            "owner": "demo",
+            "module_name": "demo",
+            "module_type": "executive",
+            "level": "action",
+            "target_space": "action",
             "confidence": 0.8,
-            "action_preferences": {"plan": 0.3},
-            "delta_p": {"plan": 0.3},
-            "sigma_scale": 0.9,
-            "trace_tags": ["demo"],
-            "reason": event.content,
+            "raw_signal": {"plan": 0.3},
+            "modulated_delta": {"plan": 0.3},
+            "trace_reason": event.content,
+            "projection_reason": "typed test",
         },
-        fallback_provider=lambda event: ProposalBundle(owner="demo", action_preferences={"respond": 0.1}, delta_p={"respond": 0.1}),
+        fallback_provider=lambda event: ProbabilisticContribution(
+            module_name="demo",
+            module_type="executive",
+            level="action",
+            target_space="action",
+            raw_signal={"respond": 0.1},
+            modulated_delta={"respond": 0.1},
+            confidence=0.1,
+            trace_reason="fallback",
+            projection_reason="typed fallback",
+        ),
         runtime_context=SkillRuntimeContext(round_id=1, scenario="task", mode="interactive"),
     )
 
-    assert isinstance(output, ProposalBundle)
-    assert output.reason == "help me plan"
+    assert isinstance(output, ProbabilisticContribution)
+    assert output.trace_reason == "help me plan"
     assert result.degraded is False
-    assert result.output["action_preferences"]["plan"] == 0.3
+    assert result.output["modulated_delta"]["plan"] == 0.3
+    assert {"raw_signal", "modulated_delta", "inhibitory_drive", "failure_taxonomy"}.issubset(result.output)
 
 
 def test_skill_executor_persists_breaker_and_uses_fallback_during_cooldown(tmp_path):
@@ -190,13 +203,13 @@ def test_skill_executor_persists_breaker_and_uses_fallback_during_cooldown(tmp_p
         name="typed_breaker",
         owner_module="demo",
         input_schema={"event": RoundEvent},
-        output_schema=ProposalBundle,
+        output_schema=ProbabilisticContribution,
         timeout_ms=20,
         cost_class="H",
         failure_policy="fallback_to_rules",
         trace_tags=["demo"],
         skill_kind="planning",
-        output_kind="candidate_actions",
+        output_kind="contribution",
         policy_check=True,
         permission=SkillPermissionProfile(external_io=True),
         fallback_route=FallbackRoute(strategy="fallback_to_rules", target="demo.fallback", cost_class="L"),
@@ -212,7 +225,17 @@ def test_skill_executor_persists_breaker_and_uses_fallback_during_cooldown(tmp_p
             skill_name="typed_breaker",
             inputs={"event": {"source": "user", "content": "help me plan"}},
             provider=lambda event: (_ for _ in ()).throw(RuntimeError("boom")),
-            fallback_provider=lambda event: ProposalBundle(owner="demo", action_preferences={"plan": 0.2}, delta_p={"plan": 0.2}),
+            fallback_provider=lambda event: ProbabilisticContribution(
+                module_name="demo",
+                module_type="executive",
+                level="action",
+                target_space="action",
+                raw_signal={"plan": 0.2},
+                modulated_delta={"plan": 0.2},
+                confidence=0.2,
+                trace_reason="fallback",
+                projection_reason="typed fallback",
+            ),
             runtime_context=SkillRuntimeContext(round_id=round_id, scenario="task", mode="interactive"),
         )
         assert result.degraded is True
@@ -226,12 +249,22 @@ def test_skill_executor_persists_breaker_and_uses_fallback_during_cooldown(tmp_p
         skill_name="typed_breaker",
         inputs={"event": {"source": "user", "content": "help me plan"}},
         provider=lambda event: called_primary.__setitem__("count", called_primary["count"] + 1),
-        fallback_provider=lambda event: ProposalBundle(owner="demo", action_preferences={"plan": 0.25}, delta_p={"plan": 0.25}),
+        fallback_provider=lambda event: ProbabilisticContribution(
+            module_name="demo",
+            module_type="executive",
+            level="action",
+            target_space="action",
+            raw_signal={"plan": 0.25},
+            modulated_delta={"plan": 0.25},
+            confidence=0.25,
+            trace_reason="fallback",
+            projection_reason="typed fallback",
+        ),
         runtime_context=SkillRuntimeContext(round_id=4, scenario="task", mode="interactive"),
     )
 
     assert called_primary["count"] == 0
-    assert isinstance(output, ProposalBundle)
+    assert isinstance(output, ProbabilisticContribution)
     assert breaker_result.failure_policy_applied == "trip_circuit_breaker"
     assert breaker_result.fallback_route == "demo.fallback"
     assert breaker_result.breaker_state["open"] is True
@@ -242,13 +275,13 @@ def test_skill_executor_resets_legacy_open_breakers_after_guard_fingerprint_chan
         name="typed_breaker",
         owner_module="demo",
         input_schema={"event": RoundEvent},
-        output_schema=ProposalBundle,
+        output_schema=ProbabilisticContribution,
         timeout_ms=20,
         cost_class="H",
         failure_policy="fallback_to_rules",
         trace_tags=["demo"],
         skill_kind="planning",
-        output_kind="candidate_actions",
+        output_kind="contribution",
         policy_check=True,
         permission=SkillPermissionProfile(external_io=True),
         fallback_route=FallbackRoute(strategy="fallback_to_rules", target="demo.fallback", cost_class="L"),
@@ -282,22 +315,35 @@ def test_skill_executor_resets_legacy_open_breakers_after_guard_fingerprint_chan
         round_id=6,
         skill_name="typed_breaker",
         inputs={"event": {"source": "user", "content": "help me plan"}},
-        provider=lambda event: called_primary.__setitem__("count", called_primary["count"] + 1) or ProposalBundle(
-            owner="demo",
+        provider=lambda event: called_primary.__setitem__("count", called_primary["count"] + 1) or ProbabilisticContribution(
+            module_name="demo",
+            module_type="executive",
+            level="action",
+            target_space="action",
             confidence=0.7,
-            action_preferences={"plan": 0.2},
-            delta_p={"plan": 0.2},
-            sigma_scale=0.9,
-            reason=event.content,
+            raw_signal={"plan": 0.2},
+            modulated_delta={"plan": 0.2},
+            trace_reason=event.content,
+            projection_reason="typed test",
         ),
-        fallback_provider=lambda event: ProposalBundle(owner="demo", action_preferences={"respond": 0.1}, delta_p={"respond": 0.1}),
+        fallback_provider=lambda event: ProbabilisticContribution(
+            module_name="demo",
+            module_type="executive",
+            level="action",
+            target_space="action",
+            raw_signal={"respond": 0.1},
+            modulated_delta={"respond": 0.1},
+            confidence=0.1,
+            trace_reason="fallback",
+            projection_reason="typed fallback",
+        ),
         runtime_context=SkillRuntimeContext(round_id=6, scenario="task", mode="interactive"),
     )
 
     persisted = json.loads(breaker_path.read_text(encoding="utf-8"))
 
     assert called_primary["count"] == 1
-    assert isinstance(output, ProposalBundle)
+    assert isinstance(output, ProbabilisticContribution)
     assert result.degraded is False
     assert persisted["__meta__"]["environment_fingerprint"] == "guard-v2"
 
@@ -305,13 +351,33 @@ def test_skill_executor_resets_legacy_open_breakers_after_guard_fingerprint_chan
         round_id=9,
         skill_name="typed_breaker",
         inputs={"event": {"source": "user", "content": "help me plan"}},
-        provider=lambda event: ProposalBundle(owner="demo", action_preferences={"plan": 0.4}, delta_p={"plan": 0.4}),
-        fallback_provider=lambda event: ProposalBundle(owner="demo", action_preferences={"plan": 0.2}, delta_p={"plan": 0.2}),
+        provider=lambda event: ProbabilisticContribution(
+            module_name="demo",
+            module_type="executive",
+            level="action",
+            target_space="action",
+            raw_signal={"plan": 0.4},
+            modulated_delta={"plan": 0.4},
+            confidence=0.4,
+            trace_reason="primary",
+            projection_reason="typed test",
+        ),
+        fallback_provider=lambda event: ProbabilisticContribution(
+            module_name="demo",
+            module_type="executive",
+            level="action",
+            target_space="action",
+            raw_signal={"plan": 0.2},
+            modulated_delta={"plan": 0.2},
+            confidence=0.2,
+            trace_reason="fallback",
+            projection_reason="typed fallback",
+        ),
         runtime_context=SkillRuntimeContext(round_id=9, scenario="task", mode="interactive"),
     )
 
-    assert isinstance(recovered, ProposalBundle)
-    assert recovered.action_preferences["plan"] == 0.4
+    assert isinstance(recovered, ProbabilisticContribution)
+    assert recovered.modulated_delta["plan"] == 0.4
     assert recovered_result.degraded is False
 
 
@@ -320,13 +386,13 @@ def test_skill_executor_blocks_policy_denied_external_route():
         name="policy_demo",
         owner_module="demo",
         input_schema={"event": RoundEvent},
-        output_schema=ProposalBundle,
+        output_schema=ProbabilisticContribution,
         timeout_ms=20,
         cost_class="H",
         failure_policy="fallback_to_rules",
         trace_tags=["demo"],
         skill_kind="planning",
-        output_kind="candidate_actions",
+        output_kind="contribution",
         policy_check=True,
         permission=SkillPermissionProfile(external_io=True, social_risk=True),
         fallback_route=FallbackRoute(strategy="fallback_to_rules", target="demo.fallback", cost_class="L"),
@@ -340,7 +406,17 @@ def test_skill_executor_blocks_policy_denied_external_route():
         skill_name="policy_demo",
         inputs={"event": {"source": "user", "content": "help me plan", "target": "user"}},
         provider=lambda event: called_primary.__setitem__("count", called_primary["count"] + 1),
-        fallback_provider=lambda event: ProposalBundle(owner="demo", action_preferences={"respond": 0.1}, delta_p={"respond": 0.1}),
+        fallback_provider=lambda event: ProbabilisticContribution(
+            module_name="demo",
+            module_type="executive",
+            level="action",
+            target_space="action",
+            raw_signal={"respond": 0.1},
+            modulated_delta={"respond": 0.1},
+            confidence=0.1,
+            trace_reason="fallback",
+            projection_reason="typed fallback",
+        ),
         runtime_context=SkillRuntimeContext(
             round_id=1,
             scenario="task",
@@ -350,6 +426,90 @@ def test_skill_executor_blocks_policy_denied_external_route():
     )
 
     assert called_primary["count"] == 0
-    assert isinstance(output, ProposalBundle)
+    assert isinstance(output, ProbabilisticContribution)
     assert result.degraded is True
     assert result.policy_rejection_reason == "external_io_denied"
+
+
+def test_skill_executor_serializes_default_contribution_fallback_without_legacy_aliases(tmp_path):
+    spec = SkillSpec(
+        name="typed_default",
+        owner_module="demo",
+        input_schema={"event": RoundEvent},
+        output_schema=ProbabilisticContribution,
+        timeout_ms=20,
+        cost_class="H",
+        failure_policy="fallback_to_rules",
+        trace_tags=["demo"],
+        skill_kind="planning",
+        output_kind="contribution",
+        policy_check=True,
+        permission=SkillPermissionProfile(external_io=True),
+        fallback_route=FallbackRoute(strategy="fallback_to_rules", target="demo.fallback", cost_class="L"),
+        breaker_policy=CircuitBreakerPolicy(failure_threshold=3, cooldown_rounds=5),
+    )
+    executor = SkillExecutor({"typed_default": spec}, circuit_breaker_path=tmp_path / "circuit_breakers.json")
+
+    output, result = executor.run(
+        round_id=1,
+        skill_name="typed_default",
+        inputs={"event": {"source": "user", "content": "help me plan"}},
+        provider=lambda event: (_ for _ in ()).throw(RuntimeError("boom")),
+        runtime_context=SkillRuntimeContext(round_id=1, scenario="task", mode="interactive"),
+    )
+
+    assert isinstance(output, ProbabilisticContribution)
+    assert output.raw_signal == {"respond": 0.0}
+    assert output.modulated_delta == {"respond": 0.0}
+    assert output.native_operator == "modulated_delta"
+    assert result.output["raw_signal"] == {"respond": 0.0}
+    assert result.output["modulated_delta"] == {"respond": 0.0}
+    assert result.output["inhibitory_drive"] == {}
+    assert result.output["failure_taxonomy"] == []
+    assert "raw_signal" in result.output
+    assert "modulated_delta" in result.output
+
+
+def test_skill_executor_serializes_canonical_contribution_without_alias_postcheck(tmp_path):
+    spec = SkillSpec(
+        name="typed_alias_postcheck",
+        owner_module="demo",
+        input_schema={"event": RoundEvent},
+        output_schema=ProbabilisticContribution,
+        timeout_ms=20,
+        cost_class="H",
+        failure_policy="fallback_to_rules",
+        trace_tags=["demo"],
+        skill_kind="planning",
+        output_kind="contribution",
+        policy_check=True,
+        permission=SkillPermissionProfile(external_io=True),
+        fallback_route=FallbackRoute(strategy="fallback_to_rules", target="demo.fallback", cost_class="L"),
+        breaker_policy=CircuitBreakerPolicy(failure_threshold=3, cooldown_rounds=5),
+    )
+    executor = SkillExecutor({"typed_alias_postcheck": spec}, circuit_breaker_path=tmp_path / "circuit_breakers.json")
+
+    output, result = executor.run(
+        round_id=1,
+        skill_name="typed_alias_postcheck",
+        inputs={"event": {"source": "user", "content": "help me plan"}},
+        provider=lambda event: ProbabilisticContribution(
+            module_name="demo",
+            module_type="executive",
+            level="action",
+            target_space="action",
+            raw_signal={"plan": 0.3},
+            modulated_delta={"plan": 0.3},
+            inhibitory_drive={"rest": 0.2},
+            confidence=0.6,
+            trace_reason=event.content,
+            projection_reason="typed test",
+        ),
+        runtime_context=SkillRuntimeContext(round_id=1, scenario="task", mode="interactive"),
+    )
+
+    assert isinstance(output, ProbabilisticContribution)
+    assert result.degraded is False
+    assert result.output["modulated_delta"] == {"plan": 0.3}
+    assert result.output["inhibitory_drive"] == {"rest": 0.2}
+    assert {"raw_signal", "modulated_delta", "inhibitory_drive", "failure_taxonomy"}.issubset(result.output)

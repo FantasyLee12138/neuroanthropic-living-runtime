@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
+from typing import Any
 
 from nalr.runtime.dynamics import bounded_drift_delta, smooth_resource_biases
 from nalr.schemas.models import (
     ActionCandidate,
-    ActionDistributionState,
+    ActionEvidenceSignal,
     ConflictAssessment,
     ConflictComponents,
     ConflictPostErrorAdjustment,
     ConflictRepairLedgerEntry,
     ConflictRepairState,
     ConflictResolution,
-    ProposalBundle,
+    EnergyProjectionSpec,
+    ProbabilisticContribution,
     RoundEvent,
     RuntimeState,
     to_dict,
@@ -123,6 +126,64 @@ def _safe_mode_delta(before: bool, after: bool) -> str:
     return "entered" if after else "exited"
 
 
+def _coerce_action_view(action_view: dict[str, Any] | Any | None) -> dict[str, dict[str, float] | set[str] | str]:
+    payload = to_dict(action_view) if action_view is not None else {}
+    if not isinstance(payload, dict):
+        payload = dict(getattr(action_view, "__dict__", {}) or {})
+    payload = dict(payload or {})
+    action_layer = payload
+    conflict_mode = str(payload.get("conflict_mode") or "")
+    if isinstance(payload.get("action"), dict):
+        action_layer = dict(payload.get("action") or {})
+        conflict_mode = conflict_mode or "probability_field"
+    elif any(key in payload for key in ("winner_posterior", "final_energy", "hard_masked_targets", "contribution_audit")):
+        conflict_mode = conflict_mode or "field_native"
+
+    distribution_payload = (
+        action_layer.get("winner_posterior")
+        or action_layer.get("p_raw")
+        or action_layer.get("p_final")
+        or action_layer.get("distribution")
+        or {}
+    )
+    distribution = {
+        str(action): float(value)
+        for action, value in dict(distribution_payload or {}).items()
+        if isinstance(action, str) and action and isinstance(value, (int, float)) and float(value) > 0.0
+    }
+    if not distribution and isinstance(action_layer.get("final_energy"), dict):
+        finite = {
+            str(action): float(value)
+            for action, value in dict(action_layer.get("final_energy", {}) or {}).items()
+            if isinstance(action, str) and action and isinstance(value, (int, float)) and float(value) != float("-inf")
+        }
+        if finite:
+            anchor = max(finite.values())
+            exp_terms = {action: math.exp(value - anchor) for action, value in finite.items()}
+            normalizer = sum(exp_terms.values()) or 1.0
+            distribution = {action: round(weight / normalizer, 6) for action, weight in exp_terms.items()}
+
+    gate = {
+        str(action): float(value)
+        for action, value in dict(action_layer.get("gate") or payload.get("gate") or {}).items()
+        if isinstance(action, str) and action and isinstance(value, (int, float))
+    }
+    hard_masked_targets = {
+        str(action)
+        for action in list(action_layer.get("hard_masked_targets", []) or [])
+        if isinstance(action, str) and action
+    }
+    hard_masked_targets.update(action for action, value in gate.items() if value <= 0.0)
+    for action in distribution:
+        gate.setdefault(action, 0.0 if action in hard_masked_targets else 1.0)
+    return {
+        "distribution": distribution,
+        "gate": gate,
+        "hard_masked_targets": hard_masked_targets,
+        "conflict_mode": conflict_mode or "none",
+    }
+
+
 def _top_reason(action_preferences: dict[str, float], reason: str) -> str:
     if not action_preferences:
         return reason
@@ -140,38 +201,53 @@ def compute_salience_signal(event: RoundEvent, scenario: dict | None = None) -> 
     return round(_clip(0.10 + task_signal + affect_signal), 4)
 
 
-def _bundle(
+def _action_contribution(
     owner: str,
+    module_type: str,
     prefs: dict[str, float],
     *,
     confidence: float,
+    reason: str,
+    projection_reason: str,
+    applied_at_stage: str,
+    native_operator: str,
     sigma_scale: float = 1.0,
-    veto: bool = False,
-    reason: str = "",
-    trace_tags: list[str] | None = None,
     utility_shift: dict[str, float] | None = None,
-    state_patch: dict | None = None,
+    gated_actions: list[str] | None = None,
     priority_bucket: str | None = None,
     control_domain: str | None = None,
-    gated_actions: list[str] | None = None,
-    risk_hints: dict[str, float] | None = None,
-) -> ProposalBundle:
+    extra_dependency_trace: list[str] | None = None,
+    include_top_action: bool = True,
+) -> ProbabilisticContribution:
     clipped = {action: _clip_delta(score) for action, score in prefs.items()}
-    return ProposalBundle(
-        owner=owner,
-        confidence=_clip(confidence, 0.0, 1.0),
-        action_preferences=clipped,
-        delta_p=clipped,
-        sigma_scale=_clip(sigma_scale, 0.60, 1.60),
-        veto=veto,
-        utility_shift=utility_shift or {},
-        state_patch=state_patch or {},
-        trace_tags=trace_tags or [],
-        reason=_top_reason(clipped, reason),
-        priority_bucket=priority_bucket or OWNER_PRIORITY_BUCKET.get(owner, "task_goal"),
-        control_domain=control_domain or OWNER_CONTROL_DOMAIN.get(owner, "task"),
-        gated_actions=list(gated_actions or []),
-        risk_hints=dict(risk_hints or {}),
+    sigma_scale = max(0.35, min(1.35, float(sigma_scale or 1.0)))
+    resolved_priority = priority_bucket or OWNER_PRIORITY_BUCKET.get(owner, "task_goal")
+    resolved_control = control_domain or OWNER_CONTROL_DOMAIN.get(owner, "task")
+    dependency_trace = [
+        f"priority:{resolved_priority}",
+        f"control:{resolved_control}",
+        f"sigma_scale:{round(sigma_scale, 4)}",
+    ]
+    if include_top_action and clipped:
+        dependency_trace.append(f"top_action:{max(clipped, key=clipped.get)}")
+    dependency_trace.extend(list(extra_dependency_trace or []))
+    calibrated = _clip(float(confidence) * sigma_scale, 0.0, 1.0)
+    return ProbabilisticContribution(
+        module_name=owner,
+        module_type=module_type,
+        level="action",
+        target_space="action",
+        raw_signal=clipped,
+        modulated_delta=dict(utility_shift or clipped),
+        hard_mask={action: True for action in list(gated_actions or [])},
+        confidence=float(confidence),
+        confidence_calibrated=round(calibrated, 4),
+        trace_reason=_top_reason(clipped, reason),
+        projection_reason=projection_reason,
+        applied_at_stage=applied_at_stage,
+        native_operator=native_operator,
+        dependency_trace=dependency_trace,
+        projection=EnergyProjectionSpec(module_type=module_type, target_space="action", module_temperature=sigma_scale),
     )
 
 
@@ -181,9 +257,6 @@ class BaseAgent:
 
     def run_skill(self, skill_name: str, *args, **kwargs):
         return getattr(self, skill_name)(*args, **kwargs)
-
-    def propose(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
-        raise NotImplementedError
 
 
 class BodyStateAgent(BaseAgent):
@@ -198,23 +271,40 @@ class BodyStateAgent(BaseAgent):
         next_energy = _clip(state.body_energy - fatigue_push * 0.03 - cognitive_load * 0.02 - repair_drag)
         return {"state_patch": {"body_energy": next_energy}}
 
-    def compute_body_bias(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
+    def compute_body_bias(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProbabilisticContribution:
         energy = _clip(state.body_energy)
         prefs = {"respond": 0.10}
         sigma_scale = 1.0
         if energy < 0.45:
             prefs["rest"] = 0.18 + (0.45 - energy) * 0.40
             sigma_scale = 1.15
-        return _bundle(self.name, prefs, confidence=0.64, sigma_scale=sigma_scale, reason=f"energy={energy:.2f}", trace_tags=["body"])
+        return _action_contribution(
+            self.name,
+            "body",
+            prefs,
+            confidence=0.64,
+            reason=f"energy={energy:.2f}",
+            projection_reason="homeostatic bias projected from body head",
+            applied_at_stage="body_homeostasis",
+            native_operator="homeostatic_bias",
+            sigma_scale=sigma_scale,
+            priority_bucket="body_safety",
+            control_domain="body",
+        )
 
     def apply_body_veto(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> dict:
         energy = _clip(state.body_energy + event.energy_delta)
         gated_actions = ["connect"] if energy < 0.15 else []
         return {"veto": False, "gated_actions": gated_actions}
 
-    def propose(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
+    def build_direct_action_contribution(
+        self,
+        event: RoundEvent,
+        state: RuntimeState,
+        scenario: dict,
+        context: dict,
+    ) -> ProbabilisticContribution:
         return self.compute_body_bias(event, state, scenario, context)
-
 
 class RelationshipAgent(BaseAgent):
     def __init__(self) -> None:
@@ -232,13 +322,39 @@ class RelationshipAgent(BaseAgent):
     def update_relation_trace(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> dict:
         return {"state_delta": {"relation_target": event.target}}
 
-    def propose(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
+    def build_direct_action_contribution(
+        self,
+        event: RoundEvent,
+        state: RuntimeState,
+        scenario: dict,
+        context: dict,
+    ) -> ProbabilisticContribution:
         closeness = context["closeness"]
         prefs = {"respond": 0.04 + scenario.get("relationship_weight", 0.1) * closeness * 0.3}
         if closeness > 0.55 and event.target:
             prefs["connect"] = 0.08 + closeness * 0.18
-        return _bundle(self.name, prefs, confidence=0.58, reason=f"closeness={closeness:.2f}", trace_tags=["relationship"])
-
+        clipped = {action: _clip_delta(score) for action, score in prefs.items()}
+        sigma_scale = 1.0
+        return ProbabilisticContribution(
+            module_name=self.name,
+            module_type="relationship",
+            level="action",
+            target_space="action",
+            raw_signal=clipped,
+            modulated_delta=clipped,
+            confidence=0.58,
+            confidence_calibrated=round(_clip(0.58 * sigma_scale, 0.0, 1.0), 4),
+            trace_reason=_top_reason(clipped, f"closeness={closeness:.2f}"),
+            projection_reason="relationship bias projected from relationship head",
+            applied_at_stage="relationship_boundary",
+            native_operator="relationship_bias",
+            dependency_trace=[
+                "priority:relation_boundary",
+                "control:relation",
+                f"sigma_scale:{round(sigma_scale, 4)}",
+            ],
+            projection=EnergyProjectionSpec(module_type="relationship", target_space="action", module_temperature=sigma_scale),
+        )
 
 class DesireAgent(BaseAgent):
     def __init__(self) -> None:
@@ -251,20 +367,36 @@ class DesireAgent(BaseAgent):
             score = 0.45
         return {"score": score}
 
-    def compute_effort_avoidance(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
+    def compute_effort_avoidance(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProbabilisticContribution:
         content = event.content.lower()
         prefs = {}
         if any(token in content for token in {"quick", "easy", "coffee", "break", "rest"}):
             prefs["rest"] = 0.12 + (1.0 - state.body_energy) * 0.18
             prefs["respond"] = 0.06
-        return _bundle(self.name, prefs, confidence=0.54, reason="comfort seeking", trace_tags=["desire"])
+        return _action_contribution(
+            self.name,
+            "desire",
+            prefs,
+            confidence=0.54,
+            reason="comfort seeking",
+            projection_reason="desire bias projected from desire head",
+            applied_at_stage="desire_pressure",
+            native_operator="desire_bias",
+            priority_bucket="immediate_desire",
+            control_domain="desire",
+        )
 
     def suggest_low_cost_action(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> dict:
         return {"action_hint": "rest" if state.body_energy < 0.4 else "respond"}
 
-    def propose(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
+    def build_direct_action_contribution(
+        self,
+        event: RoundEvent,
+        state: RuntimeState,
+        scenario: dict,
+        context: dict,
+    ) -> ProbabilisticContribution:
         return self.compute_effort_avoidance(event, state, scenario, context)
-
 
 class EmotionAgent(BaseAgent):
     def __init__(self) -> None:
@@ -284,7 +416,7 @@ class EmotionAgent(BaseAgent):
             }
         }
 
-    def compute_affect_bias(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
+    def compute_affect_bias(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProbabilisticContribution:
         prefs = {}
         sigma_scale = 1.0
         if event.valence <= -0.25:
@@ -293,25 +425,54 @@ class EmotionAgent(BaseAgent):
             sigma_scale = 1.12
         elif event.valence >= 0.25:
             prefs["connect"] = 0.10 + event.valence * 0.12
-        return _bundle(self.name, prefs, confidence=0.60, sigma_scale=sigma_scale, reason=f"valence={event.valence:.2f}", trace_tags=["emotion"])
+        return _action_contribution(
+            self.name,
+            "emotion",
+            prefs,
+            confidence=0.60,
+            reason=f"valence={event.valence:.2f}",
+            projection_reason="affect bias projected from emotion head",
+            applied_at_stage="affect_reweight",
+            native_operator="affect_bias",
+            sigma_scale=sigma_scale,
+            priority_bucket="body_safety",
+            control_domain="body",
+            include_top_action=False,
+        )
 
     def trigger_affect_veto(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> dict:
         return {"veto": event.valence < -0.95}
 
-    def propose(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
+    def build_direct_action_contribution(
+        self,
+        event: RoundEvent,
+        state: RuntimeState,
+        scenario: dict,
+        context: dict,
+    ) -> ProbabilisticContribution:
         return self.compute_affect_bias(event, state, scenario, context)
-
 
 class DMNAgent(BaseAgent):
     def __init__(self) -> None:
         super().__init__(name="DMNAgent")
 
-    def sample_dmn_intrusion(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
+    def sample_dmn_intrusion(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProbabilisticContribution:
         prefs = {}
         if state.mode in {"idle", "interactive"}:
             prefs["wander"] = scenario.get("dmn_weight", 0.05) * (4.8 if state.mode == "idle" else 1.2)
         confidence = 0.72 if state.mode == "idle" else 0.46
-        return _bundle(self.name, prefs, confidence=confidence, reason="background drift", trace_tags=["dmn"])
+        return _action_contribution(
+            self.name,
+            "dmn",
+            prefs,
+            confidence=confidence,
+            reason="background drift",
+            projection_reason="dmn drift projected from dmn head",
+            applied_at_stage="dmn_drift",
+            native_operator="dmn_drift",
+            priority_bucket="roaming",
+            control_domain="dmn",
+        )
 
     def score_rumination_pull(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> dict:
         return {"score": 0.18 if state.mode == "idle" else 0.05}
@@ -319,15 +480,20 @@ class DMNAgent(BaseAgent):
     def select_spontaneous_topic(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> dict:
         return {"topic_hint": context.get("cue") or "idle-thought"}
 
-    def propose(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
+    def build_direct_action_contribution(
+        self,
+        event: RoundEvent,
+        state: RuntimeState,
+        scenario: dict,
+        context: dict,
+    ) -> ProbabilisticContribution:
         return self.sample_dmn_intrusion(event, state, scenario, context)
-
 
 class PFCAgent(BaseAgent):
     def __init__(self) -> None:
         super().__init__(name="PFCAgent")
 
-    def fallback_generate_candidates(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
+    def fallback_generate_candidates(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProbabilisticContribution:
         content = event.content.lower()
         task_terms = (
             "plan",
@@ -376,10 +542,20 @@ class PFCAgent(BaseAgent):
         if state.resource_state.get("resource_mode") == "starvation" or scarcity >= 0.75:
             prefs["plan"] = min(prefs.get("plan", 0.0), 0.06)
             prefs["short_reply"] = max(prefs.get("short_reply", 0.0), 0.08 + scarcity * 0.10)
-        return _bundle(self.name, prefs, confidence=0.84, sigma_scale=0.92, reason="deliberate planner", trace_tags=["pfc"])
+        return _action_contribution(
+            self.name,
+            "executive",
+            prefs,
+            confidence=0.84,
+            reason="deliberate planner",
+            projection_reason="executive prior projected from PFC head",
+            applied_at_stage="executive_reweight",
+            native_operator="executive_prior",
+            sigma_scale=0.92,
+        )
 
-    def generate_candidates(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
-        return self.fallback_generate_candidates(event, state, scenario, context)
+    def generate_candidates(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProbabilisticContribution:
+        return self.build_direct_action_contribution(event, state, scenario, context)
 
     def estimate_plan_depth(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> dict:
         content = event.content.lower()
@@ -391,9 +567,14 @@ class PFCAgent(BaseAgent):
     def bind_working_memory(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> dict:
         return {"wm_update": {"cue": context.get("cue"), "focus": state.focus}}
 
-    def propose(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
-        return self.generate_candidates(event, state, scenario, context)
-
+    def build_direct_action_contribution(
+        self,
+        event: RoundEvent,
+        state: RuntimeState,
+        scenario: dict,
+        context: dict,
+    ) -> ProbabilisticContribution:
+        return self.fallback_generate_candidates(event, state, scenario, context)
 
 class UnconsciousAgent(BaseAgent):
     def __init__(self) -> None:
@@ -403,7 +584,7 @@ class UnconsciousAgent(BaseAgent):
         baseline = dict(state.temperament_state.get("baseline", {}))
         return {"baseline": baseline}
 
-    def compute_trait_bias(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
+    def compute_trait_bias(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProbabilisticContribution:
         current = dict(state.temperament_state.get("current", {}))
         attachment_need = _clip(float(current.get("attachment_need", 0.5)))
         boundary_softness = _clip(float(current.get("boundary_softness", 0.5)))
@@ -422,7 +603,16 @@ class UnconsciousAgent(BaseAgent):
             prefs["clarify"] = 0.02 + reactive_fragility * 0.08
         if desire_priority > 0.55:
             prefs["plan"] = 0.01 + desire_priority * 0.05
-        return _bundle(self.name, prefs, confidence=0.42, reason="temperament baseline", trace_tags=["trait"])
+        return _action_contribution(
+            self.name,
+            "trait",
+            prefs,
+            confidence=0.42,
+            reason="temperament baseline",
+            projection_reason="trait bias projected from unconscious head",
+            applied_at_stage="trait_baseline",
+            native_operator="trait_bias",
+        )
 
     def apply_chronic_shift(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> dict:
         baseline = dict(state.temperament_state.get("baseline", {}))
@@ -553,9 +743,14 @@ class UnconsciousAgent(BaseAgent):
             }
         }
 
-    def propose(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
+    def build_direct_action_contribution(
+        self,
+        event: RoundEvent,
+        state: RuntimeState,
+        scenario: dict,
+        context: dict,
+    ) -> ProbabilisticContribution:
         return self.compute_trait_bias(event, state, scenario, context)
-
 
 class HippocampusAgent(BaseAgent):
     def __init__(self) -> None:
@@ -580,19 +775,110 @@ class HippocampusAgent(BaseAgent):
     def fallback_to_gist_when_trace_weak(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> dict:
         return {"gist": {"cue": context.get("cue"), "strength": context.get("recall_strength", 0.0)}}
 
-    def propose(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
+    def build_direct_action_contribution(
+        self,
+        event: RoundEvent,
+        state: RuntimeState,
+        scenario: dict,
+        context: dict,
+    ) -> ProbabilisticContribution:
         recall_strength = context.get("recall_strength", 0.0)
-        prefs = {}
+        prefs: dict[str, float] = {}
         if recall_strength > 0:
             prefs["recall"] = 0.10 + recall_strength * 0.22
-        return _bundle(self.name, prefs, confidence=0.66, reason=f"recall={recall_strength:.2f}", trace_tags=["memory"])
+        clipped = {action: _clip_delta(score) for action, score in prefs.items()}
+        sigma_scale = 1.0
+        dependency_trace = [
+            "priority:task_goal",
+            "control:task",
+            f"sigma_scale:{round(sigma_scale, 4)}",
+        ]
+        if clipped:
+            dependency_trace.append(f"top_action:{max(clipped, key=clipped.get)}")
+        return ProbabilisticContribution(
+            module_name=self.name,
+            module_type="memory",
+            level="action",
+            target_space="action",
+            raw_signal=clipped,
+            modulated_delta=clipped,
+            confidence=0.66,
+            confidence_calibrated=round(_clip(0.66 * sigma_scale, 0.0, 1.0), 4),
+            trace_reason=_top_reason(clipped, f"recall={recall_strength:.2f}"),
+            projection_reason="memory recall bias projected from hippocampus head",
+            applied_at_stage="memory_recall_action",
+            native_operator="memory_recall_bias",
+            dependency_trace=dependency_trace,
+            projection=EnergyProjectionSpec(module_type="memory", target_space="action", module_temperature=sigma_scale),
+        )
+
+    def build_memory_prior_contribution(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProbabilisticContribution:
+        cue = str(context.get("cue") or "")
+        recall_strength = float(context.get("recall_strength", 0.0) or 0.0)
+        interference = float(context.get("interference", 0.0) or 0.0)
+        episode_id = str(context.get("episode_id") or "")
+        separation_id = str(context.get("separation_id") or "")
+        prior_vector = dict(context.get("memory_prior_vector", {}) or {})
+        if not cue:
+            return ProbabilisticContribution(
+                module_name=self.name,
+                module_type="memory",
+                level="memory",
+                target_space="memory",
+                confidence=0.0,
+                trace_reason="no cue available for memory prior",
+                projection_reason="memory prior skipped",
+                native_operator="memory_prior",
+                projection=EnergyProjectionSpec(module_type="memory", target_space="memory"),
+            )
+        episodic_confidence = float(prior_vector.get("episodic_confidence", recall_strength) or recall_strength)
+        detail_bias = float(prior_vector.get("detail_bias", 0.0) or 0.0)
+        gist_bias = float(prior_vector.get("gist_bias", 0.0) or 0.0)
+        interference_penalty = float(prior_vector.get("interference_penalty", interference) or interference)
+        cue_quality_bias = float(prior_vector.get("cue_quality_bias", 0.0) or 0.0)
+        prior = max(
+            0.0,
+            episodic_confidence
+            + detail_bias * 0.18
+            + gist_bias * 0.08
+            - interference_penalty * 0.35,
+        )
+        confidence = min(1.0, 0.28 + episodic_confidence * 0.45 + cue_quality_bias * 0.18)
+        return ProbabilisticContribution(
+            module_name=self.name,
+            module_type="memory",
+            level="memory",
+            target_space="memory",
+            raw_signal={cue: round(prior, 6)},
+            modulated_delta={cue: round(prior, 6)},
+            confidence=confidence,
+            trace_reason=f"memory prior for cue={cue} episodic={episodic_confidence:.2f} detail={detail_bias:.2f} interference={interference_penalty:.2f}",
+            projection_reason="memory prior vector projected into memory prior",
+            native_operator="memory_prior",
+            dependency_trace=[
+                f"cue:{cue}",
+                f"recall_strength:{round(recall_strength, 4)}",
+                f"interference:{round(interference, 4)}",
+                *([f"prior_vector_strength:{round(float(prior_vector.get('episodic_confidence', 0.0) or 0.0), 4)}"] if prior_vector else []),
+                *([f"detail_bias:{round(detail_bias, 4)}"] if prior_vector else []),
+                *([f"gist_bias:{round(gist_bias, 4)}"] if prior_vector else []),
+                *([f"cue_quality_bias:{round(cue_quality_bias, 4)}"] if prior_vector else []),
+                *([f"episode_id:{episode_id}"] if episode_id else []),
+                *([f"separation_id:{separation_id}"] if separation_id else []),
+            ],
+            projection=EnergyProjectionSpec(
+                module_type="memory",
+                target_space="memory",
+                module_temperature=max(0.35, 1.0 - min(episodic_confidence + detail_bias * 0.2, 0.9) * 0.25),
+            ),
+        )
 
 
 class SalienceAgent(BaseAgent):
     def __init__(self) -> None:
         super().__init__(name="SalienceAgent")
 
-    def score_salience(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
+    def score_salience(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProbabilisticContribution:
         salience_signal = compute_salience_signal(event, scenario)
         prefs = {}
         if salience_signal >= 0.55:
@@ -601,12 +887,15 @@ class SalienceAgent(BaseAgent):
             prefs["clarify"] = max(prefs.get("clarify", 0.0), 0.08 + abs(event.valence) * 0.10)
         if not prefs:
             prefs["respond"] = 0.08
-        return _bundle(
+        return _action_contribution(
             self.name,
+            "salience",
             prefs,
             confidence=0.64,
             reason=f"salience={salience_signal:.2f}",
-            trace_tags=["salience"],
+            projection_reason="salience bias projected from salience head",
+            applied_at_stage="salience_attention",
+            native_operator="salience_bias",
         )
 
     def switch_mode(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> dict:
@@ -620,9 +909,14 @@ class SalienceAgent(BaseAgent):
     def promote_event_to_workspace(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> dict:
         return {"workspace_delta": {"focus_hint": "plan" if "help" in event.content.lower() else state.focus}}
 
-    def propose(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
+    def build_direct_action_contribution(
+        self,
+        event: RoundEvent,
+        state: RuntimeState,
+        scenario: dict,
+        context: dict,
+    ) -> ProbabilisticContribution:
         return self.score_salience(event, state, scenario, context)
-
 
 class HabitAgent(BaseAgent):
     def __init__(self) -> None:
@@ -634,18 +928,33 @@ class HabitAgent(BaseAgent):
     def update_habit_strength(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> dict:
         return {"state_update": {"habit_strength": context.get("habit_strength", 0.0)}}
 
-    def suggest_default_action(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
+    def suggest_default_action(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProbabilisticContribution:
         habit_strength = context.get("habit_strength", 0.0)
         prefs = {}
         if habit_strength > 0:
             prefs["respond"] = 0.06 + habit_strength * scenario.get("habit_weight", 0.1)
             prefs["recall"] = 0.04 + habit_strength * 0.12
-        return _bundle(self.name, prefs, confidence=0.60, reason=f"habit={habit_strength:.2f}", trace_tags=["habit"])
+        return _action_contribution(
+            self.name,
+            "habit",
+            prefs,
+            confidence=0.60,
+            reason=f"habit={habit_strength:.2f}",
+            projection_reason="habit bias projected from habit head",
+            applied_at_stage="habit_default",
+            native_operator="habit_bias",
+        )
 
     def estimate_override_cost(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> dict:
         return {"cost": _clip(context.get("habit_strength", 0.0) * 0.4, 0.0, 1.0)}
 
-    def propose(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
+    def build_direct_action_contribution(
+        self,
+        event: RoundEvent,
+        state: RuntimeState,
+        scenario: dict,
+        context: dict,
+    ) -> ProbabilisticContribution:
         return self.suggest_default_action(event, state, scenario, context)
 
 
@@ -653,7 +962,7 @@ class ValueAgent(BaseAgent):
     def __init__(self) -> None:
         super().__init__(name="ValueAgent")
 
-    def estimate_subjective_value(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> dict:
+    def _subjective_value_scores(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> dict[str, float]:
         content = event.content.lower()
         scores = {"respond": 0.08}
         if any(
@@ -663,7 +972,10 @@ class ValueAgent(BaseAgent):
             scores["plan"] = 0.12 + scenario.get("pfc_base_share", 0.2) * 0.22
         if event.target and context.get("closeness", 0.5) > 0.55:
             scores["connect"] = 0.08 + context["closeness"] * 0.10
-        return {"scores": scores}
+        return scores
+
+    def estimate_subjective_value(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> dict:
+        return {"scores": self._subjective_value_scores(event, state, scenario, context)}
 
     def discount_delayed_reward(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> dict:
         return {"scalar": 0.12 if scenario.get("delay_tolerance", 0.1) < 0.15 else 0.06}
@@ -674,9 +986,48 @@ class ValueAgent(BaseAgent):
     def score_uncertainty_penalty(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> dict:
         return {"penalty": _clip(state.action_ci.get("respond", 0.25), 0.0, 1.0)}
 
-    def propose(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
-        scores = self.estimate_subjective_value(event, state, scenario, context)["scores"]
-        return _bundle(self.name, scores, confidence=0.59, reason="subjective value re-rank", trace_tags=["value"])
+    def build_direct_action_contribution(
+        self,
+        event: RoundEvent,
+        state: RuntimeState,
+        scenario: dict,
+        context: dict,
+    ) -> ProbabilisticContribution:
+        return self.build_value_contribution(self.estimate_subjective_value(event, state, scenario, context))
+
+    def build_value_contribution(self, value_scores: dict[str, Any]) -> ProbabilisticContribution:
+        payload = dict(value_scores)
+        scores = dict(payload.get("scores", payload) or {})
+        confidence = float(payload.get("confidence", 0.59))
+        sigma_scale = max(0.35, min(1.35, float(payload.get("sigma_scale", 0.98))))
+        priority_bucket = str(payload.get("priority_bucket") or OWNER_PRIORITY_BUCKET.get(self.name, "task_goal"))
+        control_domain = str(payload.get("control_domain") or OWNER_CONTROL_DOMAIN.get(self.name, "task"))
+        trace_reason = str(payload.get("reason") or "subjective value re-rank")
+        applied_at_stage = str(payload.get("applied_at_stage") or "subjective_value")
+        top_action = max(scores, key=scores.get) if scores else ""
+        dependency_trace = [
+            f"priority:{priority_bucket}",
+            f"control:{control_domain}",
+            f"sigma_scale:{round(sigma_scale, 4)}",
+        ]
+        if top_action:
+            dependency_trace.append(f"top_action:{top_action}")
+        return ProbabilisticContribution(
+            module_name=self.name,
+            module_type="value",
+            level="action",
+            target_space="action",
+            raw_signal=dict(scores),
+            modulated_delta=dict(scores),
+            confidence=confidence,
+            confidence_calibrated=round(_clip(confidence * sigma_scale, 0.0, 1.0), 4),
+            trace_reason=trace_reason,
+            projection_reason="value bias projected from value head",
+            applied_at_stage=applied_at_stage,
+            native_operator="value_bias",
+            dependency_trace=dependency_trace,
+            projection=EnergyProjectionSpec(module_type="value", target_space="action", module_temperature=sigma_scale),
+        )
 
 
 class ResourceAgent(BaseAgent):
@@ -698,7 +1049,7 @@ class ResourceAgent(BaseAgent):
         )
         return {"scalar": scarcity}
 
-    def map_budget_to_bias(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
+    def map_budget_to_bias(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProbabilisticContribution:
         scarcity = self.compute_scarcity_index(event, state, scenario, context)["scalar"]
         bias = smooth_resource_biases(scarcity)
         body_hunger_bias = bias["body_hunger_bias"]
@@ -716,20 +1067,30 @@ class ResourceAgent(BaseAgent):
             prefs["rest"] = 0.06 + 0.18 * body_hunger_bias
         if scarcity > 0.50:
             prefs["short_reply"] = 0.06 + scarcity * 0.22
-        return _bundle(
+        risk_hints = {
+            "scarcity_pressure": bias["scarcity_pressure"],
+            "body_hunger_bias": round(body_hunger_bias, 4),
+            "effort_avoidance_bias": round(effort_avoidance_bias, 4),
+            "deliberation_compress": round(deliberation_compress, 4),
+            "rumination_bias": round(rumination_bias, 4),
+            "action_shrink_scale": round(action_shrink_scale, 4),
+        }
+        return _action_contribution(
             self.name,
+            "resource",
             prefs,
             confidence=0.58,
             reason=f"budget={state.budget_remaining:.2f}",
-            trace_tags=["resource"],
-            risk_hints={
-                "scarcity_pressure": bias["scarcity_pressure"],
-                "body_hunger_bias": round(body_hunger_bias, 4),
-                "effort_avoidance_bias": round(effort_avoidance_bias, 4),
-                "deliberation_compress": round(deliberation_compress, 4),
-                "rumination_bias": round(rumination_bias, 4),
-                "action_shrink_scale": round(action_shrink_scale, 4),
-            },
+            projection_reason="resource bias projected from resource head",
+            applied_at_stage="resource_budgeting",
+            native_operator="resource_bias",
+            priority_bucket="budget_overload",
+            control_domain="resource",
+            extra_dependency_trace=[
+                f"risk:{key}={round(float(value), 4)}"
+                for key, value in sorted(risk_hints.items())
+            ],
+            include_top_action=False,
         )
 
     def suggest_resource_mode(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> dict:
@@ -742,7 +1103,13 @@ class ResourceAgent(BaseAgent):
             return {"mode_flag": state.mode, "resource_mode": "stable"}
         return {"mode_flag": state.mode, "resource_mode": "abundant"}
 
-    def propose(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
+    def build_direct_action_contribution(
+        self,
+        event: RoundEvent,
+        state: RuntimeState,
+        scenario: dict,
+        context: dict,
+    ) -> ProbabilisticContribution:
         return self.map_budget_to_bias(event, state, scenario, context)
 
 
@@ -759,15 +1126,30 @@ class CerebellarPredictor(BaseAgent):
     def smooth_response_timing(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> dict:
         return {"timing_delta": {"reply_delay_bias": -0.02 if state.last_action == "plan" else 0.0}}
 
-    def micro_adjust_action(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
+    def micro_adjust_action(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProbabilisticContribution:
         prefs = {}
         if state.last_action == "clarify":
             prefs["clarify"] = 0.04
         elif state.last_action == "plan":
             prefs["plan"] = 0.04
-        return _bundle(self.name, prefs, confidence=0.35, reason="micro smoothing", trace_tags=["timing"])
+        return _action_contribution(
+            self.name,
+            "predictive",
+            prefs,
+            confidence=0.35,
+            reason="micro smoothing",
+            projection_reason="predictive smoothing projected from cerebellar head",
+            applied_at_stage="predictive_smoothing",
+            native_operator="predictive_smoothing",
+        )
 
-    def propose(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
+    def build_direct_action_contribution(
+        self,
+        event: RoundEvent,
+        state: RuntimeState,
+        scenario: dict,
+        context: dict,
+    ) -> ProbabilisticContribution:
         return self.micro_adjust_action(event, state, scenario, context)
 
 
@@ -792,13 +1174,30 @@ class PerspectiveModel(BaseAgent):
         risk = _clip((1.0 - context.get("closeness", 0.5)) * 0.5 + (0.15 if "clarify" in event.content.lower() else 0.0), 0.0, 1.0)
         return {"risk": risk}
 
-    def adjust_social_interpretation(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
+    def adjust_social_interpretation(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProbabilisticContribution:
         prefs = {}
         if scenario.get("relationship_weight", 0.0) >= 0.22 and event.target:
             prefs["clarify"] = 0.05 + context["closeness"] * 0.08
-        return _bundle(self.name, prefs, confidence=0.49, reason="social interpretation", trace_tags=["perspective"])
+        return _action_contribution(
+            self.name,
+            "perspective",
+            prefs,
+            confidence=0.49,
+            reason="social interpretation",
+            projection_reason="perspective bias projected from perspective head",
+            applied_at_stage="social_perspective",
+            native_operator="perspective_bias",
+            priority_bucket="relation_boundary",
+            control_domain="relation",
+        )
 
-    def propose(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProposalBundle:
+    def build_direct_action_contribution(
+        self,
+        event: RoundEvent,
+        state: RuntimeState,
+        scenario: dict,
+        context: dict,
+    ) -> ProbabilisticContribution:
         return self.adjust_social_interpretation(event, state, scenario, context)
 
 
@@ -818,23 +1217,28 @@ class ConflictMonitorAgent(BaseAgent):
     def _coerce_runtime_state(self, state: RuntimeState | dict) -> RuntimeState:
         return state if isinstance(state, RuntimeState) else RuntimeState(**state)
 
-    def _priority_signals(self, proposals: list[ProposalBundle], distribution_state: ActionDistributionState) -> dict[str, float]:
-        signals = {name: 0.0 for name in PRIORITY_ORDER}
-        for bundle in proposals:
-            bucket = getattr(bundle, "priority_bucket", OWNER_PRIORITY_BUCKET.get(bundle.owner, "task_goal"))
-            top_delta = max((abs(score) for score in bundle.delta_p.values()), default=0.0)
+    def _coerce_action_view(self, action_view: dict[str, Any] | Any | None) -> dict[str, dict[str, float] | set[str] | str]:
+        return _coerce_action_view(action_view)
+
+    def _priority_signals(self, signals: list[ActionEvidenceSignal], action_view: dict[str, Any] | Any | None) -> dict[str, float]:
+        action_view = self._coerce_action_view(action_view)
+        distribution = action_view["distribution"]
+        priority_rows = {name: 0.0 for name in PRIORITY_ORDER}
+        for evidence in signals:
+            bucket = getattr(evidence, "priority_bucket", OWNER_PRIORITY_BUCKET.get(evidence.module_name, "task_goal"))
+            top_delta = max((abs(score) for score in evidence.action_delta.values()), default=0.0)
             risk_strength = max(
                 (
                     float(value)
-                    for value in getattr(bundle, "risk_hints", {}).values()
+                    for value in getattr(evidence, "risk_hints", {}).values()
                     if isinstance(value, (int, float))
                 ),
                 default=0.0,
             )
-            gated_mass = sum(distribution_state.p_raw.get(action, 0.0) for action in getattr(bundle, "gated_actions", []))
-            signal = _clip(0.20 + top_delta * bundle.confidence * 1.25 + risk_strength * 0.45 + gated_mass * 0.45, 0.0, 1.0)
-            signals[bucket] = max(signals.get(bucket, 0.0), signal)
-        return signals
+            gated_mass = sum(float(distribution.get(action, 0.0) or 0.0) for action in getattr(evidence, "gated_actions", []))
+            signal_strength = _clip(0.20 + top_delta * evidence.confidence * 1.25 + risk_strength * 0.45 + gated_mass * 0.45, 0.0, 1.0)
+            priority_rows[bucket] = max(priority_rows.get(bucket, 0.0), signal_strength)
+        return priority_rows
 
     def _vector_conflict(self, left: dict[str, float], right: dict[str, float]) -> float:
         if not left or not right:
@@ -847,8 +1251,10 @@ class ConflictMonitorAgent(BaseAgent):
         mismatch_bonus = 0.18 if left_top != right_top else 0.0
         return _clip(0.22 + distance / normalizer + mismatch_bonus, 0.0, 1.0)
 
-    def score_conflict(self, proposals: list[ProposalBundle], distribution_state: ActionDistributionState) -> dict:
-        top_scores = sorted(distribution_state.p_raw.values(), reverse=True)
+    def score_conflict(self, signals: list[ActionEvidenceSignal], action_view: dict[str, Any] | Any | None) -> dict:
+        action_view = self._coerce_action_view(action_view)
+        distribution = action_view["distribution"]
+        top_scores = sorted(distribution.values(), reverse=True)
         if len(top_scores) < 2:
             empty = ConflictAssessment(
                 score=0.0,
@@ -861,8 +1267,8 @@ class ConflictMonitorAgent(BaseAgent):
             payload["total_score"] = payload["score"]
             return payload
 
-        priority_signals = self._priority_signals(proposals, distribution_state)
-        top_actions = [max(bundle.delta_p, key=bundle.delta_p.get) for bundle in proposals if bundle.delta_p]
+        priority_signals = self._priority_signals(signals, action_view)
+        top_actions = [max(signal.action_delta, key=signal.action_delta.get) for signal in signals if signal.action_delta]
         unique_ratio = 0.0
         if len(top_actions) > 1:
             unique_ratio = (len(set(top_actions)) - 1) / max(len(top_actions) - 1, 1)
@@ -870,22 +1276,22 @@ class ConflictMonitorAgent(BaseAgent):
         closeness = _clip(1.0 - top_gap / 0.30, 0.0, 1.0)
         proposal_divergence = _clip(0.32 + 0.40 * unique_ratio + 0.35 * closeness, 0.0, 1.0)
 
-        gated_ratio = sum(1 for bundle in proposals if getattr(bundle, "gated_actions", [])) / max(len(proposals), 1)
+        gated_ratio = sum(1 for signal in signals if getattr(signal, "gated_actions", [])) / max(len(signals), 1)
         max_gated_mass = max(
             (
-                sum(distribution_state.p_raw.get(action, 0.0) for action in getattr(bundle, "gated_actions", []))
-                for bundle in proposals
+                sum(float(distribution.get(action, 0.0) or 0.0) for action in getattr(signal, "gated_actions", []))
+                for signal in signals
             ),
             default=0.0,
         )
-        veto_ratio = sum(1 for bundle in proposals if bundle.veto) / max(len(proposals), 1)
+        veto_ratio = sum(1 for signal in signals if signal.veto) / max(len(signals), 1)
         veto_tension = _clip(0.12 + max_gated_mass * 1.20 + gated_ratio * 0.35 + veto_ratio * 0.45, 0.0, 1.0)
 
         task_vector: dict[str, float] = {}
         desire_vector: dict[str, float] = {}
         roam_vector: dict[str, float] = {}
-        for bundle in proposals:
-            bucket = getattr(bundle, "priority_bucket", OWNER_PRIORITY_BUCKET.get(bundle.owner, "task_goal"))
+        for signal in signals:
+            bucket = getattr(signal, "priority_bucket", OWNER_PRIORITY_BUCKET.get(signal.module_name, "task_goal"))
             target = None
             if bucket == "task_goal":
                 target = task_vector
@@ -895,8 +1301,8 @@ class ConflictMonitorAgent(BaseAgent):
                 target = roam_vector
             if target is None:
                 continue
-            for action, score in bundle.delta_p.items():
-                target[action] = target.get(action, 0.0) + abs(score) * bundle.confidence
+            for action, score in signal.action_delta.items():
+                target[action] = target.get(action, 0.0) + abs(score) * signal.confidence
 
         value_gap = _clip(
             max(
@@ -908,14 +1314,18 @@ class ConflictMonitorAgent(BaseAgent):
             1.0,
         )
 
-        relation_mass = distribution_state.p_raw.get("connect", 0.0) + distribution_state.p_raw.get("clarify", 0.0) * 0.35
+        relation_mass = float(distribution.get("connect", 0.0) or 0.0) + float(distribution.get("clarify", 0.0) or 0.0) * 0.35
         relation_risk_gap = _clip(
             0.08 + priority_signals["relation_boundary"] * 0.78 + relation_mass * 0.55,
             0.0,
             1.0,
         )
 
-        risky_body_mass = distribution_state.p_raw.get("plan", 0.0) + distribution_state.p_raw.get("connect", 0.0) + distribution_state.p_raw.get("wander", 0.0)
+        risky_body_mass = (
+            float(distribution.get("plan", 0.0) or 0.0)
+            + float(distribution.get("connect", 0.0) or 0.0)
+            + float(distribution.get("wander", 0.0) or 0.0)
+        )
         body_gap = _clip(
             0.12 + max(priority_signals["body_safety"], priority_signals["budget_overload"] * 0.92) * 0.80 + min(1.0, risky_body_mass) * 0.25,
             0.0,
@@ -938,6 +1348,12 @@ class ConflictMonitorAgent(BaseAgent):
             0.0,
             1.0,
         )
+        dominant_pressure = max(components.value_gap, components.body_gap)
+        pressure_synergy = (
+            max(0.0, dominant_pressure - 0.85) * 0.40
+            + max(0.0, components.proposal_divergence - 0.50) * 0.30
+        )
+        score = _clip(score + pressure_synergy, 0.0, 1.0)
         dominant_conflicts = [
             name
             for name, value in sorted(to_dict(components).items(), key=lambda item: item[1], reverse=True)
@@ -957,7 +1373,7 @@ class ConflictMonitorAgent(BaseAgent):
     def trigger_control_escalation(
         self,
         assessment: dict | float,
-        distribution_state: ActionDistributionState | None = None,
+        action_view: dict[str, Any] | Any | None = None,
         attempts: int = 0,
         hot_active: bool = False,
     ) -> dict:
@@ -982,15 +1398,17 @@ class ConflictMonitorAgent(BaseAgent):
             winning_priority = max(PRIORITY_ORDER, key=lambda name: signals.get(name, 0.0))
 
         blocked_actions = set(DEFAULT_BLOCKS.get(winning_priority, set()))
-        if distribution_state is not None:
+        if action_view is not None:
+            action_view = self._coerce_action_view(action_view)
+            distribution = action_view["distribution"]
             if winning_priority == "body_safety":
-                blocked_actions.update(action for action in {"plan", "connect", "wander"} if distribution_state.p_raw.get(action, 0.0) >= 0.06)
+                blocked_actions.update(action for action in {"plan", "connect", "wander"} if float(distribution.get(action, 0.0) or 0.0) >= 0.06)
             elif winning_priority == "budget_overload":
-                blocked_actions.update(action for action in {"plan", "connect", "wander"} if distribution_state.p_raw.get(action, 0.0) >= 0.04)
+                blocked_actions.update(action for action in {"plan", "connect", "wander"} if float(distribution.get(action, 0.0) or 0.0) >= 0.04)
             elif winning_priority == "task_goal":
-                blocked_actions.update(action for action in {"wander"} if distribution_state.p_raw.get(action, 0.0) >= 0.05)
+                blocked_actions.update(action for action in {"wander"} if float(distribution.get(action, 0.0) or 0.0) >= 0.05)
             elif winning_priority == "relation_boundary":
-                blocked_actions.update(action for action in {"connect"} if distribution_state.p_raw.get(action, 0.0) >= 0.03)
+                blocked_actions.update(action for action in {"connect"} if float(distribution.get(action, 0.0) or 0.0) >= 0.03)
         if hot_active:
             blocked_actions.add("connect")
 
@@ -1029,10 +1447,11 @@ class ConflictMonitorAgent(BaseAgent):
             allowed_resamples = self.max_resample_rounds
         if critical:
             allowed_resamples = 2
+        force_compromise = critical and allowed_resamples > 0 and (attempts + 1) >= allowed_resamples
         return {
             "flag": attempts < allowed_resamples,
             "allowed_resamples": allowed_resamples,
-            "force_compromise": critical,
+            "force_compromise": force_compromise,
             "critical_conflict": critical,
         }
 
@@ -1052,6 +1471,7 @@ class ConflictMonitorAgent(BaseAgent):
         previous_stage = runtime_state.repair_state.stage
         winning_priority = resolution.get("winning_priority")
         template = compromise.get("template") or resolution.get("applied_template")
+        resolution_flag = bool(resolution.get("flag"))
         adjustment_reason = ""
         if deadlock_fuse_triggered:
             adjustment_reason = "deadlock_fuse"
@@ -1069,6 +1489,12 @@ class ConflictMonitorAgent(BaseAgent):
         elif adjustment_reason:
             next_stage = "adjusting"
             transition_reason = adjustment_reason
+        elif resolution_flag and runtime_state.repair_ledger:
+            next_stage = "repairing"
+            transition_reason = "sustained_pressure"
+        elif resolution_flag:
+            next_stage = "adjusting"
+            transition_reason = "resolution_pressure"
         elif previous_stage in {"adjusting", "repairing", "cooling"} and (
             runtime_state.conflict_hot_rounds > 0 or runtime_state.conflict_recovery_rounds > 0
         ):
@@ -1096,6 +1522,8 @@ class ConflictMonitorAgent(BaseAgent):
             repair_mode = "deadlock_fuse" if deadlock_fuse_triggered else "conflict_repair"
         elif next_stage == "adjusting":
             repair_mode = "post_error_adjustment"
+        elif next_stage == "repairing":
+            repair_mode = "conflict_repair"
         elif next_stage == "cooling":
             repair_mode = "conflict_cooling"
         elif next_stage == "recovered":
@@ -1162,13 +1590,216 @@ class ConflictMonitorAgent(BaseAgent):
         fail_score = 0.85 if scenario == "task" and action == "wander" else 0.05
         return {"pass": fail_score < 0.70, "plausibility_fail_score": fail_score}
 
+    def build_arbitration_contribution(
+        self,
+        conflict_state: dict,
+        action_view: dict[str, Any] | Any,
+    ) -> ProbabilisticContribution:
+        action_view = self._coerce_action_view(action_view)
+        distribution = action_view["distribution"]
+        gate = action_view["gate"]
+        score = float(conflict_state.get("score", 0.0) or 0.0)
+        priority_signals = {
+            str(key): float(value)
+            for key, value in dict(conflict_state.get("priority_signals", {}) or {}).items()
+        }
+        winning_priority = str(conflict_state.get("winning_priority") or "")
+        if not winning_priority and priority_signals:
+            winning_priority = max(priority_signals, key=priority_signals.get)
+        winning_priority = winning_priority or "none"
+        passes = list(conflict_state.get("passes", []) or [])
+        latest_resolution = dict(passes[-1].get("resolution", {})) if passes else {}
+        action_scales = dict(latest_resolution.get("action_scales", {}) or {})
+        blocked_actions = set(latest_resolution.get("blocked_actions", []) or [])
+        circuit_breaker = dict(conflict_state.get("circuit_breaker", {}) or {})
+        blocked_actions.update(circuit_breaker.get("blocked_actions", []) or [])
+
+        modulated_delta: dict[str, float] = {}
+        for action, scale in action_scales.items():
+            scale_value = float(scale)
+            if abs(scale_value - 1.0) < 1e-9:
+                continue
+            modulated_delta[action] = round(scale_value - 1.0, 6)
+
+        if not modulated_delta and not blocked_actions and score > 0.0 and winning_priority in DEFAULT_BLOCKS:
+            soft_penalty_strength = min(0.85, score * max(0.25, priority_signals.get(winning_priority, 0.0)))
+            for action in DEFAULT_BLOCKS[winning_priority]:
+                raw_mass = float(distribution.get(action, 0.0) or 0.0)
+                if raw_mass <= 0.0:
+                    continue
+                modulated_delta[action] = round(-soft_penalty_strength * (0.35 + raw_mass), 6)
+
+        raw_distribution = {
+            str(action): float(value)
+            for action, value in dict(distribution or {}).items()
+            if float(value) > 0.0
+        }
+        sorted_actions = sorted(raw_distribution.items(), key=lambda item: item[1], reverse=True)
+        peak_clusters: list[dict[str, object]] = []
+        winner_peak_posterior: dict[str, float] = {}
+        if sorted_actions:
+            top_mass = float(sorted_actions[0][1])
+            candidate_threshold = max(0.05, top_mass * 0.65)
+            candidate_rows: list[tuple[str, float, float, bool]] = []
+            for action, raw_mass in sorted_actions:
+                if raw_mass < candidate_threshold and candidate_rows:
+                    break
+                gate_scale = float(gate.get(action, 1.0) or 1.0)
+                action_scale = float(action_scales.get(action, 1.0) or 1.0)
+                blocked = action in blocked_actions
+                adjusted_mass = 0.0 if blocked else max(0.0, raw_mass * max(action_scale, 0.0) * gate_scale)
+                candidate_rows.append((action, raw_mass, adjusted_mass, blocked))
+                if len(candidate_rows) >= 4:
+                    break
+            normalizer = sum(row[2] for row in candidate_rows) or sum(row[1] for row in candidate_rows) or 1.0
+            peak_actions = [row[0] for row in candidate_rows]
+            for index, (action, raw_mass, adjusted_mass, blocked) in enumerate(candidate_rows, start=1):
+                posterior_mass = adjusted_mass if normalizer > 0.0 and sum(row[2] for row in candidate_rows) > 0.0 else raw_mass
+                winner_peak_posterior[action] = round(posterior_mass / normalizer, 6)
+                peak_clusters.append(
+                    {
+                        "peak_id": f"peak_{index}",
+                        "actions": [action],
+                        "raw_mass": round(raw_mass, 6),
+                        "adjusted_mass": round(adjusted_mass, 6),
+                        "blocked": blocked,
+                        "mutual_exclusion_with": [name for name in peak_actions if name != action],
+                    }
+                )
+
+        dominant_conflicts = [str(item) for item in conflict_state.get("dominant_conflicts", []) or []]
+        winner_peak = max(winner_peak_posterior, key=winner_peak_posterior.get) if winner_peak_posterior else ""
+        compromise_state = dict(conflict_state.get("compromise", {}) or {})
+        compromise_template = str(
+            compromise_state.get("template")
+            or latest_resolution.get("applied_template")
+            or ""
+        )
+        compromise_template_prior: dict[str, float] = {}
+        compromise_allowed = bool(compromise_template) and (
+            bool(compromise_state.get("triggered"))
+            or bool(latest_resolution.get("flag"))
+            or bool(conflict_state.get("allowed_resamples", 0))
+            or bool(conflict_state.get("critical_conflict"))
+        )
+        if compromise_allowed:
+            template_weight = round(_clip(0.4 + score * 0.6, 0.0, 1.0), 6)
+            compromise_template_prior[compromise_template] = template_weight
+        dependency_trace = [
+            f"winning_priority:{winning_priority}",
+            f"conflict_score:{round(score, 4)}",
+            f"passes:{len(passes)}",
+            f"conflict_mode:{action_view['conflict_mode']}",
+            f"winner_peak:{winner_peak or 'none'}",
+            f"peak_count:{len(peak_clusters)}",
+        ]
+        if compromise_template:
+            dependency_trace.append(f"compromise_template:{compromise_template}")
+        dependency_trace.extend(f"dominant:{name}" for name in dominant_conflicts[:3])
+        if not latest_resolution.get("flag"):
+            dependency_trace.append("arbitration_mode:soft_posterior_penalty")
+
+        return ProbabilisticContribution(
+            module_name=self.name,
+            module_type="conflict",
+            level="action",
+            target_space="action",
+            raw_signal=dict(modulated_delta),
+            modulated_delta=modulated_delta,
+            hard_mask={action: True for action in sorted(blocked_actions)},
+            posterior=winner_peak_posterior,
+            peak_clusters=peak_clusters,
+            compromise_template_prior=compromise_template_prior,
+            confidence=_clip(0.35 + score * 0.55, 0.0, 1.0),
+            confidence_calibrated=round(_clip(0.45 + score * 0.45, 0.0, 1.0), 4),
+            trace_reason=f"conflict arbitration priority={winning_priority} winner_peak={winner_peak or 'none'} score={score:.2f}",
+            projection_reason="conflict arbitration projected from action scales and blocked actions",
+            applied_at_stage="peak_arbitration",
+            native_operator="conflict_arbitration",
+            dependency_trace=dependency_trace,
+            projection=EnergyProjectionSpec(
+                module_type="conflict",
+                target_space="action",
+                module_temperature=max(0.45, 1.0 - score * 0.2),
+            ),
+        )
+
 
 class ThalamusAttentionAgent(BaseAgent):
     def __init__(self) -> None:
         super().__init__(name="ThalamusAttentionAgent")
 
-    def aggregate_proposals(self, distribution_state: ActionDistributionState) -> dict:
-        return {"distribution": distribution_state.p_raw}
+    def aggregate_proposals(self, action_truth: dict[str, Any] | Any | None = None) -> dict:
+        action_view = _coerce_action_view(action_truth)
+        return {"distribution": action_view["distribution"]}
+
+    def build_context_routing_contribution(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProbabilisticContribution:
+        cue = str(context.get("cue") or "")
+        closeness = float(context.get("closeness", 0.0) or 0.0)
+        recall_strength = float(context.get("recall_strength", 0.0) or 0.0)
+        context_signal: dict[str, float] = {}
+        dependency_trace: list[str] = []
+        if cue:
+            context_signal[f"cue:{cue}"] = round(0.25 + recall_strength * 0.35, 6)
+            dependency_trace.append(f"cue:{cue}")
+        context_signal["task_relevance"] = round(0.18 + min(0.4, len(event.content.split()) * 0.01), 6)
+        context_signal["relation_context"] = round(closeness * 0.2, 6)
+        dependency_trace.extend(
+            [
+                f"recall_strength:{round(recall_strength, 4)}",
+                f"closeness:{round(closeness, 4)}",
+            ]
+        )
+        return ProbabilisticContribution(
+            module_name=self.name,
+            module_type="context",
+            level="context",
+            target_space="context",
+            raw_signal=context_signal,
+            modulated_delta=context_signal,
+            confidence=0.62,
+            trace_reason="thalamus routes salient cue and task-relevant context",
+            projection_reason="context routing projected into context energy",
+            native_operator="context_routing",
+            dependency_trace=dependency_trace,
+            projection=EnergyProjectionSpec(module_type="context", target_space="context", module_temperature=0.9),
+        )
+
+    def build_memory_routing_contribution(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProbabilisticContribution:
+        cue = str(context.get("cue") or "")
+        closeness = float(context.get("closeness", 0.0) or 0.0)
+        recall_strength = float(context.get("recall_strength", 0.0) or 0.0)
+        if not cue:
+            return ProbabilisticContribution(
+                module_name=self.name,
+                module_type="context",
+                level="memory",
+                target_space="memory",
+                confidence=0.0,
+                trace_reason="no cue available for memory routing",
+                projection_reason="memory routing skipped",
+                native_operator="context_route",
+                projection=EnergyProjectionSpec(module_type="context", target_space="memory"),
+            )
+        route_bias = round(0.12 + recall_strength * 0.18 + closeness * 0.08 + min(0.08, len(event.content.split()) * 0.005), 6)
+        return ProbabilisticContribution(
+            module_name=self.name,
+            module_type="context",
+            level="memory",
+            target_space="memory",
+            raw_signal={cue: route_bias},
+            modulated_delta={cue: route_bias},
+            confidence=0.56,
+            trace_reason="thalamus routes context signal into memory field",
+            projection_reason="context route projected into memory energy",
+            native_operator="context_route",
+            dependency_trace=[
+                f"cue:{cue}",
+                f"recall_strength:{round(recall_strength, 4)}",
+                f"closeness:{round(closeness, 4)}",
+            ],
+            projection=EnergyProjectionSpec(module_type="context", target_space="memory", module_temperature=0.92),
+        )
 
     def normalize_distribution(self, distribution: dict[str, float]) -> dict:
         total = sum(max(value, 0.0) for value in distribution.values()) or 1.0

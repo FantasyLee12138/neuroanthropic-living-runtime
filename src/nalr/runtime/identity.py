@@ -4,7 +4,14 @@ import hashlib
 from typing import Any, Callable
 
 from nalr.runtime.intent import IntentRuntime
-from nalr.schemas.models import DisclosureIntentState, IdentityContext, QueryIntentState, RuntimeState
+from nalr.schemas.models import (
+    DisclosureIntentState,
+    EnergyProjectionSpec,
+    IdentityContext,
+    ProbabilisticContribution,
+    QueryIntentState,
+    RuntimeState,
+)
 
 
 def _clip(value: float, low: float = 0.0, high: float = 1.0) -> float:
@@ -242,3 +249,64 @@ class IdentityRuntime:
             "identity_shaping_sources": self.shaping_sources(shaping_events, slow_variables),
             "non_interactive_sources": list(identity_context.non_interactive_sources),
         }
+
+    def build_identity_prior_contribution(
+        self,
+        *,
+        identity_context: IdentityContext,
+        state: RuntimeState,
+    ) -> ProbabilisticContribution:
+        modulated_delta: dict[str, float] = {}
+        query_kind = str(identity_context.query_kind or "general")
+        disclosure_intent = str(identity_context.disclosure_intent or "withhold")
+
+        if query_kind in {"self_identity", "provider_identity"}:
+            modulated_delta["respond"] = modulated_delta.get("respond", 0.0) + 0.22
+            modulated_delta["clarify"] = modulated_delta.get("clarify", 0.0) + 0.10
+            modulated_delta["wander"] = modulated_delta.get("wander", 0.0) - 0.12
+        elif query_kind == "answer_explanation":
+            modulated_delta["respond"] = modulated_delta.get("respond", 0.0) + 0.14
+            modulated_delta["recall"] = modulated_delta.get("recall", 0.0) + 0.10
+            modulated_delta["wander"] = modulated_delta.get("wander", 0.0) - 0.08
+        else:
+            modulated_delta["respond"] = modulated_delta.get("respond", 0.0) + 0.04
+
+        if disclosure_intent == "withhold":
+            modulated_delta["connect"] = modulated_delta.get("connect", 0.0) - 0.08
+            modulated_delta["wander"] = modulated_delta.get("wander", 0.0) - 0.04
+        elif disclosure_intent == "provider_origin":
+            modulated_delta["clarify"] = modulated_delta.get("clarify", 0.0) + 0.06
+        elif disclosure_intent == "relational_self_disclosure":
+            modulated_delta["connect"] = modulated_delta.get("connect", 0.0) + 0.06
+
+        if state.identity_state.display_name:
+            modulated_delta["respond"] = modulated_delta.get("respond", 0.0) + 0.03
+
+        query_confidence = max(identity_context.query_intent_posterior.values(), default=0.0)
+        disclosure_confidence = max(identity_context.disclosure_intent_posterior.values(), default=0.0)
+        confidence = _clip(0.35 + max(query_confidence, disclosure_confidence) * 0.55, 0.0, 1.0)
+
+        dependency_trace = [
+            f"query_kind:{query_kind}",
+            f"query_intent:{identity_context.query_intent}",
+            f"disclosure_intent:{disclosure_intent}",
+            f"display_label:{identity_context.display_label or self.unnamed_label()}",
+        ]
+        dependency_trace.extend(f"anchor:{anchor}" for anchor in identity_context.evidence_anchors[:3])
+
+        return ProbabilisticContribution(
+            module_name="IdentityRuntime",
+            module_type="identity",
+            level="action",
+            target_space="action",
+            raw_signal={action: round(value, 6) for action, value in modulated_delta.items() if abs(value) > 1e-9},
+            modulated_delta={action: round(value, 6) for action, value in modulated_delta.items() if abs(value) > 1e-9},
+            confidence=confidence,
+            confidence_calibrated=round(_clip(confidence * 0.95, 0.0, 1.0), 4),
+            trace_reason=f"identity prior query={query_kind} disclosure={disclosure_intent}",
+            projection_reason="identity prior projected from identity context",
+            applied_at_stage="identity_prior",
+            native_operator="identity_prior",
+            dependency_trace=dependency_trace,
+            projection=EnergyProjectionSpec(module_type="identity", target_space="action", module_temperature=0.9),
+        )

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import shutil
+from uuid import uuid4
 
 import duckdb
 
@@ -16,6 +17,106 @@ from nalr.storage.parquet_io import append_dataset, read_dataset_rows
 
 def _mtime_iso(path: Path) -> str:
     return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _looks_like_probability_field(payload: dict[str, object]) -> bool:
+    return any(key in payload for key in ("context", "memory", "action", "token_state", "couplings"))
+
+
+def _float_map(payload: object) -> dict[str, float]:
+    if not isinstance(payload, dict):
+        return {}
+    result: dict[str, float] = {}
+    for action, value in payload.items():
+        if not isinstance(action, str) or not action:
+            continue
+        try:
+            result[action] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def canonical_probability_field_payload(payload: dict[str, object]) -> dict[str, object]:
+    probability_field = payload.get("probability_field")
+    if isinstance(probability_field, dict) and probability_field:
+        return copy.deepcopy(probability_field)
+    return {}
+
+
+def legacy_probability_field_payload(payload: dict[str, object]) -> dict[str, object]:
+    distribution_state = payload.get("distribution_state")
+    if not isinstance(distribution_state, dict) or not distribution_state:
+        return {}
+    if _looks_like_probability_field(distribution_state):
+        return copy.deepcopy(distribution_state)
+
+    winner_posterior = (
+        _float_map(distribution_state.get("p_final"))
+        or _float_map(distribution_state.get("p_mix"))
+        or _float_map(distribution_state.get("p_raw"))
+        or _float_map(distribution_state.get("p_base"))
+    )
+    final_energy = _float_map(distribution_state.get("u_shifted")) or _float_map(distribution_state.get("u_base"))
+    hard_masked_targets = [
+        str(action)
+        for action in list(dict(distribution_state.get("conflict", {}) or {}).get("hard_masked_targets", []) or [])
+        if str(action)
+    ]
+    winner_target = str(payload.get("sampled_action") or "")
+    if winner_posterior:
+        winner_target = max(winner_posterior, key=winner_posterior.get)
+
+    action_layer: dict[str, object] = {}
+    if winner_posterior:
+        action_layer["winner_posterior"] = winner_posterior
+    if final_energy:
+        action_layer["final_energy"] = final_energy
+    if winner_target:
+        action_layer["winner_target"] = winner_target
+    if hard_masked_targets:
+        action_layer["hard_masked_targets"] = hard_masked_targets
+    if action_layer:
+        action_layer.setdefault("contribution_audit", [])
+
+    rebuilt: dict[str, object] = {}
+    if action_layer:
+        rebuilt["action"] = action_layer
+    token_state = payload.get("token_state")
+    if isinstance(token_state, dict) and token_state:
+        rebuilt["token_state"] = copy.deepcopy(token_state)
+    couplings = payload.get("couplings")
+    if isinstance(couplings, list) and couplings:
+        rebuilt["couplings"] = copy.deepcopy(couplings)
+    return rebuilt
+
+
+def normalize_round_payload(payload: dict[str, object]) -> dict[str, object]:
+    normalized = copy.deepcopy(payload)
+    probability_field = canonical_probability_field_payload(normalized)
+    if probability_field:
+        normalized["probability_field"] = probability_field
+        candidate_distribution = normalized.get("candidate_distribution")
+        action_layer = probability_field.get("action", {}) if isinstance(probability_field, dict) else {}
+        winner_posterior = action_layer.get("winner_posterior", {}) if isinstance(action_layer, dict) else {}
+        if (not isinstance(candidate_distribution, dict) or not candidate_distribution) and isinstance(winner_posterior, dict) and winner_posterior:
+            normalized["candidate_distribution"] = copy.deepcopy(winner_posterior)
+    normalized.pop("distribution_state", None)
+    return normalized
+
+
+def rewrite_round_payload(payload: dict[str, object]) -> dict[str, object]:
+    normalized = copy.deepcopy(payload)
+    probability_field = canonical_probability_field_payload(normalized) or legacy_probability_field_payload(normalized)
+    if probability_field:
+        normalized["probability_field"] = probability_field
+        candidate_distribution = normalized.get("candidate_distribution")
+        action_layer = probability_field.get("action", {}) if isinstance(probability_field, dict) else {}
+        winner_posterior = action_layer.get("winner_posterior", {}) if isinstance(action_layer, dict) else {}
+        if (not isinstance(candidate_distribution, dict) or not candidate_distribution) and isinstance(winner_posterior, dict) and winner_posterior:
+            normalized["candidate_distribution"] = copy.deepcopy(winner_posterior)
+    normalized.pop("distribution_state", None)
+    return normalized
 
 
 ROUND_CANONICAL_SCHEMA = {
@@ -48,11 +149,22 @@ ROUND_TRACE_SCHEMA = {
     "conflict_score": "DOUBLE",
     "plausibility_fail_score": "DOUBLE",
     "tags_json": "VARCHAR",
-    "distribution_state_json": "VARCHAR",
+    "probability_field_json": "VARCHAR",
+    "token_state_json": "VARCHAR",
+    "cross_layer_coupling_verdict_json": "VARCHAR",
+    "renderer_decision_integrity_json": "VARCHAR",
+    "memory_write_gate_json": "VARCHAR",
+    "conflict_arbitration_json": "VARCHAR",
     "state_snapshot_json": "VARCHAR",
     "render_plan_json": "VARCHAR",
     "gate_decisions_json": "VARCHAR",
     "rendered_expression_json": "VARCHAR",
+    "long_run_projection_json": "VARCHAR",
+    "long_run_projection_online_prior_json": "VARCHAR",
+    "motivation_pool_json": "VARCHAR",
+    "motivation_feedback_json": "VARCHAR",
+    "endogenous_tick_reason_json": "VARCHAR",
+    "endogenous_policy_shift_json": "VARCHAR",
 }
 
 RUN_CANONICAL_SCHEMA = {
@@ -207,11 +319,11 @@ class TraceStore:
         self._trace_sync_status_cache = json.loads(self.trace_sync_status_path.read_text(encoding="utf-8"))
 
     def _load_round_records(self) -> list[dict]:
-        parquet_rows = self._list_rounds_from_parquet()
+        parquet_rows = self._raw_round_payloads_from_parquet()
         if parquet_rows:
-            return parquet_rows
+            return [rewrite_round_payload(payload) for payload in parquet_rows]
         return [
-            ensure_recorded_fields(json.loads(path.read_text(encoding="utf-8")), recorded_at=_mtime_iso(path))
+            rewrite_round_payload(ensure_recorded_fields(json.loads(path.read_text(encoding="utf-8")), recorded_at=_mtime_iso(path)))
             for path in sorted(self.rounds_dir.glob("round_*.json"))
         ]
 
@@ -227,6 +339,64 @@ class TraceStore:
     def _payload_json(self, payload: dict) -> str:
         return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
+    def _probability_field_payload(self, payload: dict) -> dict:
+        probability_field = canonical_probability_field_payload(payload)
+        return probability_field if isinstance(probability_field, dict) else {}
+
+    def _conflict_arbitration_payload(self, payload: dict) -> dict:
+        direct = dict(payload.get("conflict_arbitration", {}) or {})
+        probability_field = self._probability_field_payload(payload)
+        action_layer = probability_field.get("action", {}) if isinstance(probability_field, dict) else {}
+        audit_rows = action_layer.get("contribution_audit", []) if isinstance(action_layer, dict) else []
+        conflict_row = next(
+            (
+                row
+                for row in audit_rows
+                if isinstance(row, dict) and row.get("module_name") == "ConflictMonitorAgent"
+            ),
+            {},
+        )
+        posterior = dict(direct.get("winner_peak_posterior", {}) or conflict_row.get("posterior", {}) or {})
+        compromise_template_prior = dict(
+            direct.get("compromise_template_prior", {}) or conflict_row.get("compromise_template_prior", {}) or {}
+        )
+        dependency_trace = [str(item) for item in list(conflict_row.get("dependency_trace", []) or [])]
+        payload_summary = dict(direct)
+        if not payload_summary.get("winning_priority"):
+            for item in dependency_trace:
+                if item.startswith("winning_priority:"):
+                    payload_summary["winning_priority"] = item.split(":", 1)[1].strip()
+                    break
+        if not payload_summary.get("winning_priority"):
+            for row in payload.get("gate_decisions", []):
+                if not isinstance(row, dict) or row.get("stage") != "conflict":
+                    continue
+                winning_priority = str(row.get("winning_priority") or "").strip()
+                if winning_priority:
+                    payload_summary["winning_priority"] = winning_priority
+                    break
+        if posterior and not payload_summary.get("winner_peak_posterior"):
+            payload_summary["winner_peak_posterior"] = posterior
+        if posterior and not payload_summary.get("winner_peak"):
+            payload_summary["winner_peak"] = max(posterior, key=posterior.get)
+        if compromise_template_prior and not payload_summary.get("compromise_template_prior"):
+            payload_summary["compromise_template_prior"] = compromise_template_prior
+        if not payload_summary.get("compromise_template_prior"):
+            for row in payload.get("gate_decisions", []):
+                if not isinstance(row, dict):
+                    continue
+                template = str(row.get("template") or "").strip()
+                if template:
+                    payload_summary["compromise_template_prior"] = {template: 1.0}
+                    break
+        if not payload_summary.get("peak_clusters") and conflict_row.get("peak_clusters"):
+            payload_summary["peak_clusters"] = list(conflict_row.get("peak_clusters", []) or [])
+        if not payload_summary.get("hard_masked_targets") and conflict_row.get("hard_masked_targets"):
+            payload_summary["hard_masked_targets"] = list(conflict_row.get("hard_masked_targets", []) or [])
+        if not payload_summary.get("trace_reason") and conflict_row.get("trace_reason"):
+            payload_summary["trace_reason"] = str(conflict_row.get("trace_reason", ""))
+        return payload_summary
+
     def _load_payload_dataset(self, dataset_dir: Path) -> list[dict]:
         rows = read_dataset_rows(dataset_dir, "select payload_json from read_parquet(?)")
         return [ensure_recorded_fields(json.loads(row["payload_json"])) for row in rows]
@@ -241,6 +411,104 @@ class TraceStore:
     ) -> None:
         append_dataset(dataset_dir, rows, schema=schema, partition_keys=partition_keys)
 
+    def _rewrite_dataset_rows(
+        self,
+        dataset_dir: Path,
+        rows: list[dict],
+        *,
+        schema: dict[str, str],
+        partition_keys: tuple[str, ...] = ("recorded_date",),
+    ) -> None:
+        temp_dir = dataset_dir.with_name(f"{dataset_dir.name}.rewrite-{uuid4().hex}")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        if rows:
+            append_dataset(temp_dir, rows, schema=schema, partition_keys=partition_keys)
+        shutil.rmtree(dataset_dir, ignore_errors=True)
+        temp_dir.replace(dataset_dir)
+
+    def _dataset_columns(self, dataset_dir: Path) -> list[str]:
+        if not dataset_dir.exists():
+            return []
+        conn = duckdb.connect()
+        try:
+            try:
+                cursor = conn.execute(
+                    "select * from read_parquet(?) limit 0",
+                    [str(dataset_dir / "**" / "*.parquet")],
+                )
+            except duckdb.IOException as exc:
+                if "No files found" in str(exc):
+                    return []
+                raise
+            except duckdb.Error:
+                return []
+            return [item[0] for item in cursor.description]
+        finally:
+            conn.close()
+
+    def _raw_round_payloads_from_parquet(self) -> list[dict]:
+        rows = read_dataset_rows(
+            self.round_canonical_dir,
+            "select payload_json from read_parquet(?) order by round_id, recorded_at",
+        )
+        return [ensure_recorded_fields(json.loads(row["payload_json"])) for row in rows]
+
+    def _round_payload_requires_rewrite(self, payload: dict) -> bool:
+        if "distribution_state" in payload:
+            return True
+        probability_field = payload.get("probability_field")
+        return probability_field is None and bool(legacy_probability_field_payload(payload))
+
+    def rewrite_legacy_round_parquet_history(self, *, force: bool = False) -> dict[str, object]:
+        raw_payloads = self._raw_round_payloads_from_parquet()
+        legacy_payload_rows = sum(1 for payload in raw_payloads if self._round_payload_requires_rewrite(payload))
+        removed_trace_columns = sorted(
+            column
+            for column in self._dataset_columns(self.round_trace_dir)
+            if column == "distribution_state_json"
+        )
+        rewrite_needed = force or legacy_payload_rows > 0 or bool(removed_trace_columns)
+        summary: dict[str, object] = {
+            "rewritten": False,
+            "round_count": len(raw_payloads),
+            "legacy_payload_rows": legacy_payload_rows,
+            "removed_trace_columns": removed_trace_columns,
+            "round_trace_row_count": 0,
+        }
+        if not rewrite_needed:
+            return summary
+
+        canonical_payloads = [rewrite_round_payload(payload) for payload in raw_payloads]
+        round_trace_rows: list[dict] = []
+        for payload in canonical_payloads:
+            round_trace_rows.extend(self._round_trace_rows(payload))
+
+        if raw_payloads or self.round_canonical_dir.exists():
+            canonical_rows: list[dict] = []
+            for payload in canonical_payloads:
+                canonical_rows.extend(self._round_canonical_rows(payload))
+            self._rewrite_dataset_rows(
+                self.round_canonical_dir,
+                canonical_rows,
+                schema=ROUND_CANONICAL_SCHEMA,
+                partition_keys=("recorded_date", "round_id"),
+            )
+        if round_trace_rows or self.round_trace_dir.exists():
+            self._rewrite_dataset_rows(self.round_trace_dir, round_trace_rows, schema=ROUND_TRACE_SCHEMA)
+
+        if hasattr(self, "_round_cache"):
+            self._round_cache = {int(payload["round_id"]): copy.deepcopy(payload) for payload in canonical_payloads}
+
+        summary["rewritten"] = True
+        summary["round_trace_row_count"] = len(round_trace_rows)
+        return summary
+
+    def _legacy_round_parquet_pending_rewrite(self) -> bool:
+        if any(self._round_payload_requires_rewrite(payload) for payload in self._raw_round_payloads_from_parquet()):
+            return True
+        return "distribution_state_json" in self._dataset_columns(self.round_trace_dir)
+
     def _round_canonical_rows(self, payload: dict) -> list[dict]:
         return [
             {
@@ -254,6 +522,25 @@ class TraceStore:
 
     def _round_trace_rows(self, payload: dict) -> list[dict]:
         rows: list[dict] = []
+        probability_field = self._probability_field_payload(payload)
+        long_run_projection = payload.get("long_run_projection", {})
+        long_run_online_prior = long_run_projection.get("online_prior", {}) if isinstance(long_run_projection, dict) else {}
+        conflict_arbitration = self._conflict_arbitration_payload(payload)
+        cross_layer_coupling_verdict = {
+            "observed_pairs": [
+                "->".join(
+                    (
+                        str(item.get("source_layer", "")),
+                        str(item.get("target_layer", "")),
+                        str(item.get("carrier_signal", "")),
+                    )
+                )
+                for item in probability_field.get("couplings", [])
+                if isinstance(item, dict)
+            ],
+            "illegal_pairs": [],
+            "legal": True,
+        }
         for summary in payload.get("proposal_summaries", []):
             delta_map = summary.get("delta_p", {}) or {summary.get("top_action") or "unknown": None}
             for action_name, delta_value in delta_map.items():
@@ -280,11 +567,22 @@ class TraceStore:
                         "conflict_score": summary.get("conflict_score"),
                         "plausibility_fail_score": summary.get("plausibility_fail_score"),
                         "tags_json": json.dumps(summary.get("tags", []), ensure_ascii=False, sort_keys=True),
-                        "distribution_state_json": json.dumps(payload.get("distribution_state", {}), ensure_ascii=False, sort_keys=True),
+                        "probability_field_json": json.dumps(probability_field, ensure_ascii=False, sort_keys=True),
+                        "token_state_json": json.dumps(probability_field.get("token_state", {}), ensure_ascii=False, sort_keys=True),
+                        "cross_layer_coupling_verdict_json": json.dumps(cross_layer_coupling_verdict, ensure_ascii=False, sort_keys=True),
+                        "renderer_decision_integrity_json": json.dumps(payload.get("renderer_decision_integrity", {}), ensure_ascii=False, sort_keys=True),
+                        "memory_write_gate_json": json.dumps(payload.get("memory_write_gate", {}), ensure_ascii=False, sort_keys=True),
+                        "conflict_arbitration_json": json.dumps(conflict_arbitration, ensure_ascii=False, sort_keys=True),
                         "state_snapshot_json": json.dumps(payload.get("state_snapshot", {}), ensure_ascii=False, sort_keys=True),
                         "render_plan_json": json.dumps(payload.get("render_plan", {}), ensure_ascii=False, sort_keys=True),
                         "gate_decisions_json": json.dumps(payload.get("gate_decisions", []), ensure_ascii=False, sort_keys=True),
                         "rendered_expression_json": json.dumps(payload.get("rendered_expression", {}), ensure_ascii=False, sort_keys=True),
+                        "long_run_projection_json": json.dumps(long_run_projection, ensure_ascii=False, sort_keys=True),
+                        "long_run_projection_online_prior_json": json.dumps(long_run_online_prior, ensure_ascii=False, sort_keys=True),
+                        "motivation_pool_json": json.dumps(payload.get("motivation_pool", {}), ensure_ascii=False, sort_keys=True),
+                        "motivation_feedback_json": json.dumps(payload.get("motivation_feedback", {}), ensure_ascii=False, sort_keys=True),
+                        "endogenous_tick_reason_json": json.dumps(payload.get("endogenous_tick_reason", {}), ensure_ascii=False, sort_keys=True),
+                        "endogenous_policy_shift_json": json.dumps(payload.get("endogenous_policy_shift", {}), ensure_ascii=False, sort_keys=True),
                     }
                 )
         return rows
@@ -434,10 +732,12 @@ class TraceStore:
             raise
 
     def write_round(self, trace: RoundTrace, *, sync: bool = False) -> None:
-        payload = ensure_recorded_fields(
+        payload = rewrite_round_payload(
+            ensure_recorded_fields(
             to_dict(trace),
             session_id=trace.session_id,
             recorded_at=trace.recorded_at,
+            )
         )
         self._round_cache[int(payload["round_id"])] = copy.deepcopy(payload)
         self._skill_cache.extend(copy.deepcopy(payload.get("skill_traces", [])))
@@ -447,6 +747,7 @@ class TraceStore:
                     handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
         def write() -> None:
+            self.rewrite_legacy_round_parquet_history()
             path = self.rounds_dir / f"round_{trace.round_id}.json"
             path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             with self.rounds_jsonl_path.open("a", encoding="utf-8") as handle:
@@ -475,6 +776,8 @@ class TraceStore:
         return payload
 
     def read_round_record(self, round_id: int) -> tuple[dict, str]:
+        if self._legacy_round_parquet_pending_rewrite():
+            self.rewrite_legacy_round_parquet_history(force=True)
         status = self.trace_storage_status()
         if status["storage_state"] == "healthy":
             parquet_payload = self._read_round_from_parquet(round_id)
@@ -502,6 +805,8 @@ class TraceStore:
         raise FileNotFoundError(f"trace round {round_id} not found")
 
     def list_rounds(self) -> list[dict]:
+        if self._legacy_round_parquet_pending_rewrite():
+            self.rewrite_legacy_round_parquet_history(force=True)
         if self._round_cache:
             return [copy.deepcopy(self._round_cache[key]) for key in sorted(self._round_cache)]
         status = self.trace_storage_status()
@@ -921,9 +1226,9 @@ class TraceStore:
             return None
         payload = json.loads(path.read_text(encoding="utf-8"))
         if "session_id" in payload and "recorded_at" in payload and "recorded_date" in payload:
-            return payload
+            return rewrite_round_payload(payload)
         recorded_at = _mtime_iso(path)
-        return ensure_recorded_fields(payload, recorded_at=recorded_at)
+        return rewrite_round_payload(ensure_recorded_fields(payload, recorded_at=recorded_at))
 
     def _read_round_from_parquet(self, round_id: int) -> dict | None:
         rows = read_dataset_rows(
@@ -933,14 +1238,25 @@ class TraceStore:
         )
         if not rows:
             return None
-        return ensure_recorded_fields(json.loads(rows[0]["payload_json"]))
+        payload = ensure_recorded_fields(json.loads(rows[0]["payload_json"]))
+        if self._round_payload_requires_rewrite(payload):
+            self.rewrite_legacy_round_parquet_history(force=True)
+            rows = read_dataset_rows(
+                self.round_canonical_dir,
+                "select payload_json from read_parquet(?) where round_id = ? order by recorded_at desc limit 1",
+                [round_id],
+            )
+            if not rows:
+                return None
+            payload = ensure_recorded_fields(json.loads(rows[0]["payload_json"]))
+        return normalize_round_payload(payload)
 
     def _list_rounds_from_parquet(self) -> list[dict]:
-        rows = read_dataset_rows(
-            self.round_canonical_dir,
-            "select payload_json from read_parquet(?) order by round_id, recorded_at",
-        )
-        return [ensure_recorded_fields(json.loads(row["payload_json"])) for row in rows]
+        payloads = self._raw_round_payloads_from_parquet()
+        if any(self._round_payload_requires_rewrite(payload) for payload in payloads):
+            self.rewrite_legacy_round_parquet_history(force=True)
+            payloads = self._raw_round_payloads_from_parquet()
+        return [normalize_round_payload(payload) for payload in payloads]
 
     def _list_payload_rows_from_parquet(self, filename: str) -> list[dict]:
         path = self.parquet_dir / filename

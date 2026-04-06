@@ -88,6 +88,32 @@ class TerminalEventHandler:
             }
         )
 
+    def _approval_choices(self) -> list[dict[str, str]]:
+        return [
+            {"id": "approve", "label": "批准", "kind": "approval", "value": "approve"},
+            {"id": "reject", "label": "拒绝", "kind": "approval", "value": "reject"},
+            {"id": "details", "label": "详情", "kind": "drawer", "value": "approvals"},
+            {"id": "next", "label": "下一个", "kind": "approval_nav", "value": "next"},
+        ]
+
+    def _ui_actions(self, session: TerminalSessionState, run: dict[str, Any] | None, *, pending_count: int) -> dict[str, list[dict[str, Any]]]:
+        run_status = str((run or {}).get("status") or session.status or "idle")
+        primary = [
+            {"id": "status", "label": "状态", "kind": "drawer", "value": "status", "disabled": False},
+            {"id": "why", "label": "原因", "kind": "drawer", "value": "why", "disabled": run is None},
+            {"id": "steps", "label": "步骤", "kind": "drawer", "value": "steps", "disabled": run is None},
+            {"id": "tools", "label": "工具", "kind": "drawer", "value": "tools", "disabled": run is None},
+            {"id": "approvals", "label": "审批", "kind": "drawer", "value": "approvals", "disabled": pending_count == 0},
+        ]
+        secondary = [
+            {"id": "cognition", "label": "认知", "kind": "drawer", "value": "cognition", "disabled": False},
+            {"id": "meta", "label": "元信息", "kind": "drawer", "value": "meta", "disabled": False},
+            {"id": "pause", "label": "暂停", "kind": "command", "value": "pause", "disabled": run is None or run_status == "paused"},
+            {"id": "resume", "label": "恢复", "kind": "command", "value": "resume", "disabled": run is None or run_status != "paused"},
+            {"id": "abort", "label": "中止", "kind": "command", "value": "abort", "disabled": run is None or run_status in {"aborted", "completed", "done"}},
+        ]
+        return {"primary": primary, "secondary": secondary}
+
     def _user_turn_stream(self, session_id: str, text: str) -> Iterable[dict[str, Any]]:
         session = self._load_session(session_id)
         self._append_transcript(session, "user", text.strip())
@@ -184,6 +210,7 @@ class TerminalEventHandler:
                     "status": "pending",
                     "approved": None,
                     "actions": ["approve", "reject"],
+                    "choices": self._approval_choices(),
                     "requested_at": utc_now_iso(),
                 }
                 pending_approvals.append(approval_payload)
@@ -211,6 +238,7 @@ class TerminalEventHandler:
                     mode=approval_payload["mode"],
                     status=approval_payload["status"],
                     actions=approval_payload["actions"],
+                    choices=self._approval_choices(),
                     approved=None,
                 )
             self._append_tool_timeline(
@@ -323,6 +351,32 @@ class TerminalEventHandler:
                 build_outbound_event(
                     "assistant_final",
                     session_id=session_id,
+                    message=message,
+                    payload=payload,
+                ),
+            ]
+        if command_name == "probability":
+            try:
+                kind, ref_value, subject = self._parse_probability_command(value_text)
+                if kind == "overview":
+                    payload = self.controller.trace_probability_field(ref_value)
+                    message = self._probability_summary(payload)
+                elif kind == "layer":
+                    payload = self.controller.trace_probability_layer(ref_value, layer=str(subject))
+                    message = self._probability_layer_summary(payload)
+                else:
+                    payload = self.controller.trace_action_probability(ref_value, action=str(subject))
+                    message = self._action_probability_summary(payload)
+            except FileNotFoundError:
+                return [build_outbound_event("error", session_id=session_id, message="No rounds yet. Send a message first.")]
+            except ValueError as exc:
+                return [build_outbound_event("error", session_id=session_id, message=str(exc))]
+            return [
+                self._build_sidebar_snapshot_event(session, run_id=run_id),
+                build_outbound_event(
+                    "assistant_final",
+                    session_id=session_id,
+                    run_id=run_id,
                     message=message,
                     payload=payload,
                 ),
@@ -509,6 +563,85 @@ class TerminalEventHandler:
             rows.append(f"{name}: {summary}")
         return f"最近工具：{'；'.join(rows)}"
 
+    def _parse_probability_command(self, value_text: str | None) -> tuple[str, str, str | None]:
+        tokens = [part for part in str(value_text or "").split() if part]
+        if not tokens:
+            return ("overview", "last", None)
+        head = tokens[0].lower()
+        if head == "layer":
+            if len(tokens) not in {2, 3}:
+                raise ValueError("Usage: /probability layer <context|memory|action|token> [round]")
+            return ("layer", tokens[2] if len(tokens) == 3 else "last", tokens[1].lower())
+        if head == "action":
+            if len(tokens) not in {2, 3}:
+                raise ValueError("Usage: /probability action <name> [round]")
+            return ("action", tokens[2] if len(tokens) == 3 else "last", tokens[1])
+        if len(tokens) > 1:
+            raise ValueError("Usage: /probability [round] | /probability action <name> [round] | /probability layer <name> [round]")
+        return ("overview", tokens[0], None)
+
+    def _probability_summary(self, payload: dict[str, Any]) -> str:
+        probability_field = dict(payload.get("probability_field", {}) or {})
+        lines = [
+            f"概率场：round {payload.get('round_id', '?')}，sampled={payload.get('sampled_action') or 'unknown'}",
+        ]
+        for layer_name in ("context", "memory", "action", "token"):
+            layer = probability_field.get(layer_name, {})
+            if not isinstance(layer, dict):
+                continue
+            posterior = dict(layer.get("winner_posterior", {}) or {})
+            top = sorted(posterior.items(), key=lambda item: float(item[1]), reverse=True)[:3]
+            top_text = " / ".join(f"{name}={float(score):.3f}" for name, score in top) if top else "-"
+            lines.append(
+                f"{layer_name}: winner={layer.get('winner_target') or '-'} top={top_text} "
+                f"audit={len(layer.get('contribution_audit', []) or [])}"
+            )
+        token_state = dict(payload.get("token_state", {}) or {})
+        if token_state:
+            lines.append(
+                f"token_state: step={token_state.get('step_index', '-')} "
+                f"active={len(token_state.get('active_module_sources', []) or [])}"
+            )
+        return "\n".join(lines)
+
+    def _probability_layer_summary(self, payload: dict[str, Any]) -> str:
+        layer_name = str(payload.get("layer") or "unknown")
+        layer = dict(payload.get("layer_state", {}) or {})
+        posterior = dict(layer.get("winner_posterior", {}) or {})
+        top = sorted(posterior.items(), key=lambda item: float(item[1]), reverse=True)[:3]
+        top_text = " / ".join(f"{name}={float(score):.3f}" for name, score in top) if top else "-"
+        audit_rows = list(layer.get("contribution_audit", []) or [])
+        lead_modules = " / ".join(str(row.get("module_name") or "-") for row in audit_rows[:4] if isinstance(row, dict)) or "-"
+        return (
+            f"{layer_name} 层：round {payload.get('round_id', '?')} winner={layer.get('winner_target') or '-'}\n"
+            f"top={top_text}\n"
+            f"audit={len(audit_rows)} lead={lead_modules}"
+        )
+
+    def _action_probability_summary(self, payload: dict[str, Any]) -> str:
+        explanation = dict(payload.get("action_probability_explanation", {}) or {})
+        target = str(payload.get("action") or explanation.get("target_action") or "unknown")
+        posterior = dict(explanation.get("winner_posterior", {}) or {})
+        target_probability = float(posterior.get(target, 0.0) or 0.0)
+        peaks = list(explanation.get("competing_peaks", []) or [])
+        peak_text = " / ".join(
+            f"{row.get('action', '-')}={float(row.get('posterior', 0.0) or 0.0):.3f}"
+            for row in peaks[:3]
+            if isinstance(row, dict)
+        ) or "-"
+        stacked = list(explanation.get("stacked_contributions", []) or [])
+        stacked_text = " / ".join(
+            f"{row.get('module_name')}:{row.get('direction')}"
+            for row in stacked[:4]
+            if isinstance(row, dict)
+        ) or "-"
+        return (
+            f"动作概率：target={target} round {payload.get('round_id', '?')} winner={explanation.get('winner_target') or '-'}\n"
+            f"p={target_probability:.3f} hard_masked={'yes' if explanation.get('hard_masked') else 'no'}\n"
+            f"peaks={peak_text}\n"
+            f"stacked={stacked_text}"
+        )
+
     def _model_summary(self, model_status: dict[str, Any]) -> str:
         tiers = dict(model_status.get("tiers", {}))
         bindings = dict(model_status.get("agent_bindings", {}))
@@ -596,6 +729,7 @@ class TerminalEventHandler:
                 "pending_count": len(pending),
                 "pending": pending,
             },
+            "ui_actions": self._ui_actions(session, run, pending_count=len(pending)),
             "model_status": model_status,
             "statusline": self._build_statusline(session, run_id=run_id, run=run),
         }

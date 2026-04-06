@@ -81,4 +81,4 @@ def test_plausibility_guard_blocks_wander_in_task_runtime(tmp_path):
         item["stage"] == "plausibility_guard" and item["requires_resample"] is True and "wander" in item["reason"]
         for item in result.trace.gate_decisions
     )
-    assert result.trace.distribution_state["conflict"]["components"]["proposal_divergence"] >= 0.0
+    assert result.trace.conflict_arbitration["total_score"] >= 0.0

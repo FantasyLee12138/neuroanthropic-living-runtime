@@ -2,16 +2,20 @@ from __future__ import annotations
 
 from dataclasses import MISSING, fields, is_dataclass
 from types import UnionType
-from typing import Any, Union, get_args, get_origin, get_type_hints
+from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
 from nalr.schemas.models import (
     ActionCandidate,
-    ActionDistributionState,
+    ActionEvidenceSignal,
+    CrossLayerCouplingSpec,
     DisclosureIntentState,
+    EnergyProjectionSpec,
     ExpressionProfile,
     IntentPosterior,
     IntentTraceRecord,
-    ProposalBundle,
+    ProbabilityFieldSnapshot,
+    ProbabilityLayerState,
+    ProbabilisticContribution,
     QuantumEntropyBatch,
     QuantumEntropyRef,
     QueryIntentState,
@@ -20,6 +24,8 @@ from nalr.schemas.models import (
     RoundEvent,
     RoundTrace,
     RuntimeState,
+    TokenFieldState,
+    to_dict,
 )
 
 
@@ -33,9 +39,14 @@ TYPE_REF_REGISTRY: dict[str, Any] = {
     "list": list[Any],
     "RoundEvent": RoundEvent,
     "RuntimeState": RuntimeState,
-    "ProposalBundle": ProposalBundle,
+    "ProbabilisticContribution": ProbabilisticContribution,
     "ActionCandidate": ActionCandidate,
-    "ActionDistributionState": ActionDistributionState,
+    "ActionEvidenceSignal": ActionEvidenceSignal,
+    "ProbabilityLayerState": ProbabilityLayerState,
+    "ProbabilityFieldSnapshot": ProbabilityFieldSnapshot,
+    "EnergyProjectionSpec": EnergyProjectionSpec,
+    "CrossLayerCouplingSpec": CrossLayerCouplingSpec,
+    "TokenFieldState": TokenFieldState,
     "QueryIntentState": QueryIntentState,
     "DisclosureIntentState": DisclosureIntentState,
     "IntentPosterior": IntentPosterior,
@@ -50,8 +61,6 @@ TYPE_REF_REGISTRY: dict[str, Any] = {
 
 
 UNION_ORIGINS = {Union, UnionType}
-
-
 def _split_generic_args(expr: str) -> list[str]:
     parts: list[str] = []
     depth = 0
@@ -111,6 +120,20 @@ def serialize_contract(contract: Any) -> Any:
     return str(contract)
 
 
+def serialize_contract_value(value: Any) -> Any:
+    if isinstance(value, ProbabilisticContribution):
+        return to_dict(value)
+    if isinstance(value, dict):
+        return {key: serialize_contract_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [serialize_contract_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [serialize_contract_value(item) for item in value]
+    if is_dataclass(value) and not isinstance(value, type):
+        return serialize_contract_value(to_dict(value))
+    return value
+
+
 def _coerce_primitive(value: Any, contract: type, path: str) -> Any:
     if contract is Any:
         return value
@@ -163,6 +186,12 @@ def coerce_contract(value: Any, contract: Any, *, path: str = "value") -> Any:
             raise ValueError(f"{path} expected list")
         inner = get_args(contract)[0]
         return [coerce_contract(item, inner, path=f"{path}[{idx}]") for idx, item in enumerate(value)]
+    if origin is Literal:
+        allowed = get_args(contract)
+        if value not in allowed:
+            joined = ", ".join(repr(item) for item in allowed)
+            raise ValueError(f"{path} expected one of: {joined}")
+        return value
     if origin is dict:
         if not isinstance(value, dict):
             raise ValueError(f"{path} expected dict")

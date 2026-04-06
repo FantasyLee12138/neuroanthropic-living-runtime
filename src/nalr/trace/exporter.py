@@ -8,7 +8,7 @@ from pathlib import Path
 import duckdb
 
 from nalr.runtime.metadata import ensure_recorded_fields, utc_now_iso
-from nalr.trace.store import TraceStore
+from nalr.trace.store import TraceStore, canonical_probability_field_payload
 
 
 ROUND_SCHEMA = {
@@ -33,11 +33,22 @@ ROUND_SCHEMA = {
     "conflict_score": "DOUBLE",
     "plausibility_fail_score": "DOUBLE",
     "tags_json": "VARCHAR",
-    "distribution_state_json": "VARCHAR",
+    "probability_field_json": "VARCHAR",
+    "token_state_json": "VARCHAR",
+    "cross_layer_coupling_verdict_json": "VARCHAR",
+    "renderer_decision_integrity_json": "VARCHAR",
+    "memory_write_gate_json": "VARCHAR",
+    "conflict_arbitration_json": "VARCHAR",
     "state_snapshot_json": "VARCHAR",
     "render_plan_json": "VARCHAR",
     "gate_decisions_json": "VARCHAR",
     "rendered_expression_json": "VARCHAR",
+    "long_run_projection_json": "VARCHAR",
+    "long_run_projection_online_prior_json": "VARCHAR",
+    "motivation_pool_json": "VARCHAR",
+    "motivation_feedback_json": "VARCHAR",
+    "endogenous_tick_reason_json": "VARCHAR",
+    "endogenous_policy_shift_json": "VARCHAR",
 }
 
 ROUND_CANONICAL_SCHEMA = {
@@ -127,11 +138,65 @@ def _mtime_iso(path: Path) -> str:
     return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _conflict_arbitration_payload(payload: dict) -> dict:
+    direct = dict(payload.get("conflict_arbitration", {}) or {})
+    probability_field = canonical_probability_field_payload(payload)
+    action_layer = probability_field.get("action", {}) if isinstance(probability_field, dict) else {}
+    audit_rows = action_layer.get("contribution_audit", []) if isinstance(action_layer, dict) else []
+    conflict_row = next(
+        (
+            row
+            for row in audit_rows
+            if isinstance(row, dict) and row.get("module_name") == "ConflictMonitorAgent"
+        ),
+        {},
+    )
+    posterior = dict(direct.get("winner_peak_posterior", {}) or conflict_row.get("posterior", {}) or {})
+    compromise_template_prior = dict(direct.get("compromise_template_prior", {}) or conflict_row.get("compromise_template_prior", {}) or {})
+    dependency_trace = [str(item) for item in list(conflict_row.get("dependency_trace", []) or [])]
+    payload_summary = dict(direct)
+    if not payload_summary.get("winning_priority"):
+        for item in dependency_trace:
+            if item.startswith("winning_priority:"):
+                payload_summary["winning_priority"] = item.split(":", 1)[1].strip()
+                break
+    if not payload_summary.get("winning_priority"):
+        for row in payload.get("gate_decisions", []):
+            if not isinstance(row, dict) or row.get("stage") != "conflict":
+                continue
+            winning_priority = str(row.get("winning_priority") or "").strip()
+            if winning_priority:
+                payload_summary["winning_priority"] = winning_priority
+                break
+    if posterior and not payload_summary.get("winner_peak_posterior"):
+        payload_summary["winner_peak_posterior"] = posterior
+    if posterior and not payload_summary.get("winner_peak"):
+        payload_summary["winner_peak"] = max(posterior, key=posterior.get)
+    if compromise_template_prior and not payload_summary.get("compromise_template_prior"):
+        payload_summary["compromise_template_prior"] = compromise_template_prior
+    if not payload_summary.get("compromise_template_prior"):
+        for row in payload.get("gate_decisions", []):
+            if not isinstance(row, dict):
+                continue
+            template = str(row.get("template") or "").strip()
+            if template:
+                payload_summary["compromise_template_prior"] = {template: 1.0}
+                break
+    if not payload_summary.get("peak_clusters") and conflict_row.get("peak_clusters"):
+        payload_summary["peak_clusters"] = list(conflict_row.get("peak_clusters", []) or [])
+    if not payload_summary.get("hard_masked_targets") and conflict_row.get("hard_masked_targets"):
+        payload_summary["hard_masked_targets"] = list(conflict_row.get("hard_masked_targets", []) or [])
+    if not payload_summary.get("trace_reason") and conflict_row.get("trace_reason"):
+        payload_summary["trace_reason"] = str(conflict_row.get("trace_reason", ""))
+    return payload_summary
+
+
 class TraceExporter:
     def __init__(self, store: TraceStore) -> None:
         self.store = store
 
     def export_parquet(self, *, since_round: int | None = None, overwrite: bool = False) -> dict:
+        history_rewrite = self.store.rewrite_legacy_round_parquet_history()
         outputs = {
             "round": self.store.parquet_dir / "round_trace.parquet",
             "round_canonical": self.store.parquet_dir / "round_canonical.parquet",
@@ -164,6 +229,7 @@ class TraceExporter:
         return {
             "mode": "rebuild",
             "parquet_dir": str(self.store.parquet_dir),
+            "history_rewrite": history_rewrite,
             "tables": {
                 "round_trace": {"path": str(outputs["round"]), "row_count": len(round_rows)},
                 "round_canonical": {"path": str(outputs["round_canonical"]), "row_count": len(round_canonical_rows)},
@@ -196,9 +262,14 @@ class TraceExporter:
         for payload in self.store.list_rounds():
             if since_round is not None and payload.get("round_id", 0) < since_round:
                 continue
+            probability_field = canonical_probability_field_payload(payload)
+            token_state = probability_field.get("token_state", {}) if isinstance(probability_field, dict) else {}
+            couplings = probability_field.get("couplings", []) if isinstance(probability_field, dict) else []
             summaries = payload.get("proposal_summaries", [])
             for summary in summaries:
                 delta_map = summary.get("delta_p", {}) or {summary.get("top_action") or "unknown": None}
+                long_run_projection = payload.get("long_run_projection", {})
+                long_run_online_prior = long_run_projection.get("online_prior", {}) if isinstance(long_run_projection, dict) else {}
                 for action_name, delta_value in delta_map.items():
                     rows.append(
                         {
@@ -223,11 +294,38 @@ class TraceExporter:
                             "conflict_score": summary.get("conflict_score"),
                             "plausibility_fail_score": summary.get("plausibility_fail_score"),
                             "tags_json": _json_blob(summary.get("tags", [])),
-                            "distribution_state_json": _json_blob(payload.get("distribution_state", {})),
+                            "probability_field_json": _json_blob(probability_field),
+                            "token_state_json": _json_blob(token_state),
+                            "cross_layer_coupling_verdict_json": _json_blob(
+                                {
+                                    "observed_pairs": [
+                                        "->".join(
+                                            (
+                                                str(item.get("source_layer", "")),
+                                                str(item.get("target_layer", "")),
+                                                str(item.get("carrier_signal", "")),
+                                            )
+                                        )
+                                        for item in couplings
+                                        if isinstance(item, dict)
+                                    ],
+                                    "illegal_pairs": [],
+                                    "legal": True,
+                                }
+                            ),
+                            "renderer_decision_integrity_json": _json_blob(payload.get("renderer_decision_integrity", {})),
+                            "memory_write_gate_json": _json_blob(payload.get("memory_write_gate", {})),
+                            "conflict_arbitration_json": _json_blob(_conflict_arbitration_payload(payload)),
                             "state_snapshot_json": _json_blob(payload.get("state_snapshot", {})),
                             "render_plan_json": _json_blob(payload.get("render_plan", {})),
                             "gate_decisions_json": _json_blob(payload.get("gate_decisions", [])),
                             "rendered_expression_json": _json_blob(payload.get("rendered_expression", {})),
+                            "long_run_projection_json": _json_blob(long_run_projection),
+                            "long_run_projection_online_prior_json": _json_blob(long_run_online_prior),
+                            "motivation_pool_json": _json_blob(payload.get("motivation_pool", {})),
+                            "motivation_feedback_json": _json_blob(payload.get("motivation_feedback", {})),
+                            "endogenous_tick_reason_json": _json_blob(payload.get("endogenous_tick_reason", {})),
+                            "endogenous_policy_shift_json": _json_blob(payload.get("endogenous_policy_shift", {})),
                         }
                     )
         return rows

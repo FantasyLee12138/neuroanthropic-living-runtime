@@ -217,6 +217,7 @@ class MemoryStore:
             "warm": self._load_artifacts(self.episodic_warm_dir),
             "archive": self._load_artifacts(self.episodic_archive_dir),
         }
+        self._last_ingest_diagnostics: dict[str, object] = {}
         self._recall_cache: dict[tuple[str, tuple[str, ...]], dict] = {}
         self._path_mtimes: dict[Path, int] = {}
         self._dirty_paths: set[Path] = set()
@@ -576,6 +577,12 @@ class MemoryStore:
             "last_recalled_round": 0,
             "last_affect_intensity": 0.0,
             "last_cue_quality": 0.0,
+            "last_gate_decision": "unknown",
+            "last_gate_reason": None,
+            "last_write_resource_pressure": 0.0,
+            "write_suppressed_count": 0,
+            "episode_id": "",
+            "separation_id": "",
         }
         normalized.update(item)
         normalized["gist_strength"] = round(float(normalized.get("gist_strength", 0.0) or 0.0), 4)
@@ -584,6 +591,8 @@ class MemoryStore:
         normalized["interfered"] = bool(normalized.get("interfered", normalized["interference"] > 0.0))
         normalized["last_affect_intensity"] = round(float(normalized.get("last_affect_intensity", 0.0) or 0.0), 4)
         normalized["last_cue_quality"] = round(float(normalized.get("last_cue_quality", 0.0) or 0.0), 4)
+        normalized["last_write_resource_pressure"] = round(float(normalized.get("last_write_resource_pressure", 0.0) or 0.0), 4)
+        normalized["write_suppressed_count"] = int(normalized.get("write_suppressed_count", 0) or 0)
         normalized["last_recalled_round"] = int(normalized.get("last_recalled_round", 0) or 0)
         return normalized
 
@@ -852,6 +861,101 @@ class MemoryStore:
             4,
         )
 
+    def _episode_id(
+        self,
+        *,
+        cue: str,
+        context_slot: str,
+        round_id: int | None,
+        session_id: str | None,
+        recorded_at: str,
+    ) -> str:
+        seed = f"{session_id or 'legacy'}::{round_id or 0}::{cue}::{context_slot}::{recorded_at}"
+        return f"ep-{hashlib.sha1(seed.encode('utf-8')).hexdigest()[:10]}"
+
+    def _separation_id(
+        self,
+        *,
+        cue: str,
+        context_slot: str,
+        interference_source: str | None,
+    ) -> str:
+        cluster = "::".join(sorted(item for item in {cue, interference_source or ''} if item))
+        seed = f"{context_slot}::{cluster or cue}"
+        return f"sep-{hashlib.sha1(seed.encode('utf-8')).hexdigest()[:10]}"
+
+    def _default_ingest_diagnostics(
+        self,
+        *,
+        cue: str | None,
+        cue_quality: float,
+        resource_pressure: float,
+    ) -> dict[str, object]:
+        return {
+            "cue": cue,
+            "applied": bool(cue),
+            "suppressed": False,
+            "reason": "applied" if cue else "no_cue",
+            "cue_quality": round(float(cue_quality), 4),
+            "interference": 0.0,
+            "interference_source": None,
+            "resource_pressure": round(float(resource_pressure), 4),
+            "support_signal": 0.0,
+            "pollution_risk": 0.0,
+            "episode_id": "",
+            "separation_id": "",
+        }
+
+    def _memory_prior_vector(self, memory: dict) -> dict[str, float]:
+        detail_strength = float(memory.get("detail_strength", 0.0) or 0.0)
+        gist_strength = float(memory.get("gist_strength", 0.0) or 0.0)
+        strength = max(detail_strength, gist_strength)
+        interference = float(memory.get("interference", 0.0) or 0.0)
+        cue_quality = float(memory.get("last_cue_quality", 0.0) or 0.0)
+        return {
+            "episodic_confidence": round(max(0.0, strength * (1.0 - interference * 0.5)), 4),
+            "detail_bias": round(max(0.0, detail_strength), 4),
+            "gist_bias": round(max(0.0, gist_strength), 4),
+            "interference_penalty": round(max(0.0, interference), 4),
+            "cue_quality_bias": round(max(0.0, cue_quality), 4),
+        }
+
+    def _evaluate_memory_write_gate(
+        self,
+        *,
+        cue_quality: float,
+        interference_penalty: float,
+        resource_pressure: float,
+        valence: float,
+        existing_count: int,
+    ) -> dict[str, object]:
+        support_signal = _clip(
+            0.55 * float(cue_quality)
+            + 0.15 * min(abs(float(valence)), 1.0)
+            + 0.10 * (1.0 if int(existing_count) > 0 else 0.0)
+            + 0.20 * (1.0 - float(resource_pressure)),
+            0.0,
+            1.0,
+        )
+        pollution_risk = _clip(
+            1.20 * float(interference_penalty)
+            + 0.20 * float(resource_pressure)
+            + 0.10 * (1.0 - float(cue_quality)),
+            0.0,
+            1.0,
+        )
+        suppressed = bool(interference_penalty >= 0.06 and pollution_risk - support_signal >= 0.12)
+        return {
+            "applied": not suppressed,
+            "suppressed": suppressed,
+            "reason": "pollution_guard" if suppressed else "applied",
+            "support_signal": round(float(support_signal), 4),
+            "pollution_risk": round(float(pollution_risk), 4),
+        }
+
+    def last_ingest_diagnostics(self) -> dict[str, object]:
+        return copy.deepcopy(self._last_ingest_diagnostics)
+
     def _update_habit_record(
         self,
         *,
@@ -951,11 +1055,56 @@ class MemoryStore:
         update_habit: bool = True,
         mode: str = "interactive",
         cue_quality: float | None = None,
+        resource_pressure: float | None = None,
     ) -> str | None:
         effective_recorded_at = recorded_at or utc_now_iso()
         cue = _derive_cue(event)
         context_slot = self._context_slot(event)
         effective_cue_quality = round(_clip(cue_quality if cue_quality is not None else event.cue_quality), 4)
+        effective_resource_pressure = round(_clip(resource_pressure or 0.0), 4)
+        diagnostics = self._default_ingest_diagnostics(
+            cue=cue,
+            cue_quality=effective_cue_quality,
+            resource_pressure=effective_resource_pressure,
+        )
+        self._decay_memories(cue, mode=mode, round_id=round_id)
+        if cue:
+            memories = self._read_list(self.episodic_path)
+            matched = next((item for item in memories if item["cue"] == cue), None)
+            interference_penalty, interference_source = self._interference(memories, cue, context_slot)
+            episode_id = self._episode_id(
+                cue=cue,
+                context_slot=context_slot,
+                round_id=round_id,
+                session_id=session_id,
+                recorded_at=effective_recorded_at,
+            )
+            separation_id = self._separation_id(
+                cue=cue,
+                context_slot=context_slot,
+                interference_source=interference_source,
+            )
+            gate = self._evaluate_memory_write_gate(
+                cue_quality=effective_cue_quality,
+                interference_penalty=interference_penalty,
+                resource_pressure=effective_resource_pressure,
+                valence=event.valence,
+                existing_count=int(matched.get("count", 0) if matched is not None else 0),
+            )
+            diagnostics.update(
+                {
+                    "applied": gate["applied"],
+                    "suppressed": gate["suppressed"],
+                    "reason": gate["reason"],
+                    "interference": round(float(interference_penalty), 4),
+                    "interference_source": interference_source,
+                    "support_signal": gate["support_signal"],
+                    "pollution_risk": gate["pollution_risk"],
+                    "episode_id": episode_id,
+                    "separation_id": separation_id,
+                }
+            )
+        self._last_ingest_diagnostics = diagnostics
         self._append_jsonl(
             self.raw_events_path,
             {
@@ -969,10 +1118,17 @@ class MemoryStore:
                 "target": event.target,
                 "content": event.content,
                 "valence": event.valence,
+                "cue_quality": effective_cue_quality,
+                "interference": diagnostics["interference"],
+                "interference_source": diagnostics["interference_source"],
+                "resource_pressure": effective_resource_pressure,
+                "gate_decision": "suppressed" if diagnostics["suppressed"] else "applied",
+                "gate_reason": diagnostics["reason"],
+                "episode_id": diagnostics["episode_id"],
+                "separation_id": diagnostics["separation_id"],
             },
         )
-        self._decay_memories(cue, mode=mode, round_id=round_id)
-        if cue:
+        if cue and not bool(diagnostics["suppressed"]):
             memories = self._read_list(self.episodic_path)
             matched = next((item for item in memories if item["cue"] == cue), None)
             if matched is None:
@@ -989,13 +1145,18 @@ class MemoryStore:
                     "last_affect_intensity": 0.0,
                     "last_recalled_round": 0,
                     "context_slot": context_slot,
+                    "last_gate_decision": "applied",
+                    "last_gate_reason": "applied",
+                    "last_write_resource_pressure": effective_resource_pressure,
+                    "write_suppressed_count": 0,
+                    "episode_id": diagnostics["episode_id"],
+                    "separation_id": diagnostics["separation_id"],
                 }
                 memories.append(matched)
             matched["count"] += 1
             matched["context_slot"] = context_slot
-            interference_penalty, interference_source = self._interference(memories, cue, context_slot)
-            matched["interference"] = interference_penalty
-            matched["interference_source"] = interference_source
+            matched["interference"] = float(diagnostics["interference"])
+            matched["interference_source"] = diagnostics["interference_source"]
             matched["interfered"] = matched["interference"] > 0.0
             cue_boost = (
                 0.12 + 0.20 * effective_cue_quality
@@ -1010,6 +1171,11 @@ class MemoryStore:
             matched["last_cue_quality"] = effective_cue_quality
             matched["last_affect_intensity"] = round(abs(event.valence), 4)
             matched["last_recalled_round"] = int(round_id or matched.get("last_recalled_round", 0) or 0)
+            matched["last_gate_decision"] = "applied"
+            matched["last_gate_reason"] = diagnostics["reason"]
+            matched["last_write_resource_pressure"] = effective_resource_pressure
+            matched["episode_id"] = diagnostics["episode_id"]
+            matched["separation_id"] = diagnostics["separation_id"]
             self._update_memory_strength(
                 matched,
                 cue_boost=cue_boost,
@@ -1080,6 +1246,9 @@ class MemoryStore:
             "interference": round(float(memory.get("interference", 0.0)), 4),
             "interfered": bool(memory.get("interfered", False)),
             "interference_source": memory.get("interference_source"),
+            "episode_id": str(memory.get("episode_id", "") or ""),
+            "separation_id": str(memory.get("separation_id", "") or ""),
+            "prior_vector": self._memory_prior_vector(memory),
             "found": True,
             "evidence": [item for item in evidence if item],
         }
@@ -1501,7 +1670,9 @@ class MemoryStore:
             self._write_list(self.episodic_archive_path, archive)
 
     def compact_tiers(self, *, hot_max_rounds: int = 500, warm_max_rounds: int = 3000) -> dict:
-        events = [row for row in self._read_jsonl(self.raw_events_path) if row.get("cue")]
+        raw_events = [row for row in self._read_jsonl(self.raw_events_path) if row.get("cue")]
+        blocked_events = [row for row in raw_events if str(row.get("gate_decision", "applied")) == "suppressed"]
+        events = [row for row in raw_events if str(row.get("gate_decision", "applied")) != "suppressed"]
         latest_round = max((row.get("round_id", 0) for row in events), default=0)
         grouped: dict[str, dict[str, list[dict]]] = {"hot": {}, "warm": {}, "archive": {}}
         for event in events:
@@ -1519,7 +1690,12 @@ class MemoryStore:
             "warm": (self.episodic_warm_dir, 30),
             "archive": (self.episodic_archive_dir, None),
         }
-        summary = {"latest_round": latest_round, "raw_event_count": len(events), "tiers": {}}
+        summary = {
+            "latest_round": latest_round,
+            "raw_event_count": len(events),
+            "blocked_raw_event_count": len(blocked_events),
+            "tiers": {},
+        }
         for tier, (directory, retention_days) in tier_defs.items():
             artifacts = [
                 self._summarize_artifact(tier, cue, cue_events, retention_days)

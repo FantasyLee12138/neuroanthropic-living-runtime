@@ -2,6 +2,7 @@ import pytest
 from pathlib import Path
 
 from nalr.runtime.controller import RuntimeController
+from nalr.schemas.models import RoundEvent
 from nalr.terminal_bridge.handlers import TerminalEventHandler
 from nalr.terminal_bridge.protocol import ProtocolError, validate_inbound_event
 from nalr.terminal_bridge.session import TerminalSessionStore
@@ -66,6 +67,9 @@ def test_user_turn_emits_read_only_run_sequence_and_persists_session_mapping(tmp
     assert run_snapshot["run_status"] in {"running", "paused"}
     assert run_snapshot["cognitive_snapshot"]["core_goal"]
     assert run_snapshot["cognitive_snapshot"]["current_intent"]
+    assert "ui_actions" in run_snapshot
+    assert run_snapshot["ui_actions"]["primary"]
+    assert any(item["id"] == "status" for item in run_snapshot["ui_actions"]["primary"])
     assert "vital_signs" in run_snapshot["cognitive_snapshot"]
     assert "identity" in run_snapshot["cognitive_snapshot"]
     assert "authenticity" in run_snapshot["cognitive_snapshot"]
@@ -218,6 +222,67 @@ def test_control_commands_expose_run_views_without_cil(tmp_path):
     assert "状态：" in next(item for item in status_events if item["type"] == "assistant_final")["message"]
     assert "当前目标：" in next(item for item in why_events if item["type"] == "assistant_final")["message"]
     assert "最近工具：" in next(item for item in tool_events if item["type"] == "assistant_final")["message"]
+
+
+def test_permission_mode_task_run_emits_approval_choices_and_contextual_ui_actions(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    handler = TerminalEventHandler(controller)
+
+    handler.handle({"type": "start_session", "session_id": "sess-choices", "cwd": str(tmp_path)})
+    handler.handle({"type": "control_command", "session_id": "sess-choices", "command": "permissions", "value": "ask"})
+    events = handler.handle({"type": "user_turn", "session_id": "sess-choices", "text": "检查 app.py 并规划下一步"})
+
+    approval_event = next(item for item in events if item["type"] == "approval_request")
+    snapshot_event = next(item for item in events if item["type"] == "sidebar_snapshot")
+
+    assert approval_event["choices"] == [
+        {"id": "approve", "label": "批准", "kind": "approval", "value": "approve"},
+        {"id": "reject", "label": "拒绝", "kind": "approval", "value": "reject"},
+        {"id": "details", "label": "详情", "kind": "drawer", "value": "approvals"},
+        {"id": "next", "label": "下一个", "kind": "approval_nav", "value": "next"},
+    ]
+    assert any(item["id"] == "approvals" and item["disabled"] is False for item in snapshot_event["ui_actions"]["primary"])
+    assert any(item["id"] == "abort" for item in snapshot_event["ui_actions"]["secondary"])
+
+
+def test_control_command_probability_views_surface_round_observability_without_active_run(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    handler = TerminalEventHandler(controller)
+
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="Please help me plan carefully, but I also want to wander and rest. Remember tea too.",
+            target="friend",
+            cue="tea",
+            valence=0.05,
+        ),
+        scenario="task",
+        mode="interactive",
+    )
+
+    handler.handle({"type": "start_session", "session_id": "sess-prob", "cwd": str(tmp_path)})
+    probability_events = handler.handle({"type": "control_command", "session_id": "sess-prob", "command": "probability"})
+    layer_events = handler.handle(
+        {"type": "control_command", "session_id": "sess-prob", "command": "probability", "value": "layer action"}
+    )
+    action_events = handler.handle(
+        {"type": "control_command", "session_id": "sess-prob", "command": "probability", "value": "action wander"}
+    )
+
+    probability_message = next(item for item in probability_events if item["type"] == "assistant_final")["message"]
+    layer_message = next(item for item in layer_events if item["type"] == "assistant_final")["message"]
+    action_message = next(item for item in action_events if item["type"] == "assistant_final")["message"]
+
+    assert "概率场" in probability_message
+    assert "action" in probability_message
+    assert "token_state" in probability_message
+    assert "action 层" in layer_message
+    assert "winner=" in layer_message
+    assert "动作概率" in action_message
+    assert "wander" in action_message
 
 
 def test_model_control_command_reports_tiers_and_bindings(tmp_path):

@@ -114,7 +114,9 @@ def test_stdio_bridge_runs_terminal_session_and_emits_events(tmp_path):
     assert turn_snapshot["goal_summary"]
     assert turn_snapshot["current_step"]
     assert turn_snapshot["pending_approval_count"] >= 1
+    assert turn_snapshot["ui_actions"]["primary"]
     assert turn_types[-1] == "assistant_final"
+    assert approval["choices"][0]["id"] == "approve"
     assert "sidebar_snapshot" in approve_types
     assert approve_types[-1] == "assistant_final"
     assert "run_status" in status_types

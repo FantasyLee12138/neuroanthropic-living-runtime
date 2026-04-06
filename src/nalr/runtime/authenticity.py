@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from nalr.schemas.models import AuthenticityRecord, RenderPlan
+from nalr.schemas.models import AuthenticityRecord, EnergyProjectionSpec, ProbabilisticContribution, RenderPlan
 
 
 def _clip(value: float, low: float = 0.0, high: float = 1.0) -> float:
@@ -138,7 +138,7 @@ class AuthenticityPolicy:
         rename_event: dict[str, Any] | None,
         candidate_penalties: dict[str, float],
         sampling_penalty_applied: float,
-    ) -> AuthenticityRecord:
+        ) -> AuthenticityRecord:
         return AuthenticityRecord(
             provider_leak_detected=bool(evaluation.get("provider_leak_detected", False)),
             false_self_claim_detected=bool(evaluation.get("false_self_claim_detected", False)),
@@ -152,4 +152,35 @@ class AuthenticityPolicy:
             state_sources=list(evaluation.get("state_sources", [])),
             candidate_penalties=dict(candidate_penalties),
             sampling_penalty_applied=float(sampling_penalty_applied),
+        )
+
+    def build_action_penalty_contribution(self, record: AuthenticityRecord) -> ProbabilisticContribution:
+        penalties = {action: float(value) for action, value in dict(record.candidate_penalties).items() if float(value) > 0.0}
+        dependency_trace = [
+            f"guard_action:{record.guard_action}",
+            f"disclosure_detail:{record.disclosure_detail}",
+            f"grounding:{round(float(record.self_grounding_score), 4)}",
+        ]
+        dependency_trace.extend(f"violation:{item}" for item in list(record.violation_types))
+        dependency_trace.extend(f"state_source:{item}" for item in list(record.state_sources)[:4])
+
+        confidence = _clip(
+            max(penalties.values(), default=0.0) + float(record.sampling_penalty_applied) * 0.5 + 0.18,
+            0.0,
+            1.0,
+        )
+        return ProbabilisticContribution(
+            module_name="AuthenticityPolicy",
+            module_type="authenticity",
+            level="action",
+            target_space="action",
+            inhibitory_drive=penalties,
+            confidence=confidence,
+            confidence_calibrated=round(_clip(confidence * max(0.45, 1.0 - float(record.self_grounding_score) * 0.2), 0.0, 1.0), 4),
+            trace_reason=f"authenticity penalty guard={record.guard_action} grounding={record.self_grounding_score:.2f}",
+            projection_reason="authenticity penalty projected from candidate penalties",
+            applied_at_stage="authenticity_penalty",
+            native_operator="candidate_penalty",
+            dependency_trace=dependency_trace,
+            projection=EnergyProjectionSpec(module_type="authenticity", target_space="action", module_temperature=1.0),
         )

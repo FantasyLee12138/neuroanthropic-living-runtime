@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from nalr.schemas.models import ActionCandidate, AgentContribution, RuntimeState
+from nalr.schemas.models import ActionCandidate, AgentContribution, EnergyProjectionSpec, ProbabilisticContribution, RuntimeState
 
 
 def _clip(value: float, low: float = 0.0, high: float = 1.0) -> float:
@@ -121,3 +121,54 @@ class VitalityEngine:
             }
         )
         return snapshot
+
+    def build_vitality_modulation_contribution(self, vitality_snapshot: dict[str, Any]) -> ProbabilisticContribution:
+        body_energy = float(vitality_snapshot.get("body_energy", 0.0) or 0.0)
+        resource_scarcity = float(vitality_snapshot.get("resource_scarcity", 0.0) or 0.0)
+        memory_activation = float(vitality_snapshot.get("memory_activation", 0.0) or 0.0)
+        affect_residue = float(vitality_snapshot.get("affect_residue", 0.0) or 0.0)
+        habit_readiness = float(vitality_snapshot.get("habit_readiness", 0.0) or 0.0)
+
+        modulated_delta: dict[str, float] = {
+            "respond": round(0.03 + habit_readiness * 0.05, 6),
+        }
+        if body_energy < 0.55:
+            deficit = 0.55 - body_energy
+            modulated_delta["rest"] = round(0.10 + deficit * 0.60 + resource_scarcity * 0.12, 6)
+            modulated_delta["plan"] = round(-(0.06 + deficit * 0.45 + resource_scarcity * 0.10), 6)
+            modulated_delta["connect"] = round(-(0.03 + deficit * 0.20), 6)
+        if memory_activation > 0.0:
+            modulated_delta["recall"] = round(memory_activation * 0.24, 6)
+        if affect_residue > 0.12:
+            modulated_delta["clarify"] = round(affect_residue * 0.16, 6)
+        if resource_scarcity > 0.35:
+            modulated_delta["wander"] = round(-(resource_scarcity * 0.18), 6)
+
+        confidence = _clip(
+            0.30 + max(body_energy < 0.55 and (0.55 - body_energy), 0.0, memory_activation, affect_residue, resource_scarcity),
+            0.0,
+            1.0,
+        )
+        dependency_trace = [
+            f"body_energy:{round(body_energy, 4)}",
+            f"memory_activation:{round(memory_activation, 4)}",
+            f"affect_residue:{round(affect_residue, 4)}",
+            f"resource_scarcity:{round(resource_scarcity, 4)}",
+            f"habit_readiness:{round(habit_readiness, 4)}",
+        ]
+        return ProbabilisticContribution(
+            module_name="VitalityEngine",
+            module_type="vitality",
+            level="action",
+            target_space="action",
+            raw_signal=dict(modulated_delta),
+            modulated_delta=modulated_delta,
+            confidence=confidence,
+            confidence_calibrated=round(_clip(confidence * 0.92, 0.0, 1.0), 4),
+            trace_reason="vitality modulation from slow variables",
+            projection_reason="vitality modulation projected from slow variables",
+            applied_at_stage="vitality_modulation",
+            native_operator="slow_variable_modulation",
+            dependency_trace=dependency_trace,
+            projection=EnergyProjectionSpec(module_type="vitality", target_space="action", module_temperature=0.95),
+        )

@@ -78,8 +78,8 @@ def build_agent_registry() -> dict[str, AgentSpec]:
         AgentSpec(
             name="ThalamusAttentionAgent",
             class_kind="explicit",
-            wakeup_rule="every_round_before_sampling",
-            owned_skills=["aggregate_proposals", "normalize_distribution", "sample_action"],
+            wakeup_rule="every_round_context_routing",
+            owned_skills=[],
             budget_class="M",
             fallback_policy="fallback_to_prior",
         ),

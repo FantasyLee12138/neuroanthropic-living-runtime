@@ -2,6 +2,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import duckdb
 from typer.testing import CliRunner
 
 from nalr.cli.app import app
@@ -345,3 +346,92 @@ def test_cli_supports_trace_compact_and_counterfactual_commands(tmp_path, monkey
     assert '"window": 1' in changed_result.stdout
     assert longrun_result.exit_code == 0
     assert '"generated_rounds": 3' in longrun_result.stdout
+
+
+def test_cli_probability_trace_views_surface_probability_field_observability(tmp_path, monkeypatch):
+    monkeypatch.setenv("NALR_HOME", str(tmp_path / ".alive"))
+    monkeypatch.setenv("NALR_CONFIG_DIR", str(Path(__file__).resolve().parents[2] / "config"))
+
+    RUNNER.invoke(
+        app,
+        [
+            "chat",
+            "Please help me plan carefully, but I also want to wander and rest. Remember tea too.",
+            "--target",
+            "friend",
+            "--cue",
+            "tea",
+            "--scenario",
+            "task",
+        ],
+    )
+
+    probability_result = RUNNER.invoke(app, ["trace", "probability", "last"])
+    layer_result = RUNNER.invoke(app, ["trace", "probability-layer", "last", "--layer", "action"])
+    action_result = RUNNER.invoke(app, ["trace", "action-prob", "last", "wander"])
+    probability_json_result = RUNNER.invoke(app, ["trace", "probability", "last", "--json"])
+
+    assert probability_result.exit_code == 0
+    assert "Probability Field" in probability_result.stdout
+    assert "action:" in probability_result.stdout
+    assert "token_state:" in probability_result.stdout
+
+    assert layer_result.exit_code == 0
+    assert "Probability Layer action" in layer_result.stdout
+    assert "winner=" in layer_result.stdout
+    assert "audit:" in layer_result.stdout
+
+    assert action_result.exit_code == 0
+    assert "Action Probability" in action_result.stdout
+    assert "target=wander" in action_result.stdout
+    assert "stacked:" in action_result.stdout
+
+    assert probability_json_result.exit_code == 0
+    probability_payload = json.loads(probability_json_result.stdout)
+    assert probability_payload["round_id"] == 1
+    assert probability_payload["probability_field"]["action"]["winner_posterior"]
+
+
+def test_cli_trace_export_parquet_uses_canonical_probability_field_round_columns(tmp_path, monkeypatch):
+    monkeypatch.setenv("NALR_HOME", str(tmp_path / ".alive"))
+    monkeypatch.setenv("NALR_CONFIG_DIR", str(Path(__file__).resolve().parents[2] / "config"))
+
+    RUNNER.invoke(
+        app,
+        [
+            "chat",
+            "Please help me plan carefully, but I also want to wander and rest. Remember tea too.",
+            "--target",
+            "friend",
+            "--cue",
+            "tea",
+            "--scenario",
+            "task",
+        ],
+    )
+
+    export_result = RUNNER.invoke(app, ["trace", "export", "parquet"])
+
+    assert export_result.exit_code == 0
+    export_payload = json.loads(export_result.stdout)
+    round_trace_path = Path(export_payload["parquet_dir"]) / "round_trace.parquet"
+
+    conn = duckdb.connect()
+    try:
+        row = conn.execute(
+            "select probability_field_json, conflict_arbitration_json, token_state_json from read_parquet(?)",
+            [str(round_trace_path)],
+        ).fetchone()
+        cursor = conn.execute("select * from read_parquet(?) limit 0", [str(round_trace_path)])
+        columns = [item[0] for item in cursor.description]
+    finally:
+        conn.close()
+
+    assert row is not None
+    probability_field_json, conflict_arbitration_json, token_state_json = row
+    conflict_payload = json.loads(conflict_arbitration_json)
+    assert conflict_payload["winner_peak_posterior"]
+    assert conflict_payload["hard_masked_targets"] is not None
+    assert "winning_priority" in conflict_payload
+    assert "step_index" in json.loads(token_state_json)
+    assert "distribution_state_json" not in columns
