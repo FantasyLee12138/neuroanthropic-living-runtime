@@ -28,6 +28,16 @@ def test_cli_state_show_and_safe_on(tmp_path, monkeypatch):
     assert payload["mode"] == "safe"
 
 
+def test_cli_help_mentions_tlh_v1_2(tmp_path, monkeypatch):
+    monkeypatch.setenv("NALR_HOME", str(tmp_path / ".alive"))
+    monkeypatch.setenv("NALR_CONFIG_DIR", str(Path(__file__).resolve().parents[2] / "config"))
+
+    result = RUNNER.invoke(app, ["--help"])
+
+    assert result.exit_code == 0
+    assert "TLH v1.2" in result.stdout
+
+
 def test_cil_parse_populates_command_id_for_legacy_cli_commands(tmp_path):
     cil = CommandInterfaceLayer(RuntimeController(project_root=tmp_path, config_root=Path(__file__).resolve().parents[2] / "config"))
 

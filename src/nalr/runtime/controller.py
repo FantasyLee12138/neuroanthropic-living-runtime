@@ -10,6 +10,7 @@ import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -33,7 +34,7 @@ from nalr.run import SupervisorLoop
 from nalr.runtime.model_gateway import ModelGateway
 from nalr.runtime.async_io import AsyncIOWorker
 from nalr.runtime.dynamics import smooth_resource_biases
-from nalr.runtime.entropy import AnuQuantumEntropyProvider, QuantumEntropyPool, QuantumEntropyUnavailableError
+from nalr.runtime.entropy import MacOSSystemEntropyProvider, QuantumEntropyPool, QuantumEntropyUnavailableError
 from nalr.runtime.authenticity import AuthenticityPolicy
 from nalr.runtime.endogenous_scheduler import EndogenousTickScheduler
 from nalr.runtime.identity import IdentityRuntime
@@ -41,14 +42,27 @@ from nalr.runtime.longrun import LongRunAnalyzer
 from nalr.runtime.metadata import iso_date, utc_now_iso
 from nalr.runtime.motivation_feedback import MotivationFeedbackUpdater
 from nalr.runtime.motivation_pool import EndogenousMotivationPool
-from nalr.runtime.probability_field import ProbabilityFieldIntegrator
+from nalr.runtime.probability_field import ProbabilityFieldIntegrator, compute_tlh_vector_collapse
+from nalr.runtime.tlh_vectors import (
+    AXES,
+    TLH_ACTION_VECTORS,
+    build_tlh_modulation_directions,
+    build_tlh_state_vectors,
+    cosine_similarity,
+    infer_sketch_vector,
+    project_vector_to_action_support,
+    region_scores_from_match_scores,
+)
 from nalr.runtime.vitality import VitalityEngine
 from nalr.schemas.models import (
     ActionCandidate,
     ActionBookkeepingState,
     ActionEvidenceSignal,
+    AutonomyLoopState,
+    AutonomyPolicyState,
     AgentContribution,
     AuthenticityRecord,
+    BodyState,
     CheckpointRef,
     CommandEnvelope,
     ExecutionBudget,
@@ -57,16 +71,29 @@ from nalr.schemas.models import (
     ConflictRepairLedgerEntry,
     ConflictRepairState,
     DisclosureIntentState,
+    EndogenousMicroIntent,
     EndogenousMotivationSignal,
+    EndogenousReplayChain,
+    EndogenousRuntimeState,
+    EndogenousSchedulerState,
+    EndogenousSuppressionDecision,
+    EndogenousTriggerContext,
     EndogenousTickTrigger,
+    EmergentActionSketch,
     CrossLayerCouplingSpec,
     EnergyProjectionSpec,
+    EmotionState,
     ExpressionProfile,
     HealthEvent,
     IdentityContext,
     IdentityState,
+    InstinctFieldState,
+    MotivationLearningState,
+    MotivationPoolState,
+    OrganicModeState,
     ProbabilityFieldSnapshot,
     ProbabilityLayerState,
+    PersonalityAnchorState,
     ProbabilisticContribution,
     RenderPlan,
     RenderedExpression,
@@ -83,11 +110,13 @@ from nalr.schemas.models import (
     StopReason,
     StochasticState,
     SubjectCore,
+    SubjectiveState,
     TaskNode,
     TokenFieldState,
     TurnExecution,
     TurnPlan,
     ToolResult,
+    DesireState,
     normalize_temperament_state,
     to_dict,
 )
@@ -149,15 +178,28 @@ ACTION_STAGE_BY_OWNER: dict[str, str] = {
     owner: stage
     for stage, owner in ACTION_HEAD_STAGE_ORDER
 }
+ACTION_STAGE_BY_OWNER["EndogenousMotivationPool"] = "motivation"
+ACTION_STAGE_BY_OWNER["InstinctField"] = "instinct"
+ACTION_STAGE_BY_OWNER["EmergentActionSketch"] = "emergent"
 
 
-CORE_ACTIONS = ("respond", "plan", "recall", "rest", "connect", "clarify", "wander")
+INNATE_ACTIONS = ("respond", "rest", "absorb", "wander", "nothing", "die")
+DERIVED_ACTIONS = ("plan", "recall", "connect", "clarify")
+CORE_ACTIONS = ("respond", "plan", "recall", "rest", "connect", "clarify", "wander", "absorb", "nothing", "die")
 INTERNAL_RUNTIME_ACTIONS = CORE_ACTIONS + ("short_reply",)
+INNATE_ACTIONS = ("respond", "rest", "absorb", "wander", "nothing", "die")
+DERIVED_ACTIONS = ("plan", "recall", "connect", "clarify")
 MODEL_ROUTE_SKILL_BINDINGS: dict[str, tuple[str, ...]] = {
     "planner": (),
     "pfc": ("generate_candidates",),
     "perspective": ("infer_other_state", "simulate_other_reaction"),
     "renderer": ("render_expression",),
+}
+MODEL_ROUTE_BINDING_KEYS: dict[str, str] = {
+    "planner": "planner",
+    "pfc": "PFCAgent",
+    "perspective": "PerspectiveModel",
+    "renderer": "Renderer",
 }
 
 ARCHITECTURE_CORE_GOAL = "维持生命性、真实性与连续性"
@@ -173,6 +215,7 @@ class RuntimeController:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         self.state_path = self.runtime_dir / "persona_state.json"
         self.runtime_migration_status_path = self.runtime_dir / "runtime_migration_status.json"
+        self.observer_settings_path = self.runtime_dir / "observer_settings.json"
         self.runtime_parquet_dir = self.runtime_dir / "parquet"
         self.state_parquet_path = self.runtime_parquet_dir / "persona_state.parquet"
         self.checkpoint_dir = self.runtime_dir / "checkpoints"
@@ -208,12 +251,10 @@ class RuntimeController:
         self.model_gateway = ModelGateway.from_config(model_gateway_cfg) if isinstance(model_gateway_cfg, dict) else None
         self.identity_runtime = IdentityRuntime(self._identity_cfg(), self._provider_descriptor)
         entropy_cfg = dict(self.config.get("entropy", {}).get("entropy", {}))
-        entropy_provider = AnuQuantumEntropyProvider(
-            endpoint=str(entropy_cfg.get("endpoint", "https://qrng.anu.edu.au/API/jsonI.php")),
-            timeout_s=float(entropy_cfg.get("timeout_s", 0.6)),
-            min_batch_bytes=int(entropy_cfg.get("min_batch_bytes", 32)),
-            max_batch_bytes=int(entropy_cfg.get("max_batch_bytes", 1024)),
-        )
+        provider_name = str(entropy_cfg.get("provider", "macos_os_urandom"))
+        if provider_name != "macos_os_urandom":
+            raise ValueError(f"unsupported entropy provider '{provider_name}'; expected 'macos_os_urandom'")
+        entropy_provider = MacOSSystemEntropyProvider()
         self.entropy_pool = QuantumEntropyPool(
             provider=entropy_provider,
             prefetch_bytes=int(entropy_cfg.get("prefetch_bytes", 256)),
@@ -227,6 +268,8 @@ class RuntimeController:
         self.endogenous_motivation_pool = EndogenousMotivationPool()
         self.motivation_feedback_updater = MotivationFeedbackUpdater()
         self.endogenous_scheduler = EndogenousTickScheduler()
+        self._pending_endogenous_trigger: EndogenousTickTrigger | None = None
+        self._pending_endogenous_trigger_context: EndogenousTriggerContext | None = None
         self.dream_orchestrator = DreamOrchestrator(
             project_root=self.project_root,
             home_path=self.home_path,
@@ -266,6 +309,8 @@ class RuntimeController:
         resource_rules.setdefault("resource_defaults", {})
         resource_rules["resource_defaults"].setdefault("latency_sla_ms", 250)
         resource_rules["resource_defaults"].setdefault("target_burn_ratio", 0.20)
+        observer_settings = self._load_observer_settings_file()
+        models_cfg = self._apply_observer_settings_to_models(read_yaml("models.yaml"), observer_settings)
         return {
             "agents": read_yaml("agents.yaml"),
             "modes": read_yaml("modes.yaml"),
@@ -275,10 +320,188 @@ class RuntimeController:
             "temperament": temperament_cfg,
             "resource_rules": resource_rules,
             "output_style": read_yaml("output_style.yaml"),
-            "models": read_yaml("models.yaml"),
+            "models": models_cfg,
             "identity": read_yaml("identity.yaml"),
             "dream": read_yaml("dream.yaml"),
+            "observer_settings": observer_settings,
         }
+
+    def _default_observer_settings(self) -> dict[str, Any]:
+        return {
+            "autonomy": {
+                "clear_safe_mode_on_start": True,
+            },
+            "newborn": {
+                "disable_safe_mode_lock": True,
+                "organic_mode": {
+                    "enabled": True,
+                    "instinct_first": True,
+                    "body_weight": 0.08,
+                    "subjective_weight": 0.08,
+                    "guard_relaxation": 0.12,
+                    "endogenous_autonomy": 0.1,
+                },
+                "subjective_state": {
+                    "felt": ["微弱自发冲动"],
+                    "spontaneous": 0.08,
+                    "boundary": 0.02,
+                    "reject_all": 0.0,
+                    "meaning_made": [],
+                },
+            },
+            "models": {
+                "supported_backends": ["fake", "deepseek", "doubao", "openai_compatible"],
+                "provider_endpoints": {
+                    "large_model_api": {
+                        "backend": "doubao",
+                        "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+                        "api_key_env": "ARK_API_KEY",
+                        "model": "doubao-seed-2-0-pro-260215",
+                    },
+                    "local_model_api": {
+                        "backend": "openai_compatible",
+                        "base_url": "http://127.0.0.1:11434/v1",
+                        "api_key_env": "LOCAL_MODEL_API_KEY",
+                        "model": "qwen2.5:7b-instruct",
+                    },
+                },
+                "model_tiers": {
+                    "local_model": {
+                        "mode": "remote",
+                        "backend": "openai_compatible",
+                        "base_url": "http://127.0.0.1:11434/v1",
+                        "model": "qwen2.5:7b-instruct",
+                        "timeout_ms": 20000,
+                        "retries": 0,
+                        "api_key_env": "LOCAL_MODEL_API_KEY",
+                        "enabled": False,
+                    }
+                },
+                "agent_model_bindings": {},
+                "model_routes": {},
+            },
+        }
+
+    def _load_observer_settings_file(self) -> dict[str, Any]:
+        defaults = self._default_observer_settings()
+        if not self.observer_settings_path.exists():
+            return defaults
+        try:
+            payload = json.loads(self.observer_settings_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return defaults
+        return self._normalize_observer_settings(payload, base=defaults)
+
+    def _normalize_observer_settings(self, payload: dict[str, Any], *, base: dict[str, Any] | None = None) -> dict[str, Any]:
+        defaults = json.loads(json.dumps(base or self._default_observer_settings(), ensure_ascii=False))
+        data = payload if isinstance(payload, dict) else {}
+        autonomy = data.get("autonomy", {}) if isinstance(data.get("autonomy"), dict) else {}
+        defaults["autonomy"]["clear_safe_mode_on_start"] = bool(
+            autonomy.get("clear_safe_mode_on_start", defaults["autonomy"]["clear_safe_mode_on_start"])
+        )
+
+        newborn = data.get("newborn", {}) if isinstance(data.get("newborn"), dict) else {}
+        defaults["newborn"]["disable_safe_mode_lock"] = bool(
+            newborn.get("disable_safe_mode_lock", defaults["newborn"]["disable_safe_mode_lock"])
+        )
+        organic = newborn.get("organic_mode", {}) if isinstance(newborn.get("organic_mode"), dict) else {}
+        for key in ("enabled", "instinct_first"):
+            defaults["newborn"]["organic_mode"][key] = bool(
+                organic.get(key, defaults["newborn"]["organic_mode"][key])
+            )
+        for key in ("body_weight", "subjective_weight", "guard_relaxation", "endogenous_autonomy"):
+            defaults["newborn"]["organic_mode"][key] = round(
+                _clip(float(organic.get(key, defaults["newborn"]["organic_mode"][key]))), 4
+            )
+        subjective = newborn.get("subjective_state", {}) if isinstance(newborn.get("subjective_state"), dict) else {}
+        defaults["newborn"]["subjective_state"]["felt"] = self._normalize_observer_string_list(
+            list(subjective.get("felt", defaults["newborn"]["subjective_state"]["felt"]))
+        )
+        defaults["newborn"]["subjective_state"]["meaning_made"] = self._normalize_observer_string_list(
+            list(subjective.get("meaning_made", defaults["newborn"]["subjective_state"]["meaning_made"]))
+        )
+        for key in ("spontaneous", "boundary", "reject_all"):
+            defaults["newborn"]["subjective_state"][key] = round(
+                _clip(float(subjective.get(key, defaults["newborn"]["subjective_state"][key]))), 4
+            )
+
+        models = data.get("models", {}) if isinstance(data.get("models"), dict) else {}
+        provider_endpoints = models.get("provider_endpoints", {}) if isinstance(models.get("provider_endpoints"), dict) else {}
+        for endpoint_name, endpoint in provider_endpoints.items():
+            if not isinstance(endpoint, dict):
+                continue
+            target = defaults["models"]["provider_endpoints"].setdefault(endpoint_name, {})
+            for key in ("backend", "base_url", "api_key_env", "model"):
+                value = endpoint.get(key)
+                if value is not None:
+                    target[key] = str(value).strip()
+
+        model_tiers = models.get("model_tiers", {}) if isinstance(models.get("model_tiers"), dict) else {}
+        defaults["models"]["model_tiers"] = {
+            key: self._normalize_model_config(value, tier_mode=True)
+            for key, value in {**defaults["models"]["model_tiers"], **model_tiers}.items()
+            if isinstance(value, dict)
+        }
+        model_routes = models.get("model_routes", {}) if isinstance(models.get("model_routes"), dict) else {}
+        defaults["models"]["model_routes"] = {
+            key: self._normalize_model_config(value, tier_mode=False)
+            for key, value in model_routes.items()
+            if isinstance(value, dict)
+        }
+        bindings = models.get("agent_model_bindings", {}) if isinstance(models.get("agent_model_bindings"), dict) else {}
+        defaults["models"]["agent_model_bindings"] = {
+            str(key): str(value).strip()
+            for key, value in bindings.items()
+            if str(value).strip()
+        }
+        return defaults
+
+    def _normalize_model_config(self, payload: dict[str, Any], *, tier_mode: bool) -> dict[str, Any]:
+        normalized = {
+            "backend": str(payload.get("backend", "")).strip(),
+            "model": str(payload.get("model", "")).strip(),
+            "base_url": str(payload.get("base_url", "")).strip(),
+            "api_key_env": str(payload.get("api_key_env", "")).strip(),
+            "timeout_ms": int(payload.get("timeout_ms", 12000) or 12000),
+            "retries": int(payload.get("retries", 0) or 0),
+            "enabled": bool(payload.get("enabled", True)),
+        }
+        if tier_mode:
+            normalized["mode"] = str(payload.get("mode", "remote")).strip() or "remote"
+        return normalized
+
+    def _normalize_observer_string_list(self, values: list[Any]) -> list[str]:
+        normalized: list[str] = []
+        for raw in list(values or []):
+            value = str(raw).strip()
+            if not value or value in normalized:
+                continue
+            normalized.append(value)
+        return normalized
+
+    def _apply_observer_settings_to_models(self, models_cfg: dict[str, Any], observer_settings: dict[str, Any]) -> dict[str, Any]:
+        merged = json.loads(json.dumps(models_cfg, ensure_ascii=False))
+        model_settings = observer_settings.get("models", {}) if isinstance(observer_settings.get("models"), dict) else {}
+        route_overrides = model_settings.get("model_routes", {}) if isinstance(model_settings.get("model_routes"), dict) else {}
+        tier_overrides = model_settings.get("model_tiers", {}) if isinstance(model_settings.get("model_tiers"), dict) else {}
+        binding_overrides = model_settings.get("agent_model_bindings", {}) if isinstance(model_settings.get("agent_model_bindings"), dict) else {}
+        merged.setdefault("model_routes", {})
+        merged.setdefault("model_tiers", {})
+        merged.setdefault("agent_model_bindings", {})
+        for route_name, override in route_overrides.items():
+            if not isinstance(override, dict):
+                continue
+            merged["model_routes"][route_name] = {**merged["model_routes"].get(route_name, {}), **override}
+        for tier_name, override in tier_overrides.items():
+            if not isinstance(override, dict):
+                continue
+            merged["model_tiers"][tier_name] = {**merged["model_tiers"].get(tier_name, {}), **override}
+        for binding_key, override in binding_overrides.items():
+            merged["agent_model_bindings"][binding_key] = str(override)
+        return merged
+
+    def _observer_settings(self) -> dict[str, Any]:
+        return self.config.get("observer_settings", self._default_observer_settings())
 
     def _normalize_temperament_config(self, payload: dict[str, Any]) -> dict[str, Any]:
         temperament = dict(payload.get("temperament", {}))
@@ -296,8 +519,7 @@ class RuntimeController:
             normalized[key] = round(_clip(float(temperament.get(key, 0.5))), 4)
         return {**payload, "temperament": normalized}
 
-    def _write_state_snapshot(self, state: RuntimeState) -> None:
-        payload = to_dict(state)
+    def _write_state_snapshot_payload(self, payload: dict[str, Any]) -> None:
         rewrite_snapshot(
             self.state_parquet_path,
             [{"payload_json": json.dumps(payload, ensure_ascii=False, sort_keys=True)}],
@@ -306,10 +528,11 @@ class RuntimeController:
         self.state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _save_state(self, state: RuntimeState, *, sync: bool = False) -> None:
-        snapshot = RuntimeState(**to_dict(state))
+        payload = to_dict(state)
+        snapshot = RuntimeState(**payload)
         self._ensure_subject_core(snapshot)
         self._state_cache = snapshot
-        self._state_io.submit(lambda: self._write_state_snapshot(snapshot))
+        self._state_io.submit(lambda payload=payload: self._write_state_snapshot_payload(payload))
         if sync:
             self._state_io.flush(raise_on_error=True)
 
@@ -461,15 +684,235 @@ class RuntimeController:
         self._rounds_since_cold_flush = 0
         self._last_cold_flush_at = time.monotonic()
 
-    def _maybe_flush_cold_path(self, *, raise_on_error: bool = False) -> bool:
+    def newborn_runtime_state(self) -> RuntimeState:
+        observer_settings = self._observer_settings()
+        newborn_settings = observer_settings.get("newborn", {}) if isinstance(observer_settings.get("newborn"), dict) else {}
+        organic_settings = newborn_settings.get("organic_mode", {}) if isinstance(newborn_settings.get("organic_mode"), dict) else {}
+        subjective_settings = newborn_settings.get("subjective_state", {}) if isinstance(newborn_settings.get("subjective_state"), dict) else {}
+        state = RuntimeState(
+            agents_enabled={
+                name: agent_cfg.get("enabled", True)
+                for name, agent_cfg in self.config["agents"]["agents"].items()
+            }
+        )
+        state.subject_core = SubjectCore()
+        state.identity_state = IdentityState()
+        state.mode = "interactive"
+        state.safe_mode = not bool(newborn_settings.get("disable_safe_mode_lock", True))
+        state.round_count = 0
+        state.body_energy = 0.7
+        state.fatigue = 0.0
+        state.memory_fragments = 0.0
+        state.self_continuity = 0.5
+        state.meaning_strength = 0.0
+        state.base_metabolism = 1.0
+        state.mood = 0.55
+        state.affect_residue = 0.0
+        state.focus = "boot"
+        state.focus_lock_count = 0
+        state.focus_nudge = 0.0
+        state.budget_remaining = 1.0
+        state.last_action = "nothing"
+        state.last_checkpoint_id = None
+        state.action_ci = {}
+        state.mode_history = []
+        state.agent_weight_overrides = {}
+        state.critical_conflict_streak = 0
+        state.conflict_hot_rounds = 0
+        state.conflict_recovery_rounds = 0
+        state.last_compromise_template = None
+        state.last_conflict_priority = None
+        state.temperament_state = {}
+        state.resource_state = {}
+        state.repair_mode = None
+        state.repair_state = ConflictRepairState()
+        state.repair_ledger = []
+        state.conflict_safe_mode_owner = None
+        state.last_post_error_adjustment = None
+        state.conflict_learning_state = {}
+        state.entropy_health_state = {}
+        state.last_entropy_failure = {}
+        state.session_metadata = {}
+        state.body_state = BodyState(
+            energy=0.7,
+            fatigue=0.0,
+            memory_fragments=0.0,
+            self_continuity=0.5,
+            meaning_strength=0.0,
+            metabolism=1.0,
+        )
+        state.subjective_state = SubjectiveState(
+            felt=self._normalize_observer_string_list(list(subjective_settings.get("felt", []))),
+            spontaneous=round(_clip(float(subjective_settings.get("spontaneous", 0.0) or 0.0)), 4),
+            boundary=round(_clip(float(subjective_settings.get("boundary", 0.0) or 0.0)), 4),
+            reject_all=round(_clip(float(subjective_settings.get("reject_all", 0.0) or 0.0)), 4),
+            meaning_made=self._normalize_observer_string_list(list(subjective_settings.get("meaning_made", []))),
+        )
+        state.emotion_state = EmotionState(valence=0.0, arousal=0.0, residue=0.0, appraisal_band="steady")
+        state.desire_state = DesireState(latent_drives={}, dominant_drive="", drive_tension=0.0)
+        state.instinct_field = InstinctFieldState(
+            axis_values={"E": 0.0, "F": 0.0, "S": 0.0, "M": 0.0},
+            region_scores={},
+            candidate_actions=[],
+            winner_region="",
+            collapse_trace={},
+        )
+        state.organic_mode = OrganicModeState(
+            enabled=bool(organic_settings.get("enabled", True)),
+            instinct_first=bool(organic_settings.get("instinct_first", False)),
+            body_weight=round(_clip(float(organic_settings.get("body_weight", 0.0) or 0.0)), 4),
+            subjective_weight=round(_clip(float(organic_settings.get("subjective_weight", 0.0) or 0.0)), 4),
+            guard_relaxation=round(_clip(float(organic_settings.get("guard_relaxation", 0.0) or 0.0)), 4),
+            endogenous_autonomy=round(_clip(float(organic_settings.get("endogenous_autonomy", 0.0) or 0.0)), 4),
+        )
+        state.emergent_action_sketches = []
+        state.personality_anchor = PersonalityAnchorState(
+            axis_baseline={"E": 0.5, "F": 0.5, "S": 0.5, "M": 0.5},
+            action_bias={},
+            evidence_anchors=[],
+            anchor_signature="",
+            stability=0.5,
+            drift=0.0,
+            alignment=0.5,
+            updated_round=0,
+            continuity_derivation={},
+        )
+        state.autonomy_policy = AutonomyPolicyState(enabled=False)
+        state.autonomy_loop = AutonomyLoopState(
+            running=False,
+            profile="tool_level",
+            last_step_at=None,
+            last_action_type="",
+            last_action_summary="",
+            last_round_id=None,
+            last_trace_ref=None,
+            window_started_at=None,
+            window_tool_actions=0,
+            window_endogenous_rounds=0,
+            heartbeat_count=0,
+            total_tool_actions=0,
+            total_endogenous_rounds=0,
+            failure_count=0,
+            stop_reason="",
+            last_error="",
+            recent_actions=[],
+        )
+        state.motivation_pool_state = MotivationPoolState(
+            active_motivations=[],
+            pool_weight_snapshot={},
+            endogenous_activation_score=0.0,
+            last_feedback_update_at=None,
+        )
+        state.motivation_learning_state = MotivationLearningState(
+            motivation_weights={},
+            recent_feedback=[],
+            endogenous_policy_shift={},
+        )
+        state.endogenous_scheduler_state = EndogenousSchedulerState(
+            last_endogenous_tick_at=None,
+            recent_triggers=[],
+            suppression_reason=None,
+        )
+        state.endogenous_state = EndogenousRuntimeState(
+            current_intent=None,
+            stability=0,
+            history=[],
+            last_trigger="",
+            last_suppression=None,
+        )
+        state.active_run_id = None
+        state.run_status = "idle"
+        state.run_mode = None
+        state.current_goal = None
+        state.current_step_id = None
+        state.pending_steps = []
+        state.completed_steps = []
+        state.last_tool_result = {}
+        state.stop_reason = {}
+        state.dirty_worktree_detected = False
+        state.commit_permission_required = True
+        self._ensure_subject_core(state)
+        return RuntimeState(**to_dict(state))
+
+    def _rebind_runtime_storage(self) -> None:
+        self.trace_store = TraceStore(self.home_path)
+        self.memory_store = MemoryStore(self.home_path)
+        self.skill_executor = SkillExecutor(
+            self.skills,
+            circuit_breaker_path=self.memory_store.circuit_breaker_path,
+            environment_fingerprint=self._breaker_environment_fingerprint(),
+        )
+        self.dream_orchestrator = DreamOrchestrator(
+            project_root=self.project_root,
+            home_path=self.home_path,
+            config=self.config["dream"]["dream"],
+            memory_store=self.memory_store,
+            vitality_engine=self.vitality_engine,
+        )
+        self.long_run_analyzer = LongRunAnalyzer(self.trace_store, self.identity_payload, CORE_ACTIONS)
+
+    def reset_persona(self) -> RuntimeState:
+        self.flush_pending_io(raise_on_error=False)
+        self._pending_endogenous_trigger = None
+        self._pending_endogenous_trigger_context = None
+        preserve_newborn_settings = self.observer_settings_path.exists()
+        for path in (
+            self.home_path / "traces",
+            self.home_path / "memory",
+            self.home_path / "dream",
+            self.checkpoint_dir,
+            self.snapshot_dir,
+        ):
+            shutil.rmtree(path, ignore_errors=True)
+        if self.state_path.exists():
+            self.state_path.unlink()
+        if self.state_parquet_path.exists():
+            self.state_parquet_path.unlink()
+        self.runtime_parquet_dir.mkdir(parents=True, exist_ok=True)
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.snapshot_dir.mkdir(parents=True, exist_ok=True)
+        self._state_cache = None
+        self._rebind_runtime_storage()
+        newborn = self.newborn_runtime_state()
+        if not preserve_newborn_settings:
+            newborn.subjective_state = SubjectiveState(
+                felt=[],
+                spontaneous=0.0,
+                boundary=0.0,
+                reject_all=0.0,
+                meaning_made=[],
+            )
+            newborn.organic_mode.instinct_first = False
+        self._save_state(newborn, sync=True)
+        self._rounds_since_cold_flush = 0
+        self._last_cold_flush_at = time.monotonic()
+        return self.load_runtime_state()
+
+    def _maybe_flush_cold_path(
+        self,
+        *,
+        scenario: str = "",
+        mode: str = "",
+        endogenous_turn: bool = False,
+        raise_on_error: bool = False,
+    ) -> bool:
         self._rounds_since_cold_flush += 1
         now = time.monotonic()
-        round_due = self._cold_flush_round_interval > 0 and self._rounds_since_cold_flush >= self._cold_flush_round_interval
-        time_due = self._cold_flush_interval_seconds > 0 and (now - self._last_cold_flush_at) >= self._cold_flush_interval_seconds
+        round_interval = self._cold_flush_round_interval
+        time_interval = self._cold_flush_interval_seconds
+        round_due = round_interval > 0 and self._rounds_since_cold_flush >= round_interval
+        time_due = time_interval > 0 and (now - self._last_cold_flush_at) >= time_interval
         if not round_due and not time_due:
             return False
         self.flush_pending_io(raise_on_error=raise_on_error)
         return True
+
+    def _should_sync_tick_writeback(self, *, round_id: int, scenario: str, mode: str, endogenous_turn: bool) -> bool:
+        if endogenous_turn:
+            return True
+        if mode in {"idle", "sleep", "safe"}:
+            return True
+        return False
 
     def _normalize_temperament_state(self, state: RuntimeState) -> dict[str, Any]:
         baseline = dict(state.temperament_state.get("baseline", {}))
@@ -506,7 +949,7 @@ class RuntimeController:
         queue_cap = max(int(defaults.get("queue_cap", 64)), 1)
         queue_depth = max(len(state.pending_steps), int(state.resource_state.get("queue_depth", 0) or 0))
         queue_pressure = _clip(queue_depth / queue_cap, 0.0, 1.0)
-        recent_skills = self.trace_store.list_skill_traces()[-20:]
+        recent_skills = self.trace_store.recent_skill_traces(limit=20)
         avg_latency_ms = (
             sum(float(row.get("latency_ms", 0) or 0.0) for row in recent_skills) / len(recent_skills)
             if recent_skills
@@ -550,6 +993,30 @@ class RuntimeController:
 
     def _state_hash(self, state: RuntimeState) -> str:
         return hashlib.sha1(json.dumps(to_dict(state), sort_keys=True).encode("utf-8")).hexdigest()
+
+    def _trace_state_snapshot_payload(self, state: RuntimeState, *, endogenous_turn: bool) -> dict[str, Any]:
+        snapshot = {
+            "mode": state.mode,
+            "safe_mode": state.safe_mode,
+            "focus": state.focus,
+            "budget_remaining": state.budget_remaining,
+            "focus_lock_count": state.focus_lock_count,
+            "mood": state.mood,
+            "conflict_learning_state": to_dict(state.conflict_learning_state),
+            "body_state": to_dict(state.body_state),
+            "subjective_state": to_dict(state.subjective_state),
+            "emotion_state": to_dict(state.emotion_state),
+            "desire_state": to_dict(state.desire_state),
+            "instinct_field": to_dict(state.instinct_field),
+            "organic_mode": to_dict(state.organic_mode),
+            "emergent_action_sketches": to_dict(state.emergent_action_sketches),
+            "personality_anchor": to_dict(state.personality_anchor),
+        }
+        if endogenous_turn:
+            snapshot["motivation_learning_state"] = to_dict(state.motivation_learning_state)
+            snapshot["motivation_pool_state"] = to_dict(state.motivation_pool_state)
+            snapshot["endogenous_state"] = to_dict(state.endogenous_state)
+        return snapshot
 
     def _infer_operator_level(self, domain: str) -> str:
         if domain in {"body", "mood", "nudge", "mode", "run", "identity"}:
@@ -832,6 +1299,841 @@ class RuntimeController:
         for key, value in patch.items():
             if hasattr(state, key):
                 setattr(state, key, value)
+        self._sync_tlh_state(state)
+
+    def _sync_tlh_state(self, state: RuntimeState) -> None:
+        state.body_state.energy = round(_clip(float(state.body_energy), 0.0, 1.0), 4)
+        state.body_state.fatigue = state.fatigue = round(_clip(float(state.fatigue), 0.0, 1.0), 4)
+        state.body_state.memory_fragments = state.memory_fragments = round(_clip(float(state.memory_fragments), 0.0, 1.0), 4)
+        state.body_state.self_continuity = state.self_continuity = round(_clip(float(state.self_continuity), 0.0, 1.0), 4)
+        state.body_state.meaning_strength = state.meaning_strength = round(_clip(float(state.meaning_strength), 0.0, 1.0), 4)
+        state.body_state.metabolism = state.base_metabolism = round(max(0.0, float(state.base_metabolism)), 4)
+        state.subjective_state.boundary = round(_clip(float(state.subjective_state.boundary), 0.0, 1.0), 4)
+        state.subjective_state.spontaneous = round(_clip(float(state.subjective_state.spontaneous), 0.0, 1.0), 4)
+        state.subjective_state.reject_all = round(_clip(float(state.subjective_state.reject_all), 0.0, 1.0), 4)
+        emotion_valence = _clip((float(state.mood) - 0.55) / 0.45, -1.0, 1.0)
+        emotion_arousal = _clip(
+            abs(emotion_valence) * 0.45
+            + float(state.affect_residue or 0.0) * 0.4
+            + float(state.subjective_state.spontaneous or 0.0) * 0.15,
+            0.0,
+            1.0,
+        )
+        appraisal_band = str(state.session_metadata.get("last_appraisal_band", state.emotion_state.appraisal_band or "steady") or "steady")
+        state.emotion_state.valence = round(emotion_valence, 4)
+        state.emotion_state.arousal = round(emotion_arousal, 4)
+        state.emotion_state.residue = round(_clip(float(state.affect_residue or 0.0), 0.0, 1.0), 4)
+        state.emotion_state.appraisal_band = appraisal_band
+
+        latent_drives = {
+            "comfort": round(_clip((1.0 - float(state.body_energy or 0.0)) * 0.5 + float(state.fatigue or 0.0) * 0.35 + float(state.affect_residue or 0.0) * 0.15), 6),
+            "meaning": round(_clip(float(state.meaning_strength or 0.0) * 0.65 + min(1.0, len(state.subjective_state.meaning_made) * 0.16) * 0.35), 6),
+            "relation": round(_clip((1.0 - float(state.subjective_state.boundary or 0.0)) * 0.35 + max(0.0, state.emotion_state.valence) * 0.2 + (1.0 - float(state.subjective_state.reject_all or 0.0)) * 0.25 + float(state.subjective_state.spontaneous or 0.0) * 0.2), 6),
+            "exploration": round(_clip(float(state.subjective_state.spontaneous or 0.0) * 0.45 + float(state.memory_fragments or 0.0) * 0.35 + (1.0 - float(state.self_continuity or 0.0)) * 0.2), 6),
+            "completion": round(_clip(float(state.meaning_strength or 0.0) * 0.25 + (1.0 - float(state.body_state.energy or 0.0)) * -0.08 + (1.0 - float(state.resource_state.get("scarcity_index", 0.0) or 0.0)) * 0.28 + (1.0 - float(state.subjective_state.reject_all or 0.0)) * 0.2 + (1.0 - float(state.memory_fragments or 0.0)) * 0.15), 6),
+        }
+        dominant_drive = max(latent_drives, key=latent_drives.get) if latent_drives else ""
+        state.desire_state.latent_drives = latent_drives
+        state.desire_state.dominant_drive = dominant_drive
+        state.desire_state.drive_tension = round(max(latent_drives.values(), default=0.0), 4)
+
+    def _subjective_pressure(self, state: RuntimeState) -> float:
+        self._sync_tlh_state(state)
+        meaning_density = min(1.0, len(state.subjective_state.meaning_made) * 0.2)
+        continuity_drop = 1.0 - float(state.self_continuity or 0.0)
+        pressure = (
+            float(state.subjective_state.reject_all or 0.0) * 0.24
+            + float(state.subjective_state.spontaneous or 0.0) * 0.22
+            + float(state.fatigue or 0.0) * 0.15
+            + float(state.memory_fragments or 0.0) * 0.13
+            + continuity_drop * 0.1
+            + (1.0 - float(state.meaning_strength or 0.0)) * 0.06
+            + meaning_density * 0.1
+        )
+        if state.organic_mode.enabled:
+            pressure *= 1.0 + max(
+                0.0,
+                (float(state.organic_mode.body_weight) + float(state.organic_mode.subjective_weight)) / 2.0 - 1.0,
+            ) * 0.18
+        return round(_clip(pressure, 0.0, 1.0), 6)
+
+    def _active_sketch_growth_scalar(self, state: RuntimeState) -> float:
+        return round(
+            max((float(sketch.growth_score or 0.0) for sketch in state.emergent_action_sketches), default=0.0),
+            6,
+        )
+
+    def _recent_action_bias(self, *, limit: int = 12) -> dict[str, float]:
+        rounds = self.trace_store.list_rounds()[-limit:]
+        counts: dict[str, float] = {}
+        total = 0.0
+        for row in rounds:
+            action = str(row.get("sampled_action") or "").strip()
+            if not action:
+                action = ""
+            if action:
+                counts[action] = counts.get(action, 0.0) + 1.0
+                total += 1.0
+            for driver in list(row.get("top_drivers", []) or [])[:3]:
+                if not isinstance(driver, dict):
+                    continue
+                driver_action = str(driver.get("action_name") or "").strip()
+                driver_score = abs(float(driver.get("score", 0.0) or 0.0))
+                if not driver_action or driver_score <= 0.0:
+                    continue
+                weight = min(0.85, 0.22 + driver_score * 2.5)
+                counts[driver_action] = counts.get(driver_action, 0.0) + weight
+                total += weight
+        if total <= 0.0:
+            return {}
+        return {action: round(value / total, 6) for action, value in counts.items()}
+
+    def _update_personality_anchor(
+        self,
+        state: RuntimeState,
+        identity_evidence: dict[str, Any],
+    ) -> PersonalityAnchorState:
+        self._sync_tlh_state(state)
+        anchor = state.personality_anchor
+        prior_axes = dict(anchor.axis_baseline or {})
+        prior_stability = float(anchor.stability or 0.5)
+        collapse_trace = dict(state.instinct_field.collapse_trace or {})
+        subject_vector = dict(collapse_trace.get("subject_vector", {}) or collapse_trace.get("coupled_axes", {}) or collapse_trace.get("normalized_axes", {}) or {})
+        if not subject_vector:
+            subject_vector = {axis: float(prior_axes.get(axis, 0.5) or 0.5) for axis in AXES}
+        alpha = round(_clip(1.0 / min(max(int(state.round_count or 1), 1), 12), 0.08, 0.25), 6)
+        blended_axes = {
+            axis: round(
+                _clip(float(prior_axes.get(axis, 0.5) or 0.5) * (1.0 - alpha) + float(subject_vector.get(axis, 0.5) or 0.5) * alpha),
+                6,
+            )
+            for axis in AXES
+        }
+        drift = round(
+            sum(abs(blended_axes[axis] - float(prior_axes.get(axis, 0.5) or 0.5)) for axis in AXES) / len(AXES),
+            6,
+        )
+        recent_bias = self._recent_action_bias()
+        latest_trace = self.trace_store.list_rounds()[-1] if self.trace_store.list_rounds() else {}
+        latest_action_posterior = (
+            dict(latest_trace.get("probability_field", {}).get("action", {}).get("winner_posterior", {}) or {})
+            if isinstance(latest_trace, dict)
+            else {}
+        )
+        if not latest_action_posterior:
+            raw_match_scores = {
+                str(action): max(0.0, float(score or 0.0))
+                for action, score in dict(collapse_trace.get("match_scores", {}) or {}).items()
+            }
+            match_total = sum(raw_match_scores.values()) or 1.0
+            latest_action_posterior = {
+                action: round(score / match_total, 6)
+                for action, score in raw_match_scores.items()
+                if score > 0.0
+            }
+        action_bias = {
+            action: round(
+                float(anchor.action_bias.get(action, 0.0) or 0.0) * (1.0 - alpha)
+                + float(latest_action_posterior.get(action, recent_bias.get(action, 0.0)) or 0.0) * alpha,
+                6,
+            )
+            for action in INTERNAL_RUNTIME_ACTIONS
+            if (
+                float(anchor.action_bias.get(action, 0.0) or 0.0) > 0.0
+                or float(latest_action_posterior.get(action, 0.0) or 0.0) > 0.0
+                or float(recent_bias.get(action, 0.0) or 0.0) > 0.0
+            )
+        }
+        stability = round(
+            _clip(prior_stability * (1.0 - alpha) + (1.0 - min(drift * 1.5, 1.0)) * alpha),
+            4,
+        )
+        alignment = round(_clip((cosine_similarity(subject_vector, blended_axes) + 1.0) / 2.0, 0.0, 1.0), 6)
+        state.personality_anchor = PersonalityAnchorState(
+            axis_baseline=blended_axes,
+            action_bias=action_bias,
+            evidence_anchors=list(identity_evidence.get("anchors", []) or []),
+            anchor_signature=str(identity_evidence.get("signature", "") or ""),
+            stability=stability,
+            drift=round(_clip(drift), 4),
+            alignment=alignment,
+            updated_round=state.round_count,
+            continuity_derivation=dict(anchor.continuity_derivation or {}),
+        )
+        return state.personality_anchor
+
+    def _normalize_axis_value(self, value: float) -> float:
+        return round(_clip(0.5 + math.tanh(float(value)) * 0.5), 6)
+
+    def _current_axis_alignment(
+        self,
+        *,
+        anchor: PersonalityAnchorState,
+        normalized_axes: dict[str, float],
+        action: str | None = None,
+        match_scores: dict[str, float] | None = None,
+    ) -> float:
+        axis_alignment = _clip((cosine_similarity(normalized_axes, anchor.axis_baseline) + 1.0) / 2.0, 0.0, 1.0)
+        action_alignment = float(anchor.action_bias.get(str(action or ""), 0.0) or 0.0)
+        collapse_alignment = _clip((float((match_scores or {}).get(str(action or ""), 0.0) or 0.0) + 1.0) / 2.0, 0.0, 1.0)
+        return round(_clip(axis_alignment * 0.72 + action_alignment * 0.18 + collapse_alignment * 0.10), 6)
+
+    def _high_dimensional_collapse(
+        self,
+        *,
+        state: RuntimeState,
+        v_main: dict[str, float],
+        v_mod: dict[str, float],
+        weight: float,
+        round_seed: int,
+    ) -> tuple[dict[str, float], dict[str, Any], str]:
+        sketch_vectors = [
+            vector
+            for vector in (
+                infer_sketch_vector(sketch, TLH_ACTION_VECTORS)
+                for sketch in state.emergent_action_sketches[:4]
+            )
+            if vector is not None
+        ]
+        collapse_payload = compute_tlh_vector_collapse(
+            v_main=v_main,
+            v_mod=v_mod,
+            v_anchor=dict(state.personality_anchor.axis_baseline or {}),
+            action_vectors=TLH_ACTION_VECTORS,
+            modulation_directions=build_tlh_modulation_directions(
+                action_vectors=TLH_ACTION_VECTORS,
+                sketch_vectors=sketch_vectors,
+            ),
+            action_bias=dict(state.personality_anchor.action_bias or {}),
+            weight=weight,
+            tie_break_seed=round_seed,
+        )
+        modulated_delta = dict(collapse_payload.get("collapse_delta", {}) or {})
+        selected_action = str(collapse_payload.get("selected_action") or "")
+        return modulated_delta, collapse_payload, selected_action
+
+    def _apply_subject_dynamics_after_round(
+        self,
+        *,
+        state: RuntimeState,
+        appraisal: dict[str, Any],
+        slow_variables: dict[str, Any],
+        relation_state: dict[str, float],
+        sampled_action: str,
+        anchor_alignment: float,
+        requested_mode: str,
+    ) -> None:
+        action_relief = {
+            "respond": 0.0,
+            "plan": -0.02,
+            "recall": 0.04,
+            "rest": 0.18,
+            "connect": -0.01,
+            "clarify": -0.01,
+            "wander": 0.03,
+            "absorb": 0.12,
+            "nothing": 0.06,
+            "die": -0.04,
+            "short_reply": 0.02,
+        }
+        mode_recovery = {"interactive": 0.0, "idle": 0.10, "sleep": 0.22, "safe": 0.04}
+        cognitive_load = float(appraisal.get("cognitive_load", 0.0) or 0.0)
+        interference = float(slow_variables.get("memory_interference", 0.0) or 0.0)
+        scarcity = float(slow_variables.get("resource_scarcity", 0.0) or 0.0)
+        affect_residue = float(slow_variables.get("affect_residue", 0.0) or 0.0)
+        relief = float(action_relief.get(sampled_action, 0.0))
+        fatigue_delta = cognitive_load * 0.12 + max(0.0, 0.45 - float(state.body_energy or 0.0)) * 0.08 + scarcity * 0.04 - relief - float(mode_recovery.get(requested_mode, 0.0))
+        fragment_delta = interference * 0.14 + float(state.subjective_state.spontaneous or 0.0) * 0.03 - (0.10 if sampled_action in {"absorb", "recall"} else 0.0) - float(mode_recovery.get(requested_mode, 0.0)) * 0.28
+        meaning_delta = anchor_alignment * 0.08 + min(1.0, len(state.subjective_state.meaning_made) * 0.08) * 0.04 - float(state.subjective_state.reject_all or 0.0) * 0.03
+        if sampled_action == "die":
+            meaning_delta -= 0.14
+        state.fatigue = round(_clip(float(state.fatigue or 0.0) + fatigue_delta), 4)
+        state.memory_fragments = round(_clip(float(state.memory_fragments or 0.0) + fragment_delta), 4)
+        state.meaning_strength = round(_clip(float(state.meaning_strength or 0.0) + meaning_delta), 4)
+        state.subjective_state.spontaneous = round(
+            _clip(float(state.subjective_state.spontaneous or 0.0) * 0.84 + float(state.memory_fragments or 0.0) * 0.10 + affect_residue * 0.06),
+            4,
+        )
+        state.subjective_state.reject_all = round(
+            _clip(float(state.subjective_state.reject_all or 0.0) * 0.78 + float(state.fatigue or 0.0) * 0.10 + (1.0 - anchor_alignment) * 0.12),
+            4,
+        )
+        state.subjective_state.boundary = round(
+            _clip(float(state.subjective_state.boundary or 0.0) * 0.76 + float(relation_state.get("boundary_level", state.subjective_state.boundary) or state.subjective_state.boundary) * 0.12 + scarcity * 0.06 + float(state.subjective_state.reject_all or 0.0) * 0.06),
+            4,
+        )
+        continuity_target = _clip(
+            anchor_alignment * 0.44
+            + (1.0 - float(state.memory_fragments or 0.0)) * 0.24
+            + float(state.meaning_strength or 0.0) * 0.18
+            + float(state.personality_anchor.stability or 0.0) * 0.14,
+            0.0,
+            1.0,
+        )
+        state.self_continuity = round(
+            _clip(float(state.self_continuity or 0.0) * 0.56 + continuity_target * 0.44),
+            4,
+        )
+        state.personality_anchor.alignment = round(anchor_alignment, 4)
+        state.personality_anchor.continuity_derivation = {
+            "anchor_alignment": round(anchor_alignment, 6),
+            "memory_integration": round(1.0 - float(state.memory_fragments or 0.0), 6),
+            "meaning_strength": round(float(state.meaning_strength or 0.0), 6),
+            "anchor_stability": round(float(state.personality_anchor.stability or 0.0), 6),
+            "continuity_target": round(continuity_target, 6),
+            "sampled_action": sampled_action,
+        }
+
+    def _autonomy_policy_for_profile(self, profile: str = "tool_level") -> AutonomyPolicyState:
+        normalized = str(profile or "tool_level").strip() or "tool_level"
+        policy = AutonomyPolicyState(profile=normalized)
+        if normalized == "observer_only":
+            policy.allowed_operator_levels = ["read_only"]
+            policy.allowed_commands = [
+                "endogenous status",
+                "dream status",
+                "replay",
+                "memory recall",
+                "memory top",
+                "trace why",
+                "why not",
+            ]
+        elif normalized == "full_runtime":
+            policy.allowed_operator_levels = ["read_only", "soft_intervene", "debug_control"]
+        return policy
+
+    def _sync_autonomy_state(self, state: RuntimeState) -> None:
+        if isinstance(state.autonomy_policy, dict):
+            state.autonomy_policy = AutonomyPolicyState(**state.autonomy_policy)
+        if isinstance(state.autonomy_loop, dict):
+            state.autonomy_loop = AutonomyLoopState(**state.autonomy_loop)
+        if not state.autonomy_policy.profile:
+            state.autonomy_policy.profile = "tool_level"
+        if not state.autonomy_loop.profile:
+            state.autonomy_loop.profile = state.autonomy_policy.profile
+
+    def _autonomy_matches_prefix(self, command: str, prefix: str) -> bool:
+        normalized_command = str(command or "").strip().lower()
+        normalized_prefix = str(prefix or "").strip().lower()
+        return bool(normalized_prefix) and (
+            normalized_command == normalized_prefix or normalized_command.startswith(f"{normalized_prefix} ")
+        )
+
+    def _autonomy_command_allowed(
+        self,
+        command: str,
+        policy: AutonomyPolicyState | None = None,
+    ) -> tuple[bool, str]:
+        effective_policy = policy or self.load_runtime_state().autonomy_policy
+        for blocked in effective_policy.blocked_commands:
+            if self._autonomy_matches_prefix(command, blocked):
+                return False, "blocked_by_policy"
+        if effective_policy.allowed_commands and not any(
+            self._autonomy_matches_prefix(command, allowed) for allowed in effective_policy.allowed_commands
+        ):
+            return False, "not_in_allowlist"
+        envelope = self._legacy_command_envelope(command)
+        if effective_policy.allow_commit is False and command.startswith("git commit"):
+            return False, "commit_disallowed"
+        if effective_policy.allowed_operator_levels and envelope.operator_level not in effective_policy.allowed_operator_levels:
+            return False, "operator_level_disallowed"
+        return True, ""
+
+    def _autonomy_budget_usage(self, state: RuntimeState) -> dict[str, Any]:
+        self._sync_autonomy_state(state)
+        return {
+            "remaining": round(float(state.budget_remaining or 0.0), 4),
+            "heartbeat_count": int(state.autonomy_loop.heartbeat_count or 0),
+            "tool_actions": int(state.autonomy_loop.window_tool_actions or 0),
+            "endogenous_rounds": int(state.autonomy_loop.window_endogenous_rounds or 0),
+            "total_tool_actions": int(state.autonomy_loop.total_tool_actions or 0),
+            "total_endogenous_rounds": int(state.autonomy_loop.total_endogenous_rounds or 0),
+            "max_rounds_per_hour": int(state.autonomy_policy.max_rounds_per_hour or 0),
+            "max_tool_actions_per_hour": int(state.autonomy_policy.max_tool_actions_per_hour or 0),
+            "window_started_at": state.autonomy_loop.window_started_at,
+        }
+
+    def _append_autonomy_recent_action(
+        self,
+        state: RuntimeState,
+        *,
+        action_type: str,
+        summary: str,
+        round_id: int | None = None,
+        trace_ref: str | None = None,
+    ) -> None:
+        self._sync_autonomy_state(state)
+        recorded_at = utc_now_iso()
+        state.autonomy_loop.last_step_at = recorded_at
+        state.autonomy_loop.last_action_type = action_type
+        state.autonomy_loop.last_action_summary = summary
+        state.autonomy_loop.last_round_id = round_id
+        state.autonomy_loop.last_trace_ref = trace_ref
+        state.autonomy_loop.recent_actions.append(
+            {
+                "recorded_at": recorded_at,
+                "action_type": action_type,
+                "summary": summary,
+                "round_id": round_id,
+                "trace_ref": trace_ref,
+            }
+        )
+        state.autonomy_loop.recent_actions = state.autonomy_loop.recent_actions[-12:]
+
+    def _autonomy_window_anchor(self, value: str | None) -> datetime | None:
+        if not value:
+            return None
+        normalized = str(value).replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def _ensure_autonomy_window(self, state: RuntimeState) -> None:
+        self._sync_autonomy_state(state)
+        loop = state.autonomy_loop
+        now = datetime.now(timezone.utc)
+        anchor = self._autonomy_window_anchor(loop.window_started_at)
+        if anchor is None or (now - anchor).total_seconds() >= 3600:
+            loop.window_started_at = now.isoformat()
+            loop.window_tool_actions = 0
+            loop.window_endogenous_rounds = 0
+
+    def _autonomy_step_context(self, state: RuntimeState) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        context = {"cue": "", "recall_strength": 0.0}
+        relation_state = {"relationship_risk": 0.0, "closeness": 0.5, "boundary_level": float(state.subjective_state.boundary or 0.5)}
+        slow_variables = {
+            "affect_residue": round(float(state.affect_residue or 0.0), 6),
+            "memory_activation": round(float(state.memory_fragments or 0.0) * 0.45, 6),
+            "resource_scarcity": round(1.0 - float(state.budget_remaining or 0.0), 6),
+        }
+        return context, relation_state, slow_variables
+
+    def _autonomy_candidate_action(self, state: RuntimeState) -> str:
+        self._sync_tlh_state(state)
+        rest_score = max(1.0 - float(state.body_energy or 0.0), float(state.fatigue or 0.0))
+        absorb_score = max(float(state.memory_fragments or 0.0), float(state.subjective_state.reject_all or 0.0) * 0.85)
+        wander_score = min(
+            1.0,
+            float(state.subjective_state.spontaneous or 0.0) * 0.75
+            + (1.0 - float(state.subjective_state.boundary or 0.0)) * 0.25,
+        )
+        nothing_score = min(
+            1.0,
+            float(state.subjective_state.reject_all or 0.0) * 0.7
+            + float(state.fatigue or 0.0) * 0.3,
+        )
+        die_score = min(
+            1.0,
+            max(0.0, 0.12 - float(state.self_continuity or 0.0))
+            + max(0.0, 0.12 - float(state.meaning_strength or 0.0)),
+        )
+        scores = {
+            "rest": rest_score,
+            "absorb": absorb_score,
+            "wander": wander_score,
+            "nothing": nothing_score,
+            "die": die_score,
+        }
+        return max(scores, key=scores.get)
+
+    def _autonomy_trace_append(
+        self,
+        state: RuntimeState,
+        *,
+        action_type: str,
+        summary: str,
+        delta: dict[str, Any] | None = None,
+    ) -> None:
+        before_hash = self._state_hash(state)
+        result = CommandResult(
+            applied=True,
+            scope="autonomy",
+            delta=delta or {"action_type": action_type},
+            operator_level="read_only",
+            rollback_available=False,
+            canonical=f"autonomy {action_type}",
+            command_id=f"autonomy-{uuid4().hex[:12]}",
+            cause_type="endogenous",
+            boundary_action="allow_internal",
+        )
+        self.trace_store.append_command(
+            f"autonomy {action_type}",
+            result,
+            before_hash,
+            before_hash,
+            session_id=state.session_id,
+            recorded_at=utc_now_iso(),
+            sync=False,
+        )
+
+    def _autonomy_record_failure(self, state: RuntimeState, exc: Exception) -> None:
+        self._sync_autonomy_state(state)
+        state.autonomy_loop.failure_count += 1
+        state.autonomy_loop.last_error = str(exc)
+        threshold = int(state.autonomy_policy.failure_trip_threshold or 1)
+        if state.autonomy_loop.failure_count >= threshold:
+            state.autonomy_loop.running = False
+            state.autonomy_policy.enabled = False
+            state.autonomy_loop.stop_reason = "failure_trip_threshold"
+            if state.autonomy_policy.auto_safe_mode:
+                state.safe_mode = True
+                state.mode = "safe"
+
+    def _autonomy_execute_command(self, command: str) -> dict[str, Any]:
+        state = self.load_runtime_state()
+        self._sync_autonomy_state(state)
+        self._ensure_autonomy_window(state)
+        allowed, reason = self._autonomy_command_allowed(command, state.autonomy_policy)
+        if not allowed:
+            self._append_autonomy_recent_action(
+                state,
+                action_type="blocked_command",
+                summary=f"{command} blocked: {reason}",
+            )
+            self._save_state(state, sync=True)
+            return {
+                "allowed": False,
+                "command": command,
+                "reason": reason,
+                "blocked_commands": list(state.autonomy_policy.blocked_commands),
+            }
+
+        result = self.apply_command(command)
+        state = self.load_runtime_state()
+        self._sync_autonomy_state(state)
+        self._ensure_autonomy_window(state)
+        state.autonomy_loop.total_tool_actions += 1
+        state.autonomy_loop.window_tool_actions += 1
+        self._append_autonomy_recent_action(
+            state,
+            action_type="command",
+            summary=f"{command}: {'applied' if result.applied else 'rejected'}",
+        )
+        self._autonomy_trace_append(
+            state,
+            action_type="command",
+            summary=command,
+            delta={"command": command, "applied": result.applied, "scope": result.scope},
+        )
+        self._save_state(state, sync=True)
+        return {
+            "allowed": True,
+            "command": command,
+            "reason": "",
+            "applied": result.applied,
+            "scope": result.scope,
+            "boundary_action": result.boundary_action,
+        }
+
+    def _build_tlh_memory_contribution(self, state: RuntimeState) -> ProbabilisticContribution | None:
+        self._sync_tlh_state(state)
+        continuity_drop = round(1.0 - float(state.self_continuity or 0.0), 6)
+        memory_signal: dict[str, float] = {
+            "state:fatigue": round(float(state.fatigue or 0.0), 6),
+            "state:fragments": round(float(state.memory_fragments or 0.0), 6),
+            "state:continuity_drop": continuity_drop,
+            "state:meaning_strength": round(float(state.meaning_strength or 0.0), 6),
+            "state:reject_all": round(float(state.subjective_state.reject_all or 0.0), 6),
+            "state:spontaneous": round(float(state.subjective_state.spontaneous or 0.0), 6),
+        }
+        for item in state.subjective_state.felt[:3]:
+            memory_signal[f"felt:{item}"] = round(memory_signal.get(f"felt:{item}", 0.0) + 0.12, 6)
+        for item in state.subjective_state.meaning_made[:3]:
+            memory_signal[f"meaning:{item}"] = round(memory_signal.get(f"meaning:{item}", 0.0) + 0.16, 6)
+        if max(memory_signal.values(), default=0.0) <= 0.0:
+            return None
+        return ProbabilisticContribution(
+            module_name="TLHMemoryBridge",
+            module_type="subjective_memory",
+            level="memory",
+            target_space="memory",
+            raw_signal=memory_signal,
+            modulated_delta=memory_signal,
+            confidence=round(_clip(0.4 + self._subjective_pressure(state) * 0.4, 0.0, 1.0), 4),
+            trace_reason="body state and subjectivity write internal state markers into the memory field",
+            projection_reason="TLH internal state projected into memory energy for downstream action coupling",
+            applied_at_stage="tlh_memory_bridge",
+            native_operator="tlh_memory_bridge",
+            dependency_trace=[
+                f"felt_count:{len(state.subjective_state.felt)}",
+                f"meaning_count:{len(state.subjective_state.meaning_made)}",
+                f"subjective_pressure:{self._subjective_pressure(state)}",
+            ],
+            projection=EnergyProjectionSpec(module_type="subjective_memory", target_space="memory", module_temperature=0.9),
+        )
+
+    def _build_emergent_action_contribution(self, state: RuntimeState) -> ProbabilisticContribution | None:
+        active_sketches = [
+            sketch
+            for sketch in state.emergent_action_sketches
+            if float((sketch.get("growth_score", 0.0) if isinstance(sketch, dict) else getattr(sketch, "growth_score", 0.0)) or 0.0) >= 0.28
+            or str(sketch.get("status", "latent") if isinstance(sketch, dict) else getattr(sketch, "status", "latent")) in {"growing", "ready", "formalized"}
+        ]
+        if not active_sketches:
+            return None
+        modulated_delta: dict[str, float] = {}
+        dependency_trace: list[str] = []
+        for sketch in active_sketches[:4]:
+            sketch_status = str(sketch.get("status", "latent") if isinstance(sketch, dict) else getattr(sketch, "status", "latent"))
+            sketch_growth = float((sketch.get("growth_score", 0.0) if isinstance(sketch, dict) else getattr(sketch, "growth_score", 0.0)) or 0.0)
+            sketch_name = str(sketch.get("name", "") if isinstance(sketch, dict) else getattr(sketch, "name", ""))
+            base_scale = 0.18 if sketch_status == "formalized" else 0.12 if sketch_status == "ready" else 0.07
+            scale = round(base_scale + sketch_growth * 0.18, 6)
+            dependency_trace.append(
+                f"{sketch_name}:{sketch_status}:{round(sketch_growth, 4)}"
+            )
+            sketch_vector = infer_sketch_vector(sketch, TLH_ACTION_VECTORS)
+            if sketch_vector is not None:
+                support_map = project_vector_to_action_support(
+                    sketch_vector,
+                    TLH_ACTION_VECTORS,
+                    floor=0.45,
+                    limit=4,
+                )
+            else:
+                raw_target_action_map = sketch.get("target_action_map", {}) if isinstance(sketch, dict) else getattr(sketch, "target_action_map", {})
+                raw_support_actions = sketch.get("support_actions", {}) if isinstance(sketch, dict) else getattr(sketch, "support_actions", {})
+                support_map = dict(raw_target_action_map or raw_support_actions or {})
+            for action, value in support_map.items():
+                score = round(float(value or 0.0) * scale, 6)
+                if score == 0.0:
+                    continue
+                modulated_delta[str(action)] = round(modulated_delta.get(str(action), 0.0) + score, 6)
+        if not modulated_delta:
+            return None
+        return ProbabilisticContribution(
+            module_name="EmergentActionSketch",
+            module_type="emergent",
+            level="action",
+            target_space="action",
+            raw_signal=dict(modulated_delta),
+            modulated_delta=modulated_delta,
+            confidence=round(
+                _clip(
+                    0.32
+                    + max(
+                        float((sketch.get("growth_score", 0.0) if isinstance(sketch, dict) else getattr(sketch, "growth_score", 0.0)) or 0.0)
+                        for sketch in active_sketches[:4]
+                    )
+                    * 0.45,
+                    0.0,
+                    1.0,
+                ),
+                4,
+            ),
+            trace_reason="repeated internal pressure grows learned action sketches that re-enter action competition",
+            projection_reason="emergent action sketches projected back into the action field",
+            applied_at_stage="emergent_sketch",
+            native_operator="emergent_action_sketch",
+            dependency_trace=dependency_trace,
+            projection=EnergyProjectionSpec(module_type="emergent", target_space="action", module_temperature=0.95),
+        )
+
+    def _update_emergent_action_sketches(
+        self,
+        *,
+        state: RuntimeState,
+        action_posterior: dict[str, float],
+        sampled_action: str,
+    ) -> None:
+        self._sync_tlh_state(state)
+        instinct = state.instinct_field
+        candidates = [str(action).strip() for action in instinct.candidate_actions if str(action).strip()]
+        if not candidates or not instinct.winner_region:
+            return
+        subjective_pressure = self._subjective_pressure(state)
+        dominant_region = max((float(value) for value in instinct.region_scores.values()), default=0.0)
+        growth_boost = _clip(
+            dominant_region * 0.36
+            + subjective_pressure * 0.32
+            + float(action_posterior.get(sampled_action, 0.0) or 0.0) * 0.18
+            + min(1.0, len(state.subjective_state.felt) * 0.06)
+            + min(1.0, len(state.subjective_state.meaning_made) * 0.08),
+            0.0,
+            1.0,
+        )
+        if growth_boost < 0.28:
+            return
+
+        sketch_name = f"{instinct.winner_region}:{'+'.join(candidates[:2])}"
+        support_actions = {
+            action: round(float(action_posterior.get(action, 0.0) or 0.0), 6)
+            for action in candidates[:4]
+            if float(action_posterior.get(action, 0.0) or 0.0) > 0.0
+        }
+        sources: list[str] = [f"winner_region:{instinct.winner_region}"]
+        sources.extend(f"felt:{item}" for item in state.subjective_state.felt[:2])
+        sources.extend(f"meaning:{item}" for item in state.subjective_state.meaning_made[:2])
+        sources.extend(f"action:{item}" for item in candidates[:3])
+        if sampled_action:
+            sources.append(f"sampled:{sampled_action}")
+        anchor_alignment = self._current_axis_alignment(
+            anchor=state.personality_anchor,
+            normalized_axes={
+                axis: float(
+                    dict(
+                        instinct.collapse_trace.get("subject_vector", {})
+                        or instinct.collapse_trace.get("coupled_axes", {})
+                        or instinct.collapse_trace.get("normalized_axes", {})
+                        or {}
+                    ).get(axis, 0.5)
+                    or 0.5
+                )
+                for axis in AXES
+            },
+            action=sampled_action,
+            match_scores=dict(instinct.collapse_trace.get("match_scores", {}) or {}),
+        )
+
+        upgraded: list[Any] = []
+        matched = False
+        for raw_sketch in state.emergent_action_sketches:
+            sketch = raw_sketch if hasattr(raw_sketch, "name") else raw_sketch
+            if str(sketch.name) != sketch_name:
+                upgraded.append(sketch)
+                continue
+            matched = True
+            sketch.signal_sources = sorted(set(list(sketch.signal_sources) + sources))
+            sketch.support_actions = {
+                key: round(max(float(sketch.support_actions.get(key, 0.0) or 0.0), value), 6)
+                for key, value in {**sketch.support_actions, **support_actions}.items()
+            }
+            sketch.growth_score = round(_clip(max(float(sketch.growth_score or 0.0), float(sketch.growth_score or 0.0) + growth_boost * 0.35), 0.0, 1.0), 4)
+            sketch.stability = max(int(sketch.stability or 0) + 1, 1)
+            sketch.anchor_alignment = round(max(float(sketch.anchor_alignment or 0.0), anchor_alignment), 4)
+            sketch.target_action_map = {
+                action: round(float(value), 6)
+                for action, value in sorted(sketch.support_actions.items(), key=lambda item: item[1], reverse=True)[:3]
+            }
+            if sketch.growth_score >= sketch.upgrade_threshold and sketch.stability >= 2 and sketch.anchor_alignment >= 0.58:
+                sketch.status = "formalized"
+            elif sketch.growth_score >= sketch.upgrade_threshold:
+                sketch.status = "ready"
+            elif sketch.growth_score >= max(0.35, sketch.upgrade_threshold * 0.5):
+                sketch.status = "growing"
+            else:
+                sketch.status = "latent"
+            upgraded.append(sketch)
+        if not matched:
+            threshold = 0.66 if sketch_name.split(":", 1)[0] != "dissolve" else 0.72
+            score = round(_clip(growth_boost * 0.7, 0.0, 1.0), 4)
+            status = "ready" if score >= threshold else "growing" if score >= max(0.35, threshold * 0.5) else "latent"
+            upgraded.append(
+                EmergentActionSketch(
+                    name=sketch_name,
+                    signal_sources=sources,
+                    support_actions=support_actions,
+                    growth_score=score,
+                    upgrade_threshold=threshold,
+                    status="formalized" if score >= threshold and anchor_alignment >= 0.7 else status,
+                    target_action_map={
+                        action: round(float(value), 6)
+                        for action, value in sorted(support_actions.items(), key=lambda item: item[1], reverse=True)[:3]
+                    },
+                    anchor_alignment=anchor_alignment,
+                    stability=1,
+                )
+            )
+        upgraded.sort(key=lambda item: (float(getattr(item, "growth_score", 0.0)), str(getattr(item, "name", ""))), reverse=True)
+        state.emergent_action_sketches = upgraded[:8]
+
+    def _build_instinct_field_contribution(
+        self,
+        *,
+        state: RuntimeState,
+        context: dict[str, Any],
+        relation_state: dict[str, float],
+        slow_variables: dict[str, Any],
+    ) -> ProbabilisticContribution | None:
+        self._sync_tlh_state(state)
+        if not state.organic_mode.enabled:
+            return None
+
+        closeness = float(relation_state.get("closeness", context.get("closeness", 0.5)) or 0.5)
+        boundary = max(float(relation_state.get("boundary_level", state.subjective_state.boundary) or state.subjective_state.boundary), state.subjective_state.boundary)
+        affect_residue = float(slow_variables.get("affect_residue", state.affect_residue) or 0.0)
+        memory_activation = float(slow_variables.get("memory_activation", 0.0) or 0.0)
+        scarcity = float(slow_variables.get("resource_scarcity", state.resource_state.get("scarcity_index", 0.0)) or 0.0)
+        interference = float(context.get("interference", 0.0) or 0.0)
+        spontaneous = float(state.subjective_state.spontaneous or 0.0)
+        reject_all = float(state.subjective_state.reject_all or 0.0)
+        meaning_strength = float(state.meaning_strength or 0.0)
+        continuity = float(state.self_continuity or 0.0)
+        fatigue = float(state.fatigue or 0.0)
+        fragments = float(state.memory_fragments or 0.0)
+        body_energy = float(state.body_energy or 0.0)
+        anchor = state.personality_anchor
+        growth_scalar = self._active_sketch_growth_scalar(state)
+        v_main, v_mod, raw_axis_values = build_tlh_state_vectors(
+            closeness=closeness,
+            boundary=boundary,
+            affect_residue=affect_residue,
+            memory_activation=memory_activation,
+            scarcity=scarcity,
+            interference=interference,
+            spontaneous=spontaneous,
+            reject_all=reject_all,
+            meaning_strength=meaning_strength,
+            continuity=continuity,
+            fatigue=fatigue,
+            fragments=fragments,
+            body_energy=body_energy,
+            meaning_made_count=len(state.subjective_state.meaning_made),
+            sketch_growth=growth_scalar,
+        )
+        anchor_axes = dict(anchor.axis_baseline or {})
+        weight = max(1.0, float(state.organic_mode.body_weight) * 0.5 + float(state.organic_mode.subjective_weight) * 0.5)
+        modulated_delta, collapse_payload, selected_action = self._high_dimensional_collapse(
+            state=state,
+            v_main=v_main,
+            v_mod=v_mod,
+            weight=weight,
+            round_seed=max(1, int(state.round_count or 1)),
+        )
+        region_scores = region_scores_from_match_scores(dict(collapse_payload.get("match_scores", {}) or {}))
+        winner_region = max(region_scores, key=region_scores.get)
+        candidate_actions = [
+            name
+            for name, value in sorted(modulated_delta.items(), key=lambda item: item[1], reverse=True)
+            if value > 0.0
+        ][:6]
+        state.instinct_field.axis_values = v_main
+        state.instinct_field.region_scores = region_scores
+        state.instinct_field.winner_region = winner_region
+        state.instinct_field.candidate_actions = candidate_actions
+        state.instinct_field.collapse_trace = {
+            **collapse_payload,
+            "raw_axes": dict(raw_axis_values),
+            "body_energy": round(body_energy, 6),
+            "fatigue": round(fatigue, 6),
+            "reject_all": round(reject_all, 6),
+            "meaning_strength": round(meaning_strength, 6),
+            "boundary": round(boundary, 6),
+            "anchor_axes": dict(anchor_axes),
+            "selected_action": selected_action,
+        }
+        return ProbabilisticContribution(
+            module_name="InstinctField",
+            module_type="instinct",
+            level="action",
+            target_space="action",
+            raw_signal=dict(collapse_payload.get("match_scores", {}) or {}),
+            modulated_delta=modulated_delta,
+            confidence=round(_clip(0.45 + region_scores[winner_region] * 0.35, 0.0, 1.0), 4),
+            trace_reason="body state, subjective state, personality anchor, and 4D collapse co-resolve into action pressure",
+            projection_reason="4D subject-space collapse projected from TLH runtime state",
+            applied_at_stage="instinct_field",
+            native_operator="high_dimensional_collapse",
+            dependency_trace=[
+                f"winner_region:{winner_region}",
+                f"selected_action:{selected_action}",
+                f"felt:{'|'.join(state.subjective_state.felt[:3])}" if state.subjective_state.felt else "felt:none",
+            ],
+        )
 
     def _agent_weight(self, agent_name: str, state: RuntimeState) -> float:
         base = self.config["agents"]["agents"].get(agent_name, {}).get("weight", 1.0)
@@ -1020,7 +2322,7 @@ class RuntimeController:
         scenario: str,
         window: int = 20,
     ) -> dict[str, Any]:
-        recent = self.trace_store.list_rounds()[-window:]
+        recent = self.trace_store.recent_round_signal_views(limit=window)
         appraisal = dict(context.get("appraisal", {}))
         valences = [
             float(trace.get("appraisal_snapshot", {}).get("semantic_valence", 0.0) or 0.0)
@@ -1949,6 +3251,13 @@ class RuntimeController:
                 allowed_phase="tick",
             ),
             CrossLayerCouplingSpec(
+                source_layer="memory",
+                target_layer="action",
+                carrier_signal="organic_memory",
+                projection_rule="field_native",
+                allowed_phase="tick",
+            ),
+            CrossLayerCouplingSpec(
                 source_layer="action",
                 target_layer="token",
                 carrier_signal="render_plan",
@@ -1983,6 +3292,9 @@ class RuntimeController:
         contribution_rows.append(thalamus_agent.build_context_routing_contribution(event, state, scenario_cfg, context))
         contribution_rows.append(thalamus_agent.build_memory_routing_contribution(event, state, scenario_cfg, context))
         contribution_rows.append(hippocampus_agent.build_memory_prior_contribution(event, state, scenario_cfg, context))
+        tlh_memory_contribution = self._build_tlh_memory_contribution(state)
+        if tlh_memory_contribution is not None:
+            contribution_rows.append(tlh_memory_contribution)
         if include_token and render_plan is not None:
             contribution_rows.append(self._build_renderer_token_contribution(render_plan, context))
         tool_contribution = self._build_tool_affordance_contribution(state, context)
@@ -2306,71 +3618,6 @@ class RuntimeController:
             ),
         )
 
-    def _prefetch_action_bias_heads(
-        self,
-        *,
-        round_id: int,
-        event: RoundEvent,
-        state_snapshot: RuntimeState,
-        live_state: RuntimeState,
-        scenario_cfg: dict[str, Any],
-        context: dict[str, Any],
-        skill_traces: list[dict[str, Any]],
-        runtime_context: SkillRuntimeContext,
-        parallel_traces: list[dict[str, Any]],
-    ) -> dict[str, dict[str, Any]]:
-        tasks: list[dict[str, Any]] = []
-        desire_agent = self.agent_map["DesireAgent"]
-        dmn_agent = self.agent_map["DMNAgent"]
-        perspective_agent = self.agent_map["PerspectiveModel"]
-
-        tasks.append(
-            {
-                "name": "DesireAgent",
-                "task_type": "callable",
-                "inputs": {},
-                "provider": lambda: desire_agent.build_direct_action_contribution(event, state_snapshot, scenario_cfg, context),
-                "parallel_group": "action_bias_prefetch",
-                "agent_tier": self._agent_tier("DesireAgent"),
-            }
-        )
-        tasks.append(
-            {
-                "name": "DMNAgent",
-                "task_type": "callable",
-                "inputs": {},
-                "provider": lambda: dmn_agent.build_direct_action_contribution(event, state_snapshot, scenario_cfg, context),
-                "parallel_group": "action_bias_prefetch",
-                "agent_tier": self._agent_tier("DMNAgent"),
-            }
-        )
-        if live_state.resource_state.get("resource_mode") != "starvation":
-            tasks.append(
-                {
-                    "name": "PerspectiveModel",
-                    "task_type": "callable",
-                    "inputs": {},
-                    "provider": lambda: perspective_agent.build_direct_action_contribution(event, state_snapshot, scenario_cfg, context),
-                    "parallel_group": "action_bias_prefetch",
-                    "agent_tier": self._agent_tier("PerspectiveModel"),
-                }
-            )
-
-        outputs = self._execute_parallel_skills(
-            round_id=round_id,
-            tasks=tasks,
-            skill_traces=skill_traces,
-            runtime_context=runtime_context,
-            parallel_traces=parallel_traces,
-        )
-        prefetched: dict[str, dict[str, Any]] = {}
-        for owner, contribution in outputs.items():
-            if isinstance(contribution, ProbabilisticContribution):
-                prefetched[owner] = {
-                    "contribution": contribution,
-                }
-        return prefetched
-
     def _unnamed_label(self) -> str:
         return self.identity_runtime.unnamed_label()
 
@@ -2482,6 +3729,119 @@ class RuntimeController:
             context=context,
             relation_state=relation_state,
             prior_closeness=prior_closeness,
+        )
+
+    def _build_endogenous_trigger_context(
+        self,
+        *,
+        state: RuntimeState,
+        scenario: str,
+        event: RoundEvent | None = None,
+        trace_payload: dict[str, Any] | None = None,
+    ) -> EndogenousTriggerContext:
+        payload = dict(trace_payload or {})
+        vitality = dict(payload.get("vitality_snapshot", {}) or {})
+        source_round_id = payload.get("round_id")
+        cue = payload.get("run_context", {}).get("cue") if isinstance(payload.get("run_context"), dict) else None
+        if cue is None and event is not None:
+            cue = event.cue
+        context = {
+            "cue": cue,
+            "recall_strength": float(vitality.get("memory_activation", 0.0) or 0.0),
+            "closeness": float(self.memory_store.closeness("self")),
+            "interference": float(vitality.get("memory_interference", 0.0) or 0.0),
+        }
+        relation_state = {
+            "relationship_risk": float(vitality.get("relationship_drift", 0.0) or 0.0),
+            "closeness": float(context["closeness"]),
+        }
+        slow_variables = {
+            "affect_residue": float(state.affect_residue),
+            "memory_activation": float(vitality.get("memory_activation", 0.0) or 0.0),
+            "relationship_drift": float(vitality.get("relationship_drift", 0.0) or 0.0),
+            "resource_scarcity": float(vitality.get("resource_scarcity", 0.0) or 0.0),
+        }
+        return EndogenousTriggerContext(
+            scenario=scenario,
+            source_round_id=int(source_round_id) if isinstance(source_round_id, int) else None,
+            context=context,
+            relation_state=relation_state,
+            slow_variables=slow_variables,
+        )
+
+    def _endogenous_suppression_decision(
+        self,
+        *,
+        state: RuntimeState,
+        scenario: str,
+        trigger: EndogenousTickTrigger | None,
+    ) -> EndogenousSuppressionDecision:
+        if trigger is None:
+            return EndogenousSuppressionDecision(suppressed=True, reason="no_trigger")
+        if state.safe_mode or state.mode == "safe":
+            return EndogenousSuppressionDecision(suppressed=True, reason="safe_mode")
+        subjective_pressure = self._subjective_pressure(state)
+        instinct_relax = (
+            state.organic_mode.enabled
+            and state.organic_mode.instinct_first
+            and (
+                (
+                    float(state.organic_mode.endogenous_autonomy or 0.0) >= 0.7
+                    and float(trigger.trigger_score or 0.0) >= max(0.55, 0.82 - float(state.organic_mode.endogenous_autonomy or 0.0) * 0.25)
+                )
+                or (
+                    subjective_pressure >= 0.58
+                    and float(trigger.trigger_score or 0.0) >= max(0.48, 0.76 - subjective_pressure * 0.18)
+                )
+            )
+        )
+        if scenario == "task" and not instinct_relax:
+            return EndogenousSuppressionDecision(suppressed=True, reason="task_scenario")
+        if scenario != "companion" and not instinct_relax:
+            return EndogenousSuppressionDecision(suppressed=True, reason="non_companion_scenario")
+        if state.active_run_id and state.run_status in {"running", "paused"}:
+            return EndogenousSuppressionDecision(
+                suppressed=True,
+                reason="active_run",
+                details={"run_id": state.active_run_id, "run_status": state.run_status},
+            )
+        threshold = 0.7 if not instinct_relax else max(
+            0.46,
+            0.7 - float(state.organic_mode.endogenous_autonomy or 0.0) * 0.2 - subjective_pressure * 0.12,
+        )
+        if float(trigger.trigger_score or 0.0) < threshold:
+            return EndogenousSuppressionDecision(
+                suppressed=True,
+                reason="score_below_auto_threshold",
+                details={
+                    "trigger_score": float(trigger.trigger_score or 0.0),
+                    "threshold": threshold,
+                    "subjective_pressure": subjective_pressure,
+                },
+            )
+        return EndogenousSuppressionDecision(suppressed=False, reason="")
+
+    def _build_endogenous_micro_intent(
+        self,
+        *,
+        state: RuntimeState,
+        trigger: EndogenousTickTrigger,
+        pool_state,
+    ) -> EndogenousMicroIntent:
+        first_motivation = pool_state.active_motivations[0].motivation_type if pool_state.active_motivations else "latent"
+        previous_intent = state.endogenous_state.current_intent
+        stability = state.endogenous_state.stability
+        if previous_intent is not None and previous_intent.name == first_motivation:
+            stability += 1
+        else:
+            stability = 1
+        return EndogenousMicroIntent(
+            name=first_motivation,
+            trigger=trigger.trigger_type,
+            bias=pool_state.active_motivations[0].target_actions if pool_state.active_motivations else {},
+            evidence=trigger.source_metrics,
+            stability=stability,
+            source_round_id=state.round_count,
         )
 
     def _build_grounding_capsule(
@@ -3136,7 +4496,23 @@ class RuntimeController:
             "connect": 0.02 + scenario_cfg.get("relationship_weight", 0.1) * relation_state["closeness"] * 0.40,
             "clarify": 0.08,
             "wander": scenario_cfg.get("dmn_weight", 0.05) * (1.0 if mode_cfg.get("allow_dmn", True) else 0.0),
+            "absorb": 0.025 + float(state.memory_fragments or 0.0) * 0.14 + float(state.subjective_state.spontaneous or 0.0) * 0.06,
+            "nothing": 0.015 + float(state.subjective_state.reject_all or 0.0) * 0.06,
+            "die": 0.01 + (1.0 - float(state.self_continuity or 0.0)) * 0.02 + max(0.0, 0.25 - float(state.meaning_strength or 0.0)) * 0.03,
         }
+        if state.organic_mode.enabled:
+            subjective_pressure = self._subjective_pressure(state)
+            innate_gain = 1.0 + subjective_pressure * 0.58 + float(state.organic_mode.guard_relaxation or 0.0) * 0.16
+            derived_scale = max(
+                0.32,
+                1.0 - subjective_pressure * 0.46 - max(0.0, float(state.organic_mode.subjective_weight or 1.0) - 1.0) * 0.1,
+            )
+            for action in INNATE_ACTIONS:
+                if action in base:
+                    base[action] *= innate_gain
+            for action in DERIVED_ACTIONS:
+                if action in base:
+                    base[action] *= derived_scale
         if scarcity_index >= 0.60 or state.budget_remaining <= 0.10:
             base["short_reply"] = 0.02 + scarcity_index * 0.12 + max(0.0, 0.35 - state.body_energy) * 0.20
         return {action: _clip(value, 0.01, 0.85) for action, value in base.items()}
@@ -3557,14 +4933,6 @@ class RuntimeController:
             max_allowed_resamples = max(max_allowed_resamples, int(resample_policy.get("allowed_resamples", 0)))
             if resolution.get("flag"):
                 effective_resolution = dict(resolution)
-                current_action_truth = self._apply_conflict_scales(
-                    current_action_truth,
-                    control_ledger,
-                    resolution.get("action_scales", {}),
-                    thresholds,
-                    hard_blocked_actions=list(resolution.get("blocked_actions", []) or []),
-                )
-                current_action_truth["conflict_mode"] = str(control_ledger.get("conflict_mode", "monitor") or "monitor")
                 gate_decisions.append(
                     {
                         "stage": "conflict",
@@ -3589,12 +4957,24 @@ class RuntimeController:
             control_ledger["resample_idx"] = int(control_ledger.get("resample_idx", 0) or 0) + 1
 
         effective_assessment = dict(peak_assessment)
+        repair_components = {
+            str(name): float(value)
+            for name, value in dict(effective_assessment.get("components", {}) or {}).items()
+        }
+        sustained_repair_pressure = (
+            float(repair_components.get("body_gap", 0.0)) >= 0.92
+            or float(repair_components.get("veto_tension", 0.0)) >= 0.32
+            or float(repair_components.get("relation_risk_gap", 0.0)) >= 0.42
+        )
         sustained_critical = (
             (bool(state.repair_state.active) or bool(state.repair_ledger))
             and (
                 bool(effective_resolution.get("flag"))
-                or float(effective_assessment.get("score", 0.0))
-                >= max(0.62, float(conflict_agent.conflict_high) - 0.08)
+                or (
+                    float(effective_assessment.get("score", 0.0))
+                    >= max(0.64, float(conflict_agent.conflict_high) - 0.11)
+                    and sustained_repair_pressure
+                )
             )
         )
         effective_assessment["critical_conflict"] = (
@@ -3626,12 +5006,6 @@ class RuntimeController:
                 "reason": "max_resample_reached",
             }
             resolution["applied_template"] = template
-            self._apply_conflict_scales(
-                current_action_truth,
-                control_ledger,
-                TEMPLATE_ACTION_SCALES.get(template, {}),
-                thresholds,
-            )
 
         circuit = self._update_conflict_circuit(
             state,
@@ -3643,17 +5017,6 @@ class RuntimeController:
         if circuit["active"]:
             high_risk_actions = ("connect", "plan", "wander")
             for action in high_risk_actions:
-                control_ledger.setdefault("gate", {})
-                control_ledger["gate"][action] = 0.0
-                current_action_truth.setdefault("gate", {})[action] = 0.0
-                if action in dict(current_action_truth.get("winner_posterior", {}) or {}):
-                    current_action_truth.setdefault("winner_posterior", {})[action] = thresholds["p_floor"]
-                    hard_masked_targets = {
-                        str(name)
-                        for name in list(current_action_truth.get("hard_masked_targets", []) or [])
-                    }
-                    hard_masked_targets.add(action)
-                    current_action_truth["hard_masked_targets"] = sorted(hard_masked_targets)
                 blocked_by_circuit.append(action)
         current_action_truth["conflict_mode"] = str(control_ledger.get("conflict_mode", "monitor") or "monitor")
 
@@ -3813,6 +5176,9 @@ class RuntimeController:
             or {action: math.log(max(value, 1e-9)) for action, value in deterministic.items()}
         )
         base_stochastic = self._softmax(base_energy)
+        base_top_action = self._top_action_name(base_stochastic) or ""
+        ordered_base = sorted(base_stochastic.values(), reverse=True)
+        top_gap = (ordered_base[0] - ordered_base[1]) if len(ordered_base) > 1 else 1.0
         emo_channel = self._stochastic_channel(base_stochastic)
         novelty = _clip(1.0 - max(base_stochastic.values(), default=0.0), 0.0, 1.0)
         emotion_volatility = _clip(abs(event.valence - (state.mood - 0.5)), 0.0, 1.0)
@@ -3891,9 +5257,13 @@ class RuntimeController:
             1.0,
         )
         lambda_noise_pre_guard = _clip(
-            0.10 + 0.25 * V_t - 0.12 * control_strength - relation_state["relationship_risk"] * 0.08,
+            0.12
+            + 0.42 * V_t
+            + max(0.0, 0.08 - top_gap) * 2.0
+            - 0.10 * control_strength
+            - relation_state["relationship_risk"] * 0.06,
             0.0,
-            0.60,
+            0.75,
         )
         lambda_noise = lambda_noise_pre_guard
 
@@ -3914,14 +5284,21 @@ class RuntimeController:
         noise_guard_triggered = False
         guard_reason = ""
         if log_m_guard_triggered:
-            lambda_noise = max(0.0, lambda_noise * 0.85)
+            lambda_noise = max(0.0, lambda_noise * 0.92)
             guard_reason = "log_m_guard"
         if kl > 0.15:
             noise_guard_triggered = True
-            lambda_noise = max(0.0, lambda_noise * 0.5)
+            lambda_noise = max(0.0, lambda_noise * 0.7)
             guard_reason = f"{guard_reason}+kl_guard" if guard_reason else "kl_guard"
-            q_noise = dict(base_stochastic)
+            q_noise = self._normalize(
+                {
+                    action: (base_stochastic[action] * 0.45) + (q_noise[action] * 0.55)
+                    for action in base_stochastic
+                }
+            )
         mixed = {action: (1 - lambda_noise) * base_stochastic[action] + lambda_noise * q_noise[action] for action in base_stochastic}
+        mixed = self._normalize(mixed)
+        mixed_top_action = self._top_action_name(mixed) or ""
 
         affect_load = abs(event.valence)
         arousal = _clip(1.0 - state.body_energy + conflict_score * 0.3, 0.0, 1.0)
@@ -3990,10 +5367,13 @@ class RuntimeController:
             base_stochastic_distribution={key: round(value, 6) for key, value in base_stochastic.items()},
             q_noise_distribution={key: round(value, 6) for key, value in q_noise.items()},
             q_noise_pre_guard_summary={key: round(value, 6) for key, value in q_noise_pre_guard.items()},
+            winner_flip_detected=bool(base_top_action and mixed_top_action and base_top_action != mixed_top_action),
+            winner_flip_from=base_top_action,
+            winner_flip_to=mixed_top_action,
             entropy_refs_by_node=entropy_refs_by_node,
             entropy_ref=entropy_ref,
         )
-        return self._normalize(mixed), stochastic
+        return mixed, stochastic
 
     def _build_contributions(
         self,
@@ -4812,6 +6192,7 @@ class RuntimeController:
         *,
         allow_commit: bool,
         operator_level: str,
+        defer_bootstrap_tool: bool = False,
     ) -> tuple[RunState, dict[str, Any], dict[str, Any]]:
         state = self.load_runtime_state()
         request = RunRequest(
@@ -4822,6 +6203,12 @@ class RuntimeController:
             operator_level=operator_level,
         )
         supervisor = SupervisorLoop(project_root=self.project_root, planner=self._plan_run_via_model)
+        if defer_bootstrap_tool:
+            return supervisor.prepare_bootstrap(
+                request,
+                session_id=state.session_id,
+                recorded_at=utc_now_iso(),
+            )
         return supervisor.bootstrap(
             request,
             session_id=state.session_id,
@@ -4836,6 +6223,7 @@ class RuntimeController:
         mode: str = "interactive",
         allow_commit: bool = False,
         operator_level: str = "read_only",
+        defer_bootstrap_tool: bool = False,
     ) -> TurnPlan:
         normalized = text.strip()
         if not normalized:
@@ -4878,6 +6266,7 @@ class RuntimeController:
                 normalized,
                 allow_commit=allow_commit,
                 operator_level=operator_level,
+                defer_bootstrap_tool=defer_bootstrap_tool,
             )
         return TurnPlan(
             text=normalized,
@@ -5043,6 +6432,7 @@ class RuntimeController:
         shaping_events, dream_payload = self._apply_noninteractive_shaping(state, requested_mode, cue, relation_state)
         rename_event = self._maybe_update_identity_from_evidence(state)
         identity_evidence = self._augment_identity_evidence(state, self.memory_store.identity_evidence())
+        self._update_personality_anchor(state, identity_evidence)
 
         gate_decisions: list[dict[str, Any]] = []
         gate_decisions.append(
@@ -5148,6 +6538,9 @@ class RuntimeController:
             )
         context["grounding_capsule"] = grounding_capsule
         runtime_inputs = self._runtime_skill_inputs(event, reasoning_state, scenario_cfg, context)
+        action_head_state = RuntimeState(**to_dict(reasoning_state))
+        action_head_context = dict(context)
+        action_head_inputs = self._runtime_skill_inputs(event, action_head_state, scenario_cfg, action_head_context)
         prefetched_outputs = self._execute_parallel_skills(
             round_id=state.round_count,
             tasks=[
@@ -5195,7 +6588,6 @@ class RuntimeController:
             runtime_context=runtime_context,
             parallel_traces=parallel_traces,
         )
-        prefetched_action_heads: dict[str, dict[str, Any]] = {}
         direct_action_contributions: dict[str, ProbabilisticContribution] = {}
         direct_action_signal_metadata: dict[str, dict[str, Any]] = {}
 
@@ -5209,7 +6601,7 @@ class RuntimeController:
                 contribution = self._execute_skill(
                     round_id=state.round_count,
                     skill_name="compute_body_bias",
-                    inputs=runtime_inputs,
+                    inputs=action_head_inputs,
                     provider=lambda event, state, scenario, context: agent.build_direct_action_contribution(event, state, scenario, context),
                     skill_traces=skill_traces,
                     runtime_context=runtime_context,
@@ -5250,7 +6642,7 @@ class RuntimeController:
                 contribution = self._execute_skill(
                     round_id=state.round_count,
                     skill_name="compute_affect_bias",
-                    inputs=runtime_inputs,
+                    inputs=action_head_inputs,
                     provider=lambda event, state, scenario, context: agent.build_direct_action_contribution(event, state, scenario, context),
                     skill_traces=skill_traces,
                     runtime_context=runtime_context,
@@ -5286,7 +6678,7 @@ class RuntimeController:
                 gate_info = self._execute_skill(round_id=state.round_count, skill_name="compute_boundary_gate", inputs=runtime_inputs, provider=self._agent_provider(agent, "compute_boundary_gate"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
                 relation_state["boundary_level"] = gate_info.get("boundary_level", relation_state["boundary_level"])
                 self._execute_skill(round_id=state.round_count, skill_name="update_relation_trace", inputs=runtime_inputs, provider=self._agent_provider(agent, "update_relation_trace"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
-                contribution = agent.build_direct_action_contribution(event, state, scenario_cfg, context)
+                contribution = agent.build_direct_action_contribution(event, action_head_state, scenario_cfg, action_head_context)
                 direct_action_contributions[owner] = contribution
                 direct_action_signal_metadata[owner] = self._action_signal_metadata(
                     owner=owner,
@@ -5305,7 +6697,7 @@ class RuntimeController:
                 contribution = self._execute_skill(
                     round_id=state.round_count,
                     skill_name="map_budget_to_bias",
-                    inputs=runtime_inputs,
+                    inputs=action_head_inputs,
                     provider=lambda event, state, scenario, context: agent.build_direct_action_contribution(event, state, scenario, context),
                     skill_traces=skill_traces,
                     runtime_context=runtime_context,
@@ -5339,22 +6731,10 @@ class RuntimeController:
                 )
                 continue
             if owner == "PFCAgent":
-                if not prefetched_action_heads:
-                    prefetched_action_heads = self._prefetch_action_bias_heads(
-                        round_id=state.round_count,
-                        event=event,
-                        state_snapshot=reasoning_state,
-                        live_state=state,
-                        scenario_cfg=scenario_cfg,
-                        context=context,
-                        skill_traces=skill_traces,
-                        runtime_context=runtime_context,
-                        parallel_traces=parallel_traces,
-                    )
                 contribution = self._execute_skill(
                     round_id=state.round_count,
                     skill_name="generate_candidates",
-                    inputs=runtime_inputs,
+                    inputs=action_head_inputs,
                     provider=lambda event, state, scenario, context: self._invoke_pfc_model_generator(
                         event,
                         state,
@@ -5397,7 +6777,7 @@ class RuntimeController:
                 )
                 if updated_habit is not None:
                     context["habit_strength"] = float(updated_habit.get("strength", context.get("habit_strength", 0.0)))
-                habit_contribution = agent.build_direct_action_contribution(event, state, scenario_cfg, context)
+                habit_contribution = agent.build_direct_action_contribution(event, action_head_state, scenario_cfg, action_head_context)
                 direct_action_contributions[owner] = habit_contribution
                 self._execute_skill(round_id=state.round_count, skill_name="estimate_override_cost", inputs=runtime_inputs, provider=self._agent_provider(agent, "estimate_override_cost"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
                 direct_action_signal_metadata[owner] = self._action_signal_metadata(
@@ -5412,7 +6792,12 @@ class RuntimeController:
                 continue
             if owner == "DesireAgent":
                 self._execute_skill(round_id=state.round_count, skill_name="score_immediate_reward", inputs=runtime_inputs, provider=self._agent_provider(agent, "score_immediate_reward"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
-                desire_contribution = agent.build_direct_action_contribution(event, state, scenario_cfg, context)
+                desire_contribution = agent.build_direct_action_contribution(
+                    event,
+                    action_head_state,
+                    scenario_cfg,
+                    action_head_context,
+                )
                 direct_action_contributions[owner] = desire_contribution
                 self._execute_skill(round_id=state.round_count, skill_name="suggest_low_cost_action", inputs=runtime_inputs, provider=self._agent_provider(agent, "suggest_low_cost_action"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
                 direct_action_signal_metadata[owner] = self._action_signal_metadata(
@@ -5426,7 +6811,12 @@ class RuntimeController:
                 )
                 continue
             if owner == "DMNAgent":
-                dmn_contribution = agent.build_direct_action_contribution(event, state, scenario_cfg, context)
+                dmn_contribution = agent.build_direct_action_contribution(
+                    event,
+                    action_head_state,
+                    scenario_cfg,
+                    action_head_context,
+                )
                 direct_action_contributions[owner] = dmn_contribution
                 self._execute_skill(round_id=state.round_count, skill_name="score_rumination_pull", inputs=runtime_inputs, provider=self._agent_provider(agent, "score_rumination_pull"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
                 self._execute_skill(round_id=state.round_count, skill_name="select_spontaneous_topic", inputs=runtime_inputs, provider=self._agent_provider(agent, "select_spontaneous_topic"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
@@ -5447,7 +6837,7 @@ class RuntimeController:
                 self._execute_skill(round_id=state.round_count, skill_name="compute_memory_interference", inputs=runtime_inputs, provider=self._agent_provider(agent, "compute_memory_interference"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
                 if not recall_set.get("recall_set"):
                     self._execute_skill(round_id=state.round_count, skill_name="fallback_to_gist_when_trace_weak", inputs=runtime_inputs, provider=self._agent_provider(agent, "fallback_to_gist_when_trace_weak"), skill_traces=skill_traces, runtime_context=runtime_context, seed_ref=round_seed)
-                contribution = agent.build_direct_action_contribution(event, state, scenario_cfg, context)
+                contribution = agent.build_direct_action_contribution(event, action_head_state, scenario_cfg, action_head_context)
                 direct_action_contributions[owner] = contribution
                 direct_action_signal_metadata[owner] = self._action_signal_metadata(
                     owner=owner,
@@ -5462,7 +6852,12 @@ class RuntimeController:
             if owner == "PerspectiveModel":
                 if state.resource_state.get("resource_mode") == "starvation":
                     continue
-                perspective_contribution = agent.build_direct_action_contribution(event, state, scenario_cfg, context)
+                perspective_contribution = agent.build_direct_action_contribution(
+                    event,
+                    action_head_state,
+                    scenario_cfg,
+                    action_head_context,
+                )
                 direct_action_contributions[owner] = perspective_contribution
                 direct_action_signal_metadata[owner] = self._action_signal_metadata(
                     owner=owner,
@@ -5509,7 +6904,7 @@ class RuntimeController:
                 contribution = prefetched_outputs.get("salience_contribution") or self._execute_skill(
                     round_id=state.round_count,
                     skill_name="score_salience",
-                    inputs=runtime_inputs,
+                    inputs=action_head_inputs,
                     provider=lambda event, state, scenario, context: agent.build_direct_action_contribution(event, state, scenario, context),
                     skill_traces=skill_traces,
                     runtime_context=runtime_context,
@@ -5546,7 +6941,7 @@ class RuntimeController:
                 contribution = self._execute_skill(
                     round_id=state.round_count,
                     skill_name="compute_trait_bias",
-                    inputs=runtime_inputs,
+                    inputs=action_head_inputs,
                     provider=lambda event, state, scenario, context: agent.build_direct_action_contribution(event, state, scenario, context),
                     skill_traces=skill_traces,
                     runtime_context=runtime_context,
@@ -5584,7 +6979,7 @@ class RuntimeController:
                 contribution = self._execute_skill(
                     round_id=state.round_count,
                     skill_name="micro_adjust_action",
-                    inputs=runtime_inputs,
+                    inputs=action_head_inputs,
                     provider=lambda event, state, scenario, context: agent.build_direct_action_contribution(event, state, scenario, context),
                     skill_traces=skill_traces,
                     runtime_context=runtime_context,
@@ -5640,6 +7035,37 @@ class RuntimeController:
                 projected_delta=self._projected_action_delta_from_contribution(motivation_contribution),
                 utility_shift=self._projected_action_delta_from_contribution(motivation_contribution),
                 trace_tags=["motivation", *[item.motivation_type for item in motivation_pool_state.active_motivations]],
+            )
+        instinct_contribution = self._build_instinct_field_contribution(
+            state=state,
+            context=context,
+            relation_state=relation_state,
+            slow_variables=slow_variables,
+        )
+        if instinct_contribution is not None:
+            direct_action_contributions["InstinctField"] = instinct_contribution
+            direct_action_signal_metadata["InstinctField"] = self._action_signal_metadata(
+                owner="InstinctField",
+                state=state,
+                relation_state=relation_state,
+                context=context,
+                module_type=instinct_contribution.module_type,
+                projected_delta=self._projected_action_delta_from_contribution(instinct_contribution),
+                utility_shift=self._projected_action_delta_from_contribution(instinct_contribution),
+                trace_tags=["instinct", state.instinct_field.winner_region],
+            )
+        emergent_contribution = self._build_emergent_action_contribution(state)
+        if emergent_contribution is not None:
+            direct_action_contributions["EmergentActionSketch"] = emergent_contribution
+            direct_action_signal_metadata["EmergentActionSketch"] = self._action_signal_metadata(
+                owner="EmergentActionSketch",
+                state=state,
+                relation_state=relation_state,
+                context=context,
+                module_type=emergent_contribution.module_type,
+                projected_delta=self._projected_action_delta_from_contribution(emergent_contribution),
+                utility_shift=self._projected_action_delta_from_contribution(emergent_contribution),
+                trace_tags=["emergent", *[sketch.name for sketch in state.emergent_action_sketches[:3]]],
             )
 
         action_signals: list[ActionEvidenceSignal] = []
@@ -5810,19 +7236,6 @@ class RuntimeController:
                 }
             )
 
-        sample_value, action_entropy_ref = self.entropy_pool.uniform(
-            purpose=f"round-{round_seed}-action-sample",
-            node_name="action_sample",
-        )
-        current_action_sample_value = sample_value
-        sampled_action = self._sample_action_from_distribution(
-            dict(action_snapshot.action.winner_posterior or {}),
-            sample_value,
-        )
-        sampled_action = self._collapse_internal_sampled_action(sampled_action)
-        stochastic_state.entropy_ref = action_entropy_ref if not stochastic_state.entropy_ref.source else stochastic_state.entropy_ref
-        stochastic_state.entropy_refs_by_node["action_sample"] = to_dict(action_entropy_ref)
-
         plausibility_guard = self.agent_map["BehaviorPlausibilityGuard"]
         plausibility_by_action: dict[str, dict[str, Any]] = {}
         for action_name, probability in dict(action_snapshot.action.winner_posterior or {}).items():
@@ -5849,8 +7262,9 @@ class RuntimeController:
         if blocked_actions:
             dominant_blocked_action = max(blocked_actions, key=lambda action_name: field_distribution.get(action_name, 0.0))
             dominant_blocked_probability = field_distribution.get(dominant_blocked_action, 0.0)
+        provisional_action_name = str(action_snapshot.action.winner_target or self._top_action_name(field_distribution))
         selected_plausibility = plausibility_by_action.get(
-            sampled_action.name,
+            provisional_action_name,
             {"pass": True, "plausibility_fail_score": 0.0},
         )
         fail_score = max(
@@ -5859,11 +7273,10 @@ class RuntimeController:
         )
         top_probability = max(field_distribution.values()) if field_distribution else 0.0
         preemptive_guard = dominant_blocked_action is not None and dominant_blocked_probability >= max(0.10, top_probability * 0.50)
-        plausibility_resample_idx = 0
         second_sampling = self._execute_skill(
             round_id=state.round_count,
             skill_name="request_second_sampling",
-            inputs={"fail_score": fail_score, "attempts": plausibility_resample_idx},
+            inputs={"fail_score": fail_score, "attempts": 0},
             provider=lambda fail_score, attempts: plausibility_guard.run_skill("request_second_sampling", fail_score, attempts),
             skill_traces=skill_traces,
             runtime_context=runtime_context,
@@ -5880,7 +7293,7 @@ class RuntimeController:
             runtime_context=runtime_context,
             seed_ref=round_seed,
         )
-        plausibility_reason_actions = [dominant_blocked_action] if dominant_blocked_action is not None else [sampled_action.name]
+        plausibility_reason_actions = [dominant_blocked_action] if dominant_blocked_action is not None else [provisional_action_name]
         if second_sampling and (not selected_plausibility.get("pass", True) or preemptive_guard):
             gated_actions = [
                 action_name
@@ -5919,25 +7332,12 @@ class RuntimeController:
                     source_chain=["action_field_after_plausibility"],
                 )
                 action_truth = self._refresh_action_truth(action_snapshot.action, action_truth)
-            control_ledger["resample_idx"] = int(control_ledger.get("resample_idx", 0) or 0) + 1
-            plausibility_resample_idx += 1
-            resample_value, resample_ref = self.entropy_pool.uniform(
-                purpose=f"round-{round_seed}-action-resample",
-                node_name="action_resample",
-            )
-            stochastic_state.entropy_refs_by_node["action_resample"] = to_dict(resample_ref)
-            current_action_sample_value = resample_value
-            sampled_action = self._sample_action_from_distribution(
-                dict(action_snapshot.action.winner_posterior or {}),
-                resample_value,
-            )
-            sampled_action = self._collapse_internal_sampled_action(sampled_action)
         gate_decisions.append(
             {
                 "stage": "plausibility_guard",
                 "owner": "BehaviorPlausibilityGuard",
                 "allowed": not (second_sampling and (not selected_plausibility.get("pass", True) or preemptive_guard)),
-                "requires_resample": second_sampling,
+                "requires_resample": False,
                 "reason": (
                     f"fail_score={fail_score:.2f}; blocked={','.join(sorted(action for action in plausibility_reason_actions if action))}; "
                     f"blocked_p={dominant_blocked_probability:.3f}"
@@ -5945,16 +7345,14 @@ class RuntimeController:
             }
         )
 
-        if sampled_action.name == previous_focus:
-            state.focus_lock_count += 1
-        else:
-            state.focus_lock_count = 1
+        provisional_action_name = str(action_snapshot.action.winner_target or self._top_action_name(dict(action_snapshot.action.winner_posterior or {})))
+        provisional_focus_lock_count = state.focus_lock_count + 1 if provisional_action_name == previous_focus else 1
 
         forced = self.agent_map["ForcedModeSwitch"]
         lock_score = self._execute_skill(
             round_id=state.round_count,
             skill_name="detect_mode_lock",
-            inputs={"history": state.mode_history, "focus_lock_count": state.focus_lock_count},
+            inputs={"history": state.mode_history, "focus_lock_count": provisional_focus_lock_count},
             provider=lambda history, focus_lock_count: forced.run_skill("detect_mode_lock", history, focus_lock_count),
             skill_traces=skill_traces,
             runtime_context=runtime_context,
@@ -5971,22 +7369,21 @@ class RuntimeController:
         )["switch_flag"]
         if force_switch:
             forced_distribution = dict(action_snapshot.action.winner_posterior or {})
-            if sampled_action.name in forced_distribution and sampled_action.name != "respond":
-                shifted_mass = forced_distribution.pop(sampled_action.name, 0.0)
+            if provisional_action_name in forced_distribution and provisional_action_name != "respond":
+                shifted_mass = forced_distribution.pop(provisional_action_name, 0.0)
                 forced_distribution["respond"] = forced_distribution.get("respond", 0.0) + max(shifted_mass, 0.25)
             forced_mode_contribution = self._build_distribution_delta_contribution(
                 module_name="ForcedModeSwitch",
                 module_type="guard",
                 from_distribution=dict(action_snapshot.action.winner_posterior or {}),
                 to_distribution=self._normalize(forced_distribution),
-                hard_mask={sampled_action.name: sampled_action.name != "respond"},
                 trace_reason=f"forced focus switch lock_score={lock_score:.4f}",
                 projection_reason="forced mode switch projected from focus-lock override",
                 applied_at_stage="forced_mode_switch",
                 native_operator="focus_override",
                 dependency_trace=[
                     f"lock_score:{lock_score:.4f}",
-                    f"blocked_action:{sampled_action.name}",
+                    f"blocked_action:{provisional_action_name}",
                 ],
                 confidence=max(0.45, min(1.0, lock_score)),
             )
@@ -5999,54 +7396,58 @@ class RuntimeController:
                     source_chain=["action_field_after_forced_switch"],
                 )
                 action_truth = self._refresh_action_truth(action_snapshot.action, action_truth)
-                sampled_action = self._sample_action_from_distribution(
-                    dict(action_snapshot.action.winner_posterior or {}),
-                    current_action_sample_value,
-                )
-                sampled_action = self._collapse_internal_sampled_action(sampled_action)
-            gate_decisions.append({"stage": "forced_mode_switch", "owner": "ForcedModeSwitch", "allowed": False, "requires_resample": True, "reason": f"lock_score={lock_score:.2f}"})
+            gate_decisions.append({"stage": "forced_mode_switch", "owner": "ForcedModeSwitch", "allowed": False, "requires_resample": False, "reason": f"lock_score={lock_score:.2f}"})
 
         output_gate = self.agent_map["OutputGate"]
-        gate = self._execute_skill(
-            round_id=state.round_count,
-            skill_name="apply_output_gate",
-            inputs={"action": sampled_action.name, "state": state, "scenario": scenario, "relation_state": relation_state},
-            provider=lambda action, state, scenario, relation_state: output_gate.run_skill("apply_output_gate", action, state, scenario, relation_state),
-            skill_traces=skill_traces,
-            runtime_context=runtime_context,
-            seed_ref=round_seed,
-        )["gate"]
         action_truth.setdefault("gate", {})
-        action_truth["gate"][sampled_action.name] = min(
-            float(action_truth["gate"].get(sampled_action.name, 1.0) or 1.0),
-            gate,
-        )
         control_ledger.setdefault("gate", {})
-        control_ledger["gate"][sampled_action.name] = min(
-            float(control_ledger["gate"].get(sampled_action.name, 1.0) or 1.0),
-            gate,
-        )
-        if gate < 1.0:
-            gated_distribution = dict(action_snapshot.action.winner_posterior or {})
-            if gate == 0.0:
-                gated_distribution.pop(sampled_action.name, None)
-            else:
-                gated_distribution[sampled_action.name] = gated_distribution.get(sampled_action.name, 0.0) * gate
+        gate_inputs = {
+            action_name: probability
+            for action_name, probability in dict(action_snapshot.action.winner_posterior or {}).items()
+            if probability > thresholds["p_floor"]
+        }
+        if not gate_inputs and provisional_action_name:
+            gate_inputs[provisional_action_name] = float(field_distribution.get(provisional_action_name, 0.0) or 0.0)
+        gate_values: dict[str, float] = {}
+        for action_name in gate_inputs:
+            gate = float(
+                self._execute_skill(
+                    round_id=state.round_count,
+                    skill_name="apply_output_gate",
+                    inputs={"action": action_name, "state": state, "scenario": scenario, "relation_state": relation_state},
+                    provider=lambda action, state, scenario, relation_state: output_gate.run_skill("apply_output_gate", action, state, scenario, relation_state),
+                    skill_traces=skill_traces,
+                    runtime_context=runtime_context,
+                    seed_ref=round_seed,
+                ).get("gate", 1.0)
+                or 1.0
+            )
+            gate_values[action_name] = gate
+            action_truth["gate"][action_name] = min(float(action_truth["gate"].get(action_name, 1.0) or 1.0), gate)
+            control_ledger["gate"][action_name] = min(float(control_ledger["gate"].get(action_name, 1.0) or 1.0), gate)
+        if any(gate < 1.0 for gate in gate_values.values()):
+            gated_distribution = {
+                action_name: probability * gate_values.get(action_name, 1.0)
+                for action_name, probability in dict(action_snapshot.action.winner_posterior or {}).items()
+            }
             output_gate_contribution = self._build_distribution_delta_contribution(
                 module_name="OutputGate",
                 module_type="guard",
                 from_distribution=dict(action_snapshot.action.winner_posterior or {}),
                 to_distribution=self._normalize(gated_distribution or dict(action_snapshot.action.winner_posterior or {})),
-                hard_mask={sampled_action.name: gate == 0.0},
-                trace_reason=f"output gate applied gate={gate:.4f}",
+                hard_mask={action_name: gate == 0.0 for action_name, gate in gate_values.items()},
+                trace_reason=(
+                    "output gate applied gates="
+                    + ",".join(f"{action}:{round(gate, 4)}" for action, gate in sorted(gate_values.items()))
+                ),
                 projection_reason="output gate projected from final action suppression",
                 applied_at_stage="output_gate",
                 native_operator="final_gate",
                 dependency_trace=[
-                    f"action:{sampled_action.name}",
-                    f"gate:{gate:.4f}",
+                    f"peak:{provisional_action_name}",
+                    *[f"gate:{action}:{round(gate, 4)}" for action, gate in sorted(gate_values.items())],
                 ],
-                confidence=max(0.5, min(1.0, 1.0 - gate + 0.2)),
+                confidence=max(0.5, min(1.0, max((1.0 - gate for gate in gate_values.values()), default=0.0) + 0.2)),
             )
             if output_gate_contribution is not None:
                 action_contributions.append(output_gate_contribution)
@@ -6057,24 +7458,27 @@ class RuntimeController:
                     source_chain=["action_field_after_output_gate"],
                 )
                 action_truth = self._refresh_action_truth(action_snapshot.action, action_truth)
-        if gate == 0.0:
-            regated_value, regate_ref = self.entropy_pool.uniform(
-                purpose=f"round-{round_seed}-action-regate",
-                node_name="action_regate",
-            )
-            stochastic_state.entropy_refs_by_node["action_regate"] = to_dict(regate_ref)
-            current_action_sample_value = regated_value
-            sampled_action = self._sample_action_from_distribution(
-                dict(action_snapshot.action.winner_posterior or {}),
-                regated_value,
-            )
-            sampled_action = self._collapse_internal_sampled_action(sampled_action)
-        gate_decisions.append({"stage": "output_gate", "owner": "OutputGate", "allowed": gate > 0, "requires_resample": gate == 0.0, "reason": f"gate={gate:.2f}"})
+        peak_gate = float(action_truth.get("gate", {}).get(provisional_action_name, 1.0) or 1.0)
+        gate_decisions.append(
+            {
+                "stage": "output_gate",
+                "owner": "OutputGate",
+                "allowed": peak_gate > 0,
+                "requires_resample": False,
+                "reason": f"peak={provisional_action_name}; gate={peak_gate:.2f}",
+            }
+        )
 
+        provisional_action_name = str(action_snapshot.action.winner_target or self._top_action_name(dict(action_snapshot.action.winner_posterior or {})))
+        provisional_action = ActionCandidate(
+            name=provisional_action_name,
+            probability=float((action_snapshot.action.winner_posterior or {}).get(provisional_action_name, 0.0) or 0.0),
+            rationale="field peak before terminal sampling",
+        )
         contributions, proposal_records = self._build_contributions(
             action_signals,
             state,
-            sampled_action.name,
+            provisional_action_name,
             conflict_score,
             fail_score,
             int(control_ledger.get("resample_idx", 0) or 0),
@@ -6085,7 +7489,7 @@ class RuntimeController:
             relation_state=relation_state,
             prior_closeness=prior_closeness,
             scenario=scenario,
-            sampled_action=sampled_action,
+            sampled_action=provisional_action,
             contributions=contributions,
             gate_decisions=gate_decisions,
             shaping_events=shaping_events,
@@ -6099,11 +7503,18 @@ class RuntimeController:
             source_chain=["action_field_after_vitality"],
         )
         action_truth = self._refresh_action_truth(action_snapshot.action, action_truth)
+        sample_value, action_entropy_ref = self.entropy_pool.uniform(
+            purpose=f"round-{round_seed}-action-sample",
+            node_name="action_sample",
+        )
         sampled_action = self._sample_action_from_distribution(
             dict(action_snapshot.action.winner_posterior or {}),
-            current_action_sample_value,
+            sample_value,
         )
         sampled_action = self._collapse_internal_sampled_action(sampled_action)
+        stochastic_state.entropy_ref = action_entropy_ref if not stochastic_state.entropy_ref.source else stochastic_state.entropy_ref
+        stochastic_state.entropy_refs_by_node["action_sample"] = to_dict(action_entropy_ref)
+        state.focus_lock_count = state.focus_lock_count + 1 if sampled_action.name == previous_focus else 1
         locked_action_before_render = sampled_action.name
         locked_probability_before_render = round(float((action_snapshot.action.winner_posterior or {}).get(sampled_action.name, 0.0) or 0.0), 6)
         gate_at_render = round(float(action_truth.get("gate", {}).get(sampled_action.name, 1.0) or 0.0), 6)
@@ -6335,6 +7746,32 @@ class RuntimeController:
         state.last_action = sampled_action.name
         if sampled_action.name in {"respond", "plan", "clarify"}:
             state.budget_remaining = _clip(state.budget_remaining + 0.0016)
+        anchor_alignment = self._current_axis_alignment(
+            anchor=state.personality_anchor,
+            normalized_axes={
+                axis: float(
+                    dict(
+                        state.instinct_field.collapse_trace.get("subject_vector", {})
+                        or state.instinct_field.collapse_trace.get("coupled_axes", {})
+                        or state.instinct_field.collapse_trace.get("normalized_axes", {})
+                        or {}
+                    ).get(axis, 0.5)
+                    or 0.5
+                )
+                for axis in AXES
+            },
+            action=sampled_action.name,
+            match_scores=dict(state.instinct_field.collapse_trace.get("match_scores", {}) or {}),
+        )
+        self._apply_subject_dynamics_after_round(
+            state=state,
+            appraisal=appraisal,
+            slow_variables=slow_variables,
+            relation_state=relation_state,
+            sampled_action=sampled_action.name,
+            anchor_alignment=anchor_alignment,
+            requested_mode=requested_mode,
+        )
         starvation = self.config["resource_rules"]["resource_defaults"]["starvation_threshold"]
         recovered_this_round = dict(control_ledger.get("conflict", {}) or {}).get("repair_transition", {}).get("to_stage") == "recovered"
         if state.budget_remaining <= starvation / 10 and not recovered_this_round:
@@ -6359,8 +7796,12 @@ class RuntimeController:
             authenticity=to_dict(final_auth_payload),
             identity_evolution=identity_evolution,
             shaping_events=shaping_events,
+            personality_anchor=to_dict(state.personality_anchor),
+            top_drivers=to_dict(contributions[:3]),
         )
         long_run_projection["online_prior"] = dict(online_long_run_projection)
+        long_run_projection["anchor_alignment"] = round(float(state.personality_anchor.alignment or 0.0), 4)
+        long_run_projection["anchor_drift"] = round(float(state.personality_anchor.drift or 0.0), 4)
         for row in skill_traces:
             row["session_id"] = state.session_id
             row["recorded_at"] = recorded_at
@@ -6401,7 +7842,6 @@ class RuntimeController:
                 "field_first_tick",
             ],
         )
-        probability_field_snapshot.action.winner_target = sampled_action.name
         self._finalize_action_bookkeeping_from_action_layer(
             action_bookkeeping,
             probability_field_snapshot.action,
@@ -6415,6 +7855,11 @@ class RuntimeController:
             control_ledger=control_ledger,
             action_truth=action_truth,
             stochastic_state=stochastic_state,
+        )
+        self._update_emergent_action_sketches(
+            state=state,
+            action_posterior=dict(probability_field_snapshot.action.winner_posterior or {}),
+            sampled_action=sampled_action.name,
         )
 
         trace = RoundTrace(
@@ -6502,24 +7947,75 @@ class RuntimeController:
         )
         state.motivation_learning_state = updated_learning_state
         state.motivation_pool_state.last_feedback_update_at = recorded_at
+        latest_trigger = None
+        trigger_context = None
+        micro_intent = None
+        replay_chain = None
+        if endogenous_turn and self._pending_endogenous_trigger is not None:
+            latest_trigger = EndogenousTickTrigger(**to_dict(self._pending_endogenous_trigger))
+            trigger_context = (
+                EndogenousTriggerContext(**to_dict(self._pending_endogenous_trigger_context))
+                if self._pending_endogenous_trigger_context is not None
+                else EndogenousTriggerContext(scenario=scenario)
+            )
+            state.endogenous_scheduler_state = self.endogenous_scheduler.update_state(
+                scheduler_state=state.endogenous_scheduler_state,
+                trigger=latest_trigger,
+                recorded_at=recorded_at,
+            )
+            micro_intent = self._build_endogenous_micro_intent(
+                state=state,
+                trigger=latest_trigger,
+                pool_state=motivation_pool_state,
+            )
+            state.endogenous_state = EndogenousRuntimeState(
+                current_intent=micro_intent,
+                stability=micro_intent.stability,
+                history=(*state.endogenous_state.history, micro_intent)[-20:],
+                last_trigger=latest_trigger.trigger_type,
+                last_suppression=state.endogenous_state.last_suppression,
+            )
+            replay_chain = EndogenousReplayChain(
+                trigger=latest_trigger,
+                trigger_context=trigger_context,
+                motivation_pool=self.endogenous_motivation_pool.trace_payload(motivation_pool_state),
+                motivation_feedback=motivation_feedback_payload,
+                micro_intent=micro_intent,
+                policy_shift=updated_learning_state.endogenous_policy_shift,
+            )
         trace.motivation_pool = self.endogenous_motivation_pool.trace_payload(motivation_pool_state)
         trace.motivation_feedback = motivation_feedback_payload
-        latest_trigger = (
-            state.endogenous_scheduler_state.recent_triggers[-1]
-            if state.endogenous_scheduler_state.recent_triggers
-            else None
-        )
+        if latest_trigger is None:
+            latest_trigger = (
+                state.endogenous_scheduler_state.recent_triggers[-1]
+                if state.endogenous_scheduler_state.recent_triggers
+                else None
+            )
         trace.endogenous_tick_reason = self.endogenous_scheduler.trace_payload(
             state.endogenous_scheduler_state,
             latest_trigger,
         )
         trace.endogenous_policy_shift = dict(updated_learning_state.endogenous_policy_shift)
+        trace.endogenous_trigger_context = trigger_context
+        trace.endogenous_suppression = state.endogenous_state.last_suppression
+        trace.micro_intent = micro_intent
+        trace.endogenous_replay_chain = replay_chain
+        trace.state_snapshot = self._trace_state_snapshot_payload(
+            state,
+            endogenous_turn=endogenous_turn,
+        )
 
         health = HealthEvent(event="tick", status="ok", detail=f"budget={state.budget_remaining:.2f}")
         state.entropy_health_state = self.entropy_pool.health_snapshot()
         state.last_entropy_failure = {}
-        self._save_state(state)
-        self.trace_store.write_round(trace)
+        sync_tick_writeback = self._should_sync_tick_writeback(
+            round_id=state.round_count,
+            scenario=scenario,
+            mode=state.mode,
+            endogenous_turn=endogenous_turn,
+        )
+        self._save_state(state, sync=sync_tick_writeback)
+        self.trace_store.write_round(trace, sync=sync_tick_writeback)
         if dict(control_ledger.get("conflict", {}) or {}).get("post_error_adjustment", {}).get("triggered") and state.repair_ledger:
             latest_repair_entry = state.repair_ledger[-1]
             if latest_repair_entry.round_id == state.round_count:
@@ -6527,8 +8023,14 @@ class RuntimeController:
                     to_dict(latest_repair_entry),
                     session_id=state.session_id,
                     recorded_at=recorded_at,
+                    sync=sync_tick_writeback,
                 )
-        self._maybe_flush_cold_path(raise_on_error=True)
+        self._maybe_flush_cold_path(
+            scenario=scenario,
+            mode=state.mode,
+            endogenous_turn=endogenous_turn,
+            raise_on_error=True,
+        )
 
         return RoundResult(
             round_id=state.round_count,
@@ -6541,46 +8043,122 @@ class RuntimeController:
 
     def tick(self, event: RoundEvent, scenario: str, mode: str) -> RoundResult:
         try:
-            return self._tick_impl(event, scenario, mode)
+            result = self._tick_impl(event, scenario, mode)
         except QuantumEntropyUnavailableError as exc:
             state = self.load_runtime_state()
             self._record_entropy_failure(state, exc)
             raise
+        if event.source != "endogenous":
+            self._maybe_schedule_endogenous_followup(result=result, event=event, scenario=scenario)
+        return result
 
-    def run_endogenous_tick(self, *, trigger: str = "idle", mode: str | None = None) -> dict[str, Any]:
+    def _maybe_schedule_endogenous_followup(self, *, result: RoundResult, event: RoundEvent, scenario: str) -> None:
+        current_suppression = to_dict(result.state.endogenous_state.last_suppression) if result.state.endogenous_state.last_suppression else {}
+        current_scheduler_reason = str(result.state.endogenous_scheduler_state.suppression_reason or "")
+
+        def _persist_suppression_if_changed(suppression: EndogenousSuppressionDecision) -> None:
+            next_scheduler_state = self.endogenous_scheduler.update_state(
+                scheduler_state=result.state.endogenous_scheduler_state,
+                trigger=None,
+                suppression_reason=suppression.reason,
+            )
+            result.state.endogenous_scheduler_state = next_scheduler_state
+            result.state.endogenous_state.last_suppression = suppression
+            if (
+                current_suppression == to_dict(suppression)
+                and current_scheduler_reason == str(suppression.reason or "")
+            ):
+                return
+            self._save_state(result.state, sync=False)
+
+        if event.source != "user" or str(result.state.mode or "") != "interactive":
+            suppression = EndogenousSuppressionDecision(
+                suppressed=True,
+                reason="non_user_or_non_interactive_turn",
+                details={"event_source": event.source, "mode": str(result.state.mode or "")},
+            )
+            _persist_suppression_if_changed(suppression)
+            return
+        if scenario == "task":
+            _persist_suppression_if_changed(
+                EndogenousSuppressionDecision(suppressed=True, reason="task_scenario")
+            )
+            return
+        if scenario != "companion":
+            _persist_suppression_if_changed(
+                EndogenousSuppressionDecision(suppressed=True, reason="non_companion_scenario")
+            )
+            return
+        trigger_context = self._build_endogenous_trigger_context(
+            state=result.state,
+            scenario=scenario,
+            event=event,
+            trace_payload=to_dict(result.trace),
+        )
+        trigger = self.endogenous_scheduler.build_trigger(
+            state=result.state,
+            context=trigger_context.context,
+            relation_state=trigger_context.relation_state,
+            slow_variables=trigger_context.slow_variables,
+            pool_state=result.state.motivation_pool_state,
+        )
+        suppression = self._endogenous_suppression_decision(
+            state=result.state,
+            scenario=scenario,
+            trigger=trigger,
+        )
+        if suppression.suppressed:
+            _persist_suppression_if_changed(suppression)
+        else:
+            result.state.endogenous_scheduler_state = self.endogenous_scheduler.update_state(
+                scheduler_state=result.state.endogenous_scheduler_state,
+                trigger=None,
+                suppression_reason=suppression.reason or None,
+            )
+            result.state.endogenous_state.last_suppression = None
+            self._save_state(result.state, sync=False)
+        if suppression.suppressed or trigger is None:
+            return
+        self.run_endogenous_tick(
+            trigger=trigger.trigger_type,
+            mode=trigger.selected_mode or None,
+            scenario=scenario,
+            trigger_context=trigger_context,
+            trigger_payload=trigger,
+        )
+
+    def run_endogenous_tick(
+        self,
+        *,
+        trigger: str = "idle",
+        mode: str | None = None,
+        scenario: str | None = None,
+        trigger_context: EndogenousTriggerContext | None = None,
+        trigger_payload: EndogenousTickTrigger | None = None,
+        respect_suppression: bool = False,
+    ) -> dict[str, Any]:
         state = self.load_runtime_state()
         self._ensure_subject_core(state)
         rounds = self.trace_store.list_rounds()
         latest_round = rounds[-1] if rounds else {}
-        latest_vitality = dict(latest_round.get("vitality_snapshot", {}) or {})
-        latest_context = {
-            "cue": latest_vitality.get("cue"),
-            "recall_strength": float(latest_vitality.get("memory_activation", 0.0) or 0.0),
-            "closeness": self.memory_store.closeness("self"),
-            "interference": float(latest_vitality.get("memory_interference", 0.0) or 0.0),
-        }
-        relation_state = {
-            "relationship_risk": float(latest_vitality.get("relationship_drift", 0.0) or 0.0),
-            "closeness": float(latest_context["closeness"]),
-        }
-        slow_variables = {
-            "affect_residue": float(state.affect_residue),
-            "memory_activation": float(latest_vitality.get("memory_activation", 0.0) or 0.0),
-            "relationship_drift": float(latest_vitality.get("relationship_drift", 0.0) or 0.0),
-            "resource_scarcity": float(latest_vitality.get("resource_scarcity", 0.0) or 0.0),
-        }
-        scheduler_trigger = self.endogenous_scheduler.build_trigger(
+        effective_scenario = scenario or str(latest_round.get("scenario") or "companion")
+        effective_context = trigger_context or self._build_endogenous_trigger_context(
             state=state,
-            context=latest_context,
-            relation_state=relation_state,
-            slow_variables=slow_variables,
+            scenario=effective_scenario,
+            trace_payload=latest_round,
+        )
+        scheduler_trigger = trigger_payload or self.endogenous_scheduler.build_trigger(
+            state=state,
+            context=effective_context.context,
+            relation_state=effective_context.relation_state,
+            slow_variables=effective_context.slow_variables,
             pool_state=state.motivation_pool_state,
         )
         if scheduler_trigger is None:
             scheduler_trigger = EndogenousTickTrigger(
                 trigger_type=trigger,
                 trigger_score=round(float(state.motivation_pool_state.endogenous_activation_score or 0.0), 6),
-                source_metrics={key: round(float(value), 6) for key, value in slow_variables.items()},
+                source_metrics={key: round(float(value), 6) for key, value in effective_context.slow_variables.items()},
                 selected_mode=mode or "endogenous_light",
                 audit_reason=f"manual endogenous trigger fallback: {trigger}",
             )
@@ -6589,49 +8167,49 @@ class RuntimeController:
             scheduler_trigger.audit_reason = f"manual trigger override: {trigger}"
         if mode is not None:
             scheduler_trigger.selected_mode = mode
-        scheduler_state = self.endogenous_scheduler.update_state(
-            scheduler_state=state.endogenous_scheduler_state,
-            trigger=scheduler_trigger,
-        )
-        state.endogenous_scheduler_state = scheduler_state
-        state.endogenous_state["last_trigger"] = scheduler_trigger.trigger_type
-        self._save_state(state)
-
-        result = self.tick(
-            RoundEvent(
-                source="endogenous",
-                content=f"endogenous trigger {scheduler_trigger.trigger_type}",
-                target="self",
-                cue=f"endogenous:{scheduler_trigger.trigger_type}",
-                cue_quality=0.45,
-            ),
-            scenario="companion",
-            mode=scheduler_trigger.selected_mode or mode or "endogenous_light",
-        )
-        pool_state = result.state.motivation_pool_state
-        first_motivation = pool_state.active_motivations[0].motivation_type if pool_state.active_motivations else "latent"
-        previous_intent = result.state.endogenous_state.get("current_intent")
-        stability = int(result.state.endogenous_state.get("stability", 0) or 0)
-        if isinstance(previous_intent, dict) and previous_intent.get("name") == first_motivation:
-            stability += 1
-        else:
-            stability = 1
-        micro_intent = {
-            "name": first_motivation,
-            "trigger": scheduler_trigger.trigger_type,
-            "bias": pool_state.active_motivations[0].target_actions if pool_state.active_motivations else {},
-            "evidence": scheduler_trigger.source_metrics,
-            "stability": stability,
-        }
-        result.state.endogenous_state["current_intent"] = micro_intent
-        result.state.endogenous_state["stability"] = stability
-        result.state.endogenous_state["history"] = (list(result.state.endogenous_state.get("history", [])) + [micro_intent])[-20:]
-        result.state.endogenous_scheduler_state = self.endogenous_scheduler.update_state(
-            scheduler_state=result.state.endogenous_scheduler_state,
-            trigger=scheduler_trigger,
-            recorded_at=result.trace.recorded_at,
-        )
-        self._save_state(result.state)
+        if respect_suppression:
+            suppression = self._endogenous_suppression_decision(
+                state=state,
+                scenario=effective_scenario,
+                trigger=scheduler_trigger,
+            )
+            if suppression.suppressed:
+                state.endogenous_scheduler_state = self.endogenous_scheduler.update_state(
+                    scheduler_state=state.endogenous_scheduler_state,
+                    trigger=None,
+                    suppression_reason=suppression.reason or None,
+                )
+                state.endogenous_state.last_suppression = suppression
+                self._save_state(state, sync=True)
+                return {
+                    "round_id": None,
+                    "micro_intent": {},
+                    "cause_type": "suppressed",
+                    "boundary_action": "allow_internal",
+                    "trigger": to_dict(scheduler_trigger),
+                    "selected_mode": scheduler_trigger.selected_mode,
+                    "suppressed": True,
+                    "suppression_reason": suppression.reason,
+                    "trace_ref": None,
+                }
+        self._pending_endogenous_trigger = scheduler_trigger
+        self._pending_endogenous_trigger_context = effective_context
+        try:
+            result = self.tick(
+                RoundEvent(
+                    source="endogenous",
+                    content=f"endogenous trigger {scheduler_trigger.trigger_type}",
+                    target="self",
+                    cue=f"endogenous:{scheduler_trigger.trigger_type}",
+                    cue_quality=0.45,
+                ),
+                scenario=effective_scenario,
+                mode=scheduler_trigger.selected_mode or mode or "endogenous_light",
+            )
+        finally:
+            self._pending_endogenous_trigger = None
+            self._pending_endogenous_trigger_context = None
+        micro_intent = to_dict(result.trace.micro_intent) if result.trace.micro_intent else {}
         return {
             "round_id": result.round_id,
             "micro_intent": micro_intent,
@@ -6639,6 +8217,9 @@ class RuntimeController:
             "boundary_action": result.trace.boundary_action,
             "trigger": to_dict(scheduler_trigger),
             "selected_mode": scheduler_trigger.selected_mode,
+            "suppressed": False,
+            "suppression_reason": "",
+            "trace_ref": f"round://{result.round_id}",
         }
 
     def execute_command(self, envelope: CommandEnvelope) -> CommandResult:
@@ -6913,9 +8494,89 @@ class RuntimeController:
         payload["display_name"] = payload.get("display_name") or self._unnamed_label()
         return payload
 
+    def observer_settings_payload(self) -> dict[str, Any]:
+        settings = self._observer_settings()
+        return {
+            "identity": self.identity_payload(),
+            "autonomy": settings.get("autonomy", {}),
+            "newborn": settings.get("newborn", {}),
+            "models": {
+                "supported_backends": list(settings.get("models", {}).get("supported_backends", [])),
+                "provider_endpoints": dict(settings.get("models", {}).get("provider_endpoints", {})),
+                "model_tiers": self._model_tiers(),
+                "model_routes": dict(self.config["models"].get("model_routes", {})),
+                "agent_model_bindings": self._agent_model_bindings(),
+            },
+        }
+
+    def _apply_startup_unlock_preferences(self, state: RuntimeState) -> None:
+        settings = self._observer_settings()
+        autonomy_settings = settings.get("autonomy", {}) if isinstance(settings.get("autonomy"), dict) else {}
+        newborn_settings = settings.get("newborn", {}) if isinstance(settings.get("newborn"), dict) else {}
+        if bool(autonomy_settings.get("clear_safe_mode_on_start", True)) or bool(newborn_settings.get("disable_safe_mode_lock", True)):
+            state.safe_mode = False
+            if state.mode == "safe":
+                state.mode = "interactive"
+            state.conflict_safe_mode_owner = None
+            startup_budget_floor = 0.22
+            startup_body_energy_floor = 0.32
+            if float(state.budget_remaining or 0.0) < startup_budget_floor:
+                state.budget_remaining = startup_budget_floor
+            if float(state.body_energy or 0.0) < startup_body_energy_floor:
+                state.body_energy = startup_body_energy_floor
+            if str(state.resource_state.get("resource_mode", "")).strip() in {"starvation", "scarce"}:
+                state.resource_state = {
+                    **state.resource_state,
+                    "resource_mode": "stable",
+                    "scarcity_index": min(float(state.resource_state.get("scarcity_index", 0.0) or 0.0), 0.49),
+                }
+            state.session_metadata["startup_unlock_applied_at"] = utc_now_iso()
+            state.session_metadata["startup_unlock_budget_floor"] = startup_budget_floor
+
+        organic = newborn_settings.get("organic_mode", {}) if isinstance(newborn_settings.get("organic_mode"), dict) else {}
+        state.organic_mode.enabled = bool(organic.get("enabled", state.organic_mode.enabled))
+        state.organic_mode.instinct_first = bool(organic.get("instinct_first", state.organic_mode.instinct_first))
+        for key in ("body_weight", "subjective_weight", "guard_relaxation", "endogenous_autonomy"):
+            current = float(getattr(state.organic_mode, key, 0.0) or 0.0)
+            setattr(state.organic_mode, key, round(max(current, _clip(float(organic.get(key, current) or current))), 4))
+
+        subjective = newborn_settings.get("subjective_state", {}) if isinstance(newborn_settings.get("subjective_state"), dict) else {}
+        state.subjective_state.spontaneous = round(
+            max(float(state.subjective_state.spontaneous or 0.0), _clip(float(subjective.get("spontaneous", 0.0) or 0.0))),
+            4,
+        )
+        state.subjective_state.boundary = round(
+            max(float(state.subjective_state.boundary or 0.0), _clip(float(subjective.get("boundary", 0.0) or 0.0))),
+            4,
+        )
+        state.subjective_state.reject_all = round(
+            min(float(state.subjective_state.reject_all or 0.0), _clip(float(subjective.get("reject_all", 0.0) or 0.0))),
+            4,
+        )
+        if not state.subjective_state.felt:
+            state.subjective_state.felt = self._normalize_observer_string_list(list(subjective.get("felt", [])))
+        if not state.subjective_state.meaning_made:
+            state.subjective_state.meaning_made = self._normalize_observer_string_list(list(subjective.get("meaning_made", [])))
+
+    def update_observer_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
+        normalized = self._normalize_observer_settings(payload, base=self._observer_settings())
+        self.observer_settings_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.config = self._load_config()
+        self.model_router = ModelRouter.from_config(self.config["models"])
+        model_gateway_cfg = self.config["models"].get("models")
+        self.model_gateway = ModelGateway.from_config(model_gateway_cfg) if isinstance(model_gateway_cfg, dict) else None
+        self.identity_runtime = IdentityRuntime(self._identity_cfg(), self._provider_descriptor)
+        self.authenticity_policy = AuthenticityPolicy(self._identity_cfg())
+        state = self.load_runtime_state()
+        self._apply_startup_unlock_preferences(state)
+        self._save_state(state, sync=True)
+        return self.observer_settings_payload()
+
     def state_payload(self) -> dict[str, Any]:
         self.flush_pending_io(raise_on_error=False)
         state = self.load_runtime_state()
+        self._sync_tlh_state(state)
+        self._sync_autonomy_state(state)
         payload = to_dict(state)
         payload["subjectivity"] = self._subjectivity_metrics()
         payload["trace_storage"] = self._trace_storage_payload()
@@ -6926,6 +8587,653 @@ class RuntimeController:
         payload["dream"] = self.dream_status()
         payload["cognitive_snapshot"] = self.cognitive_snapshot(state=state)
         return payload
+
+    def autonomy_status(self) -> dict[str, Any]:
+        state = self.load_runtime_state()
+        self._sync_autonomy_state(state)
+        self._ensure_autonomy_window(state)
+        policy = state.autonomy_policy
+        loop = state.autonomy_loop
+        return {
+            "enabled": bool(policy.enabled),
+            "running": bool(loop.running and policy.enabled),
+            "profile": loop.profile or policy.profile,
+            "last_step_at": loop.last_step_at,
+            "last_action_type": loop.last_action_type,
+            "last_action_summary": loop.last_action_summary,
+            "failure_count": int(loop.failure_count or 0),
+            "stop_reason": loop.stop_reason,
+            "last_error": loop.last_error,
+            "budget_usage": self._autonomy_budget_usage(state),
+            "kill_switch_available": True,
+            "allowed_commands": list(policy.allowed_commands),
+            "blocked_commands": list(policy.blocked_commands),
+            "recent_actions": list(loop.recent_actions),
+        }
+
+    def start_autonomy(self, profile: str = "tool_level", *, clear_safe_mode: bool = False) -> dict[str, Any]:
+        state = self.load_runtime_state()
+        clear_requested = clear_safe_mode or bool(self._observer_settings().get("autonomy", {}).get("clear_safe_mode_on_start", True))
+        if clear_requested:
+            self._apply_startup_unlock_preferences(state)
+        state.autonomy_policy = self._autonomy_policy_for_profile(profile)
+        state.autonomy_policy.enabled = True
+        state.autonomy_loop.running = True
+        state.autonomy_loop.profile = state.autonomy_policy.profile
+        state.autonomy_loop.failure_count = 0
+        state.autonomy_loop.stop_reason = ""
+        state.autonomy_loop.last_error = ""
+        state.autonomy_loop.window_started_at = datetime.now(timezone.utc).isoformat()
+        state.autonomy_loop.window_tool_actions = 0
+        state.autonomy_loop.window_endogenous_rounds = 0
+        self._append_autonomy_recent_action(
+            state,
+            action_type="start",
+            summary=f"autonomy started in {state.autonomy_policy.profile}{' after leaving safe mode' if clear_requested else ''}",
+        )
+        self._save_state(state, sync=True)
+        return self.autonomy_status()
+
+    def stop_autonomy(self, reason: str = "manual_stop") -> dict[str, Any]:
+        state = self.load_runtime_state()
+        self._sync_autonomy_state(state)
+        state.autonomy_policy.enabled = False
+        state.autonomy_loop.running = False
+        state.autonomy_loop.stop_reason = str(reason or "manual_stop")
+        self._append_autonomy_recent_action(
+            state,
+            action_type="stop",
+            summary=f"autonomy stopped: {state.autonomy_loop.stop_reason}",
+        )
+        self._save_state(state, sync=True)
+        return self.autonomy_status()
+
+    def autonomy_step(self) -> dict[str, Any]:
+        state = self.load_runtime_state()
+        self._sync_tlh_state(state)
+        self._sync_autonomy_state(state)
+        self._ensure_autonomy_window(state)
+        policy = state.autonomy_policy
+        loop = state.autonomy_loop
+
+        if not policy.enabled or not loop.running:
+            return self.autonomy_status()
+        if state.safe_mode:
+            state.autonomy_policy.enabled = False
+            state.autonomy_loop.running = False
+            state.autonomy_loop.stop_reason = "safe_mode_active"
+            self._append_autonomy_recent_action(state, action_type="stop", summary="autonomy stopped by safe mode")
+            self._save_state(state, sync=True)
+            return self.autonomy_status()
+        if float(state.budget_remaining or 0.0) <= 0.0:
+            state.autonomy_policy.enabled = False
+            state.autonomy_loop.running = False
+            state.autonomy_loop.stop_reason = "budget_exhausted"
+            self._append_autonomy_recent_action(state, action_type="stop", summary="autonomy stopped by exhausted budget")
+            self._save_state(state, sync=True)
+            return self.autonomy_status()
+        if loop.window_endogenous_rounds >= policy.max_rounds_per_hour:
+            state.autonomy_policy.enabled = False
+            state.autonomy_loop.running = False
+            state.autonomy_loop.stop_reason = "round_budget_reached"
+            self._append_autonomy_recent_action(state, action_type="stop", summary="autonomy stopped by round budget")
+            self._save_state(state, sync=True)
+            return self.autonomy_status()
+        if loop.window_tool_actions >= policy.max_tool_actions_per_hour:
+            state.autonomy_policy.enabled = False
+            state.autonomy_loop.running = False
+            state.autonomy_loop.stop_reason = "tool_budget_reached"
+            self._append_autonomy_recent_action(state, action_type="stop", summary="autonomy stopped by tool budget")
+            self._save_state(state, sync=True)
+            return self.autonomy_status()
+        current_hour = time.localtime().tm_hour
+        if current_hour in policy.quiet_hours:
+            state.autonomy_loop.heartbeat_count += 1
+            self._append_autonomy_recent_action(state, action_type="quiet", summary="quiet-hours heartbeat")
+            self._save_state(state, sync=True)
+            return self.autonomy_status()
+
+        context, relation_state, slow_variables = self._autonomy_step_context(state)
+        trigger = self.endogenous_scheduler.build_trigger(
+            state=state,
+            context=context,
+            relation_state=relation_state,
+            slow_variables=slow_variables,
+            pool_state=state.motivation_pool_state,
+        )
+
+        try:
+            if trigger is not None and self._autonomy_command_allowed("endogenous tick", policy)[0]:
+                tick_payload = self.run_endogenous_tick(
+                    trigger=trigger.trigger_type or "idle",
+                    mode=trigger.selected_mode or None,
+                )
+                state = self.load_runtime_state()
+                self._sync_autonomy_state(state)
+                self._ensure_autonomy_window(state)
+                state.autonomy_loop.heartbeat_count += 1
+                state.autonomy_loop.total_endogenous_rounds += 1
+                state.autonomy_loop.window_endogenous_rounds += 1
+                round_id = tick_payload.get("round_id")
+                trace_ref = f"round://{round_id}" if round_id is not None else None
+                self._append_autonomy_recent_action(
+                    state,
+                    action_type="endogenous_tick",
+                    summary=str(trigger.audit_reason or trigger.trigger_type or "endogenous tick"),
+                    round_id=round_id,
+                    trace_ref=trace_ref,
+                )
+                self._save_state(state, sync=True)
+                return self.autonomy_status()
+
+            if state.mode in {"idle", "sleep"} and self._autonomy_command_allowed("dream run", policy)[0]:
+                dream_status = self.dream_status()
+                if dream_status.get("enabled"):
+                    dream_payload = self.run_dream(mode=state.mode)
+                    state = self.load_runtime_state()
+                    self._sync_autonomy_state(state)
+                    self._ensure_autonomy_window(state)
+                    state.autonomy_loop.heartbeat_count += 1
+                    state.autonomy_loop.total_tool_actions += 1
+                    state.autonomy_loop.window_tool_actions += 1
+                    self._append_autonomy_recent_action(
+                        state,
+                        action_type="dream_pass",
+                        summary=f"dream pass in {state.mode}",
+                        trace_ref=str(dream_payload.get("trace_ref") or ""),
+                    )
+                    self._save_state(state, sync=True)
+                    return self.autonomy_status()
+
+            action = self._autonomy_candidate_action(state)
+            state.autonomy_loop.heartbeat_count += 1
+            if action == "die":
+                if policy.auto_safe_mode:
+                    state.safe_mode = True
+                    state.mode = "safe"
+                state.autonomy_policy.enabled = False
+                state.autonomy_loop.running = False
+                state.autonomy_loop.stop_reason = "terminal_intent_boundary"
+                self._append_autonomy_recent_action(
+                    state,
+                    action_type="terminal_intent",
+                    summary="die mapped to bounded terminal intent",
+                )
+                self._autonomy_trace_append(
+                    state,
+                    action_type="terminal_intent",
+                    summary="die mapped to bounded terminal intent",
+                    delta={"terminal_intent": True},
+                )
+                self._save_state(state, sync=True)
+                return self.autonomy_status()
+
+            if action == "rest":
+                return self._autonomy_after_command_step(self._autonomy_execute_command("body rest"))
+
+            if action == "absorb":
+                payload = self.memory_top(limit=3)
+                state.autonomy_loop.total_tool_actions += 1
+                state.autonomy_loop.window_tool_actions += 1
+                self._append_autonomy_recent_action(
+                    state,
+                    action_type="absorb",
+                    summary=f"absorbed {len(payload)} memory cues",
+                )
+                self._autonomy_trace_append(
+                    state,
+                    action_type="absorb",
+                    summary="memory top",
+                    delta={"memory_count": len(payload)},
+                )
+                self._save_state(state, sync=True)
+                return self.autonomy_status()
+
+            if action == "wander" and state.round_count > 0:
+                replay_payload = self.replay(int(state.round_count), seed=max(1, int(state.round_count)))
+                state.autonomy_loop.total_tool_actions += 1
+                state.autonomy_loop.window_tool_actions += 1
+                self._append_autonomy_recent_action(
+                    state,
+                    action_type="wander",
+                    summary=f"replayed round {state.round_count}",
+                    round_id=int(state.round_count),
+                    trace_ref=f"round://{int(state.round_count)}",
+                )
+                self._autonomy_trace_append(
+                    state,
+                    action_type="wander",
+                    summary="replay latest round",
+                    delta={"replayed_action": replay_payload.get("replayed_action")},
+                )
+                self._save_state(state, sync=True)
+                return self.autonomy_status()
+
+            self._append_autonomy_recent_action(state, action_type="nothing", summary="no outward autonomy action this heartbeat")
+            self._autonomy_trace_append(
+                state,
+                action_type="nothing",
+                summary="no outward autonomy action",
+                delta={"would_output": False},
+            )
+            self._save_state(state, sync=True)
+            return self.autonomy_status()
+        except Exception as exc:
+            state = self.load_runtime_state()
+            self._autonomy_record_failure(state, exc)
+            self._append_autonomy_recent_action(state, action_type="failure", summary=str(exc))
+            self._save_state(state, sync=True)
+            return self.autonomy_status()
+
+    def _autonomy_after_command_step(self, result: dict[str, Any]) -> dict[str, Any]:
+        state = self.load_runtime_state()
+        self._sync_autonomy_state(state)
+        if not result.get("allowed", False):
+            self._save_state(state, sync=True)
+        return self.autonomy_status()
+
+    def _console_round_or_none(self) -> int | None:
+        round_count = int(self.load_runtime_state().round_count or 0)
+        return round_count if round_count > 0 else None
+
+    def console_state(self) -> dict[str, Any]:
+        payload = self.state_payload()
+        cognitive = dict(payload.get("cognitive_snapshot", {}) or {})
+        vital_signs = dict(cognitive.get("vital_signs", {}) or {})
+        identity = dict(cognitive.get("identity", {}) or {})
+        authenticity = dict(cognitive.get("authenticity", {}) or {})
+        round_id = self._console_round_or_none()
+        current_round = None
+        latest_trace = None
+        if round_id is not None:
+            latest_trace = self.trace_round(round_id)
+            rendered_expression = dict(latest_trace.get("rendered_expression", {}) or {})
+            current_round = {
+                "round_id": latest_trace["round_id"],
+                "sampled_action": latest_trace.get("sampled_action"),
+                "trace_ref": latest_trace.get("trace_ref"),
+                "cause_type": latest_trace.get("cause_type"),
+                "render_route": rendered_expression.get("route"),
+                "render_model": rendered_expression.get("model"),
+                "render_degraded": bool(rendered_expression.get("degraded", False)),
+                "failure_policy_applied": rendered_expression.get("failure_policy_applied"),
+                "model_call_count": len(list(latest_trace.get("model_call_traces", []) or [])),
+            }
+        try:
+            run = self.run_status()
+        except FileNotFoundError:
+            if current_round is not None:
+                run = {
+                    "status": "responded",
+                    "round_id": current_round["round_id"],
+                    "trace_ref": current_round.get("trace_ref"),
+                }
+            else:
+                run = {"status": "idle", "round_id": None, "trace_ref": None}
+        return {
+            "brain_state": {
+                "mode": vital_signs.get("mode") or payload.get("mode"),
+                "vitality": vital_signs.get("body_energy"),
+                "self_continuity": identity.get("continuity"),
+                "authenticity_pressure": authenticity.get("summary"),
+                "long_run_drift_risk": None,
+            },
+            "neuromodulators": {
+                "dopamine": None,
+                "noradrenaline": None,
+                "serotonin": None,
+                "acetylcholine": None,
+                "gaba": None,
+            },
+            "motivation_pool": dict(latest_trace.get("motivation_pool", {}) or {}) if isinstance(latest_trace, dict) else {},
+            "long_run": {
+                "dream": payload.get("dream", {}),
+                "trace_storage": payload.get("trace_storage", {}),
+            },
+            "current_round": current_round,
+            "session": {
+                "session_id": payload.get("session_id"),
+                "mode": payload.get("mode"),
+                "safe_mode": payload.get("safe_mode"),
+            },
+            "run": run,
+            "cognitive_snapshot": cognitive,
+        }
+
+    def console_action_field(self, round_ref: int | str | None = None) -> dict[str, Any]:
+        effective_round = self.resolve_round_ref(round_ref)
+        why_payload = self.why_this(effective_round)
+        probability_payload = self.trace_probability_field(effective_round)
+        contribution_payload = self.contribution_breakdown(effective_round)
+        explanation = dict(why_payload.get("action_probability_explanation", {}) or {})
+        winner_target = explanation.get("winner_target") or why_payload.get("sampled_action")
+        winner_posterior = dict(explanation.get("winner_posterior", {}) or {})
+        competing_peaks = list(explanation.get("competing_peaks", []) or [])
+        top_actions = [
+            {
+                "action": str(action),
+                "score": float(score),
+            }
+            for action, score in sorted(winner_posterior.items(), key=lambda item: item[1], reverse=True)[:5]
+        ]
+        if not top_actions and winner_target:
+            top_actions.append({"action": str(winner_target), "score": 0.0})
+        return {
+            "round_id": why_payload["round_id"],
+            "trace_ref": f"round://{why_payload['round_id']}",
+            "top_actions": top_actions,
+            "winner": {
+                "action": winner_target,
+                "score": winner_posterior.get(winner_target, 0.0) if winner_target else 0.0,
+            },
+            "winner_posterior": winner_posterior,
+            "conflict": why_payload.get("conflict_arbitration", {}),
+            "token_field": probability_payload.get("token_state", {}),
+            "contribution_stack": explanation.get("stacked_contributions", contribution_payload.get("contributions", [])),
+            "competing_peaks": competing_peaks,
+        }
+
+    def console_timeline(self, round_ref: int | str | None = None) -> dict[str, Any]:
+        effective_round = self.resolve_round_ref(round_ref)
+        trace = self.trace_round(effective_round)
+        events: list[dict[str, Any]] = [
+            {
+                "type": "stimulus",
+                "label": str(trace.get("scenario") or trace.get("cause_type") or "runtime_input"),
+                "summary": str(trace.get("cue") or trace.get("sampled_action") or "收到本轮刺激"),
+            }
+        ]
+        if trace.get("top_drivers"):
+            events.append(
+                {
+                    "type": "memory_activation",
+                    "label": "top_drivers",
+                    "summary": ", ".join(
+                        str(item.get("agent_name") or item.get("module_name") or "unknown")
+                        for item in list(trace.get("top_drivers", []) or [])[:3]
+                    ),
+                }
+            )
+        motivation_pool = dict(trace.get("motivation_pool", {}) or {})
+        active_motivations = list(motivation_pool.get("active_motivations", []) or [])
+        if active_motivations:
+            events.append(
+                {
+                    "type": "motivation_rise",
+                    "label": "motivation_pool",
+                    "summary": f"active={len(active_motivations)}",
+                }
+            )
+        events.append(
+            {
+                "type": "action_arbitration",
+                "label": str(trace.get("sampled_action") or "unknown"),
+                "summary": str(trace.get("conflict_arbitration", {}).get("winning_priority") or "winner_selected"),
+            }
+        )
+        token_state = dict(trace.get("token_state", {}) or {})
+        if token_state or trace.get("renderer_decision_integrity"):
+            events.append(
+                {
+                    "type": "token_gate",
+                    "label": "token_state",
+                    "summary": str(trace.get("renderer_decision_integrity", {}).get("verdict") or "token_coupling_checked"),
+                }
+            )
+        if trace.get("cause_type") == "endogenous" or trace.get("endogenous_tick_reason"):
+            events.append(
+                {
+                    "type": "endogenous_tick",
+                    "label": str(trace.get("cause_type") or "endogenous"),
+                    "summary": str(dict(trace.get("endogenous_tick_reason", {}) or {}).get("trigger_type") or "internal_trigger"),
+                }
+            )
+        if trace.get("dream_run_id"):
+            events.append(
+                {
+                    "type": "dream_effect",
+                    "label": str(trace.get("dream_trigger") or "dream"),
+                    "summary": str(trace.get("dream_effect_summary") or "dream_effect_observed"),
+                }
+            )
+        return {
+            "round_id": trace["round_id"],
+            "trace_ref": trace.get("trace_ref"),
+            "events": events,
+        }
+
+    def console_why_current(self, round_ref: int | str | None = None) -> dict[str, Any]:
+        effective_round = self.resolve_round_ref(round_ref)
+        payload = self.why_this(effective_round)
+        return {
+            "round_id": payload["round_id"],
+            "trace_ref": f"round://{payload['round_id']}",
+            "why": {
+                "summary": str(payload.get("sampled_action") or "暂无"),
+                "sampled_action": payload.get("sampled_action"),
+                "top_drivers": payload.get("top_drivers", []),
+                "vitality_snapshot": payload.get("vitality_snapshot", {}),
+                "authenticity": payload.get("authenticity", {}),
+            },
+        }
+
+    def console_why_not(self, action: str, round_ref: int | str | None = None) -> dict[str, Any]:
+        effective_round = self.resolve_round_ref(round_ref)
+        payload = self.why_not(effective_round, action)
+        return {
+            "round_id": payload["round_id"],
+            "trace_ref": f"round://{payload['round_id']}",
+            "action": payload["action"],
+            "why_not": {
+                "selected_action": payload.get("selected_action"),
+                "candidate_score": payload.get("candidate_score"),
+                "blocked_by": payload.get("blocked_by", []),
+                "competing_peaks": payload.get("competing_peaks", []),
+                "stacked_contributions": payload.get("stacked_contributions", []),
+            },
+        }
+
+    def _console_default_why_not_action(
+        self,
+        round_ref: int | str | None,
+        *,
+        action_field: dict[str, Any] | None = None,
+    ) -> str | None:
+        field = action_field or self.console_action_field(round_ref)
+        winner_action = str((field.get("winner") or {}).get("action") or "").strip()
+        for entry in field.get("competing_peaks", []):
+            action = str((entry or {}).get("action") or "").strip()
+            if action and action != winner_action:
+                return action
+        for entry in field.get("top_actions", []):
+            action = str((entry or {}).get("action") or "").strip()
+            if action and action != winner_action:
+                return action
+        return None
+
+    def _console_recent_rounds(self, *, limit: int = 12) -> list[dict[str, Any]]:
+        rounds = list(self.metrics_timeline().get("rounds", []) or [])
+        return rounds[-limit:]
+
+    def _console_source_links(
+        self,
+        *,
+        round_id: int | None,
+        trace_ref: str | None,
+        why_not_action: str | None,
+    ) -> list[dict[str, Any]]:
+        replay_path = f"/replay/{round_id}" if round_id is not None else "/replay/{round_id}"
+        why_not_path = f"/console/why-not/{why_not_action}" if why_not_action else "/console/why-not/{action}"
+
+        def link(panel_id: str, api_path: str, controller_method: str) -> dict[str, Any]:
+            return {
+                "panel_id": panel_id,
+                "api_path": api_path,
+                "controller_method": controller_method,
+                "trace_ref": trace_ref,
+                "round_id": round_id,
+            }
+
+        return [
+            link("brain_state", "/console/state", "RuntimeController.console_state"),
+            link("body_state", "/console/state", "RuntimeController.cognitive_snapshot"),
+            link("subjective_state", "/console/state", "RuntimeController.cognitive_snapshot"),
+            link("organic_mode", "/console/state", "RuntimeController.cognitive_snapshot"),
+            link("emergent_action_sketches", "/console/state", "RuntimeController.cognitive_snapshot"),
+            link("autonomy_status", "/autonomy/status", "RuntimeController.autonomy_status"),
+            link("autonomy_recent", "/autonomy/status", "RuntimeController.autonomy_status"),
+            link("autonomy_policy", "/autonomy/status", "RuntimeController.autonomy_status"),
+            link("action_field", "/console/action-field", "RuntimeController.console_action_field"),
+            link("probability_layers", "/trace/probability/latest", "RuntimeController.trace_probability_field"),
+            link("timeline", "/console/timeline", "RuntimeController.console_timeline"),
+            link("why_current", "/console/why/current", "RuntimeController.console_why_current"),
+            link("why_not", why_not_path, "RuntimeController.console_why_not"),
+            link("instinct_space", "/console/state", "RuntimeController.cognitive_snapshot"),
+            link("counterfactual_replay", replay_path, "RuntimeController.replay"),
+        ]
+
+    def console_refresh_payload(self, round_ref: int | str | None = None) -> dict[str, Any]:
+        effective_round = round_ref if round_ref is not None else self._console_round_or_none()
+        payload: dict[str, Any] = {
+            "state": self.console_state(),
+            "autonomy": self.autonomy_status(),
+        }
+        if effective_round is None:
+            payload["action_field"] = {
+                "round_id": None,
+                "trace_ref": None,
+                "top_actions": [],
+                "winner": {"action": None, "score": 0.0},
+                "winner_posterior": {},
+                "conflict": {},
+                "token_field": {},
+                "contribution_stack": [],
+                "competing_peaks": [],
+            }
+            payload["timeline"] = {"round_id": None, "trace_ref": None, "events": []}
+            payload["why_current"] = {
+                "round_id": None,
+                "trace_ref": None,
+                "why": {"summary": "暂无", "sampled_action": None, "top_drivers": [], "vitality_snapshot": {}, "authenticity": {}},
+            }
+            payload["why_not"] = None
+            payload["probability_field"] = {}
+            payload["counterfactual_preview"] = None
+            payload["recent_rounds"] = self._console_recent_rounds()
+            payload["source_links"] = self._console_source_links(round_id=None, trace_ref=None, why_not_action=None)
+            return payload
+        payload["action_field"] = self.console_action_field(effective_round)
+        payload["probability_field"] = self.trace_probability_field(effective_round).get("probability_field", {})
+        payload["timeline"] = self.console_timeline(effective_round)
+        payload["why_current"] = self.console_why_current(effective_round)
+        default_why_not_action = self._console_default_why_not_action(effective_round, action_field=payload["action_field"])
+        payload["why_not"] = self.console_why_not(default_why_not_action, effective_round) if default_why_not_action else None
+        payload["counterfactual_preview"] = self.replay(int(self.resolve_round_ref(effective_round))).get("counterfactual_preview", {})
+        payload["recent_rounds"] = self._console_recent_rounds()
+        payload["source_links"] = self._console_source_links(
+            round_id=int(self.resolve_round_ref(effective_round)),
+            trace_ref=payload["action_field"].get("trace_ref"),
+            why_not_action=default_why_not_action,
+        )
+        return payload
+
+    def console_recent_actions(self, *, limit: int = 8) -> dict[str, Any]:
+        self.trace_store.flush(raise_on_error=False)
+        rows = list(self.trace_store.list_rounds()[-limit:])
+        actions = [
+            {
+                "round_id": int(row.get("round_id", 0) or 0),
+                "trace_ref": f"round://{int(row.get('round_id', 0) or 0)}",
+                "action": str(row.get("sampled_action") or "nothing"),
+                "summary": f"{str(row.get('cause_type') or 'external_stimulus')} · {str(row.get('mode') or 'interactive')}",
+                "recorded_at": row.get("recorded_at"),
+                "cause_type": str(row.get("cause_type") or "external_stimulus"),
+                "mode": str(row.get("mode") or "interactive"),
+            }
+            for row in rows
+        ]
+        return {
+            "actions": actions,
+            "message": "暂无最近动作" if not actions else "",
+        }
+
+    def console_probability_space(self) -> dict[str, Any]:
+        state = self.load_runtime_state()
+        self._sync_tlh_state(state)
+        instinct_field = to_dict(state.instinct_field)
+        anchor = to_dict(state.personality_anchor)
+        latest_round = self._console_round_or_none()
+        probability_field = (
+            self.trace_probability_field(latest_round).get("probability_field", {})
+            if latest_round is not None
+            else {}
+        )
+        region_scores = dict(instinct_field.get("region_scores", {}) or {})
+        winner_region = str(instinct_field.get("winner_region") or "")
+        axis_values = {
+            axis: round(float((instinct_field.get("axis_values") or {}).get(axis, 0.0) or 0.0), 4)
+            for axis in ("E", "F", "S", "M")
+        }
+        anchor_axes = {
+            axis: round(float((anchor.get("axis_baseline") or {}).get(axis, 0.5) or 0.5), 4)
+            for axis in ("E", "F", "S", "M")
+        }
+        region_vectors = {
+            "express": {"E": 0.82, "F": 0.24, "S": 0.48, "M": 0.74},
+            "withdraw": {"E": 0.18, "F": 0.78, "S": 0.32, "M": 0.36},
+            "hibernate": {"E": 0.12, "F": 0.86, "S": 0.12, "M": 0.22},
+            "dissolve": {"E": 0.08, "F": 0.62, "S": 0.56, "M": 0.12},
+            "absorb": {"E": 0.36, "F": 0.34, "S": 0.82, "M": 0.58},
+        }
+        winner_vector = region_vectors.get(winner_region, {"E": axis_values["E"], "F": axis_values["F"], "S": axis_values["S"], "M": axis_values["M"]})
+        winner_strength = max(region_scores.values(), default=0.0)
+        predicted_axes = {
+            axis: round(_clip(axis_values[axis] * 0.7 + float(winner_vector.get(axis, axis_values[axis])) * min(0.3, winner_strength * 0.18)), 4)
+            for axis in ("E", "F", "S", "M")
+        }
+        candidate_center = {
+            axis: round((axis_values[axis] + predicted_axes[axis]) / 2.0, 4)
+            for axis in ("E", "F", "S", "M")
+        }
+        plots = []
+        for x_axis, y_axis in (("E", "F"), ("E", "S"), ("E", "M"), ("F", "S")):
+            plots.append(
+                {
+                    "label": f"{x_axis}-{y_axis}",
+                    "x_axis": x_axis,
+                    "y_axis": y_axis,
+                    "current_point": {"x": axis_values[x_axis], "y": axis_values[y_axis]},
+                    "predicted_point": {"x": predicted_axes[x_axis], "y": predicted_axes[y_axis]},
+                    "anchor_point": {"x": anchor_axes[x_axis], "y": anchor_axes[y_axis]},
+                    "candidate_point": {"x": candidate_center[x_axis], "y": candidate_center[y_axis]},
+                    "winner_region": winner_region,
+                    "has_data": any(abs(value) > 1e-9 for value in axis_values.values()) or bool(winner_region),
+                }
+            )
+        layer_labels = {
+            "context": "情境层",
+            "memory": "记忆层",
+            "action": "动作层",
+            "token": "Token",
+        }
+        layers = []
+        for key in ("context", "memory", "action", "token"):
+            layer_payload = dict(probability_field.get(key, {}) or {})
+            layers.append(
+                {
+                    "key": key,
+                    "label": layer_labels[key],
+                    "winner": layer_payload.get("winner") or layer_payload.get("winner_target") or "",
+                    "keys": len(layer_payload),
+                    "empty": not bool(layer_payload),
+                }
+            )
+        return {
+            "plots": plots,
+            "layers": layers,
+            "instinct_field": instinct_field,
+            "message": "尚无概率分布" if latest_round is None else "",
+        }
 
     def state_delta_timeline(self, window: int = 20) -> dict[str, Any]:
         rounds = self.trace_store.list_rounds()[-window:]
@@ -7125,6 +9433,9 @@ class RuntimeController:
             "connect": "准备更靠近地回应",
             "rest": "准备降低表达强度",
             "wander": "准备转入发散游移",
+            "absorb": "准备先吸收内部线索",
+            "nothing": "准备先不向外表达",
+            "die": "准备自主结束生命",
             "short_reply": "准备先给出简短回应",
         }.get(action_name, "")
 
@@ -7134,6 +9445,9 @@ class RuntimeController:
             "respond": "把注意力放在回应上",
             "wander": "思绪有些发散",
             "rest": "慢慢回落和恢复",
+            "absorb": "把注意力转向内部吸收",
+            "nothing": "暂时收住外显表达",
+            "die": "正在转向自主结束生命",
             "boot": "还在进入状态",
         }.get(focus, focus)
 
@@ -7185,6 +9499,7 @@ class RuntimeController:
         run_payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         current_state = state or self.load_runtime_state()
+        self._sync_tlh_state(current_state)
         latest_why = self._latest_why_payload(current_state)
         return {
             "core_goal": ARCHITECTURE_CORE_GOAL,
@@ -7198,6 +9513,16 @@ class RuntimeController:
             },
             "identity": self._identity_summary(current_state, latest_why),
             "authenticity": self._authenticity_summary(latest_why),
+            "tlh": {
+                "body_state": to_dict(current_state.body_state),
+                "subjective_state": to_dict(current_state.subjective_state),
+                "emotion_state": to_dict(current_state.emotion_state),
+                "desire_state": to_dict(current_state.desire_state),
+                "instinct_field": to_dict(current_state.instinct_field),
+                "organic_mode": to_dict(current_state.organic_mode),
+                "emergent_action_sketches": to_dict(current_state.emergent_action_sketches),
+                "personality_anchor": to_dict(current_state.personality_anchor),
+            },
         }
 
     def _trace_storage_payload(self, *, read_source: str | None = None) -> dict[str, Any]:
@@ -7278,7 +9603,18 @@ class RuntimeController:
     def _task_turn_message(self, run_payload: dict[str, Any]) -> str:
         if run_payload.get("status") == "paused" and run_payload.get("dirty_worktree_detected"):
             return "任务已建立，但当前处于暂停状态。可用 /status /why 查看原因。"
+        if not run_payload.get("last_tool_result"):
+            return "任务已建立，等待工具审批。批准后会继续执行。"
         return "已进入只读任务处理。可用 /status /why /steps /tools 查看进度。"
+
+    def _run_trace_ref(self, run_id: str) -> str:
+        return f"run://{run_id}"
+
+    def _run_step_trace_ref(self, run_id: str, step_id: str) -> str:
+        return f"{self._run_trace_ref(run_id)}/steps/{step_id}"
+
+    def _run_tool_trace_ref(self, run_id: str, call_id: str) -> str:
+        return f"{self._run_trace_ref(run_id)}/tools/{call_id}"
 
     def _run_status_payload(self, run_state: RunState) -> dict[str, Any]:
         current_step = self._current_task_node(run_state)
@@ -7297,6 +9633,8 @@ class RuntimeController:
             "last_tool_result": to_dict(run_state.last_tool_result) if run_state.last_tool_result else {},
             "created_at": run_state.created_at,
             "updated_at": run_state.updated_at,
+            "round_id": None,
+            "trace_ref": self._run_trace_ref(run_state.run_id),
         }
 
     def _run_explain_payload(self, run_state: RunState) -> dict[str, Any]:
@@ -7312,6 +9650,8 @@ class RuntimeController:
             "budget": to_dict(run_state.budget),
             "dirty_worktree_detected": run_state.dirty_worktree_detected,
             "stop_reason": to_dict(run_state.stop_reason) if run_state.stop_reason else {},
+            "round_id": None,
+            "trace_ref": self._run_trace_ref(run_state.run_id),
         }
 
     def start_run(
@@ -7325,6 +9665,7 @@ class RuntimeController:
         bootstrap: tuple[RunState, dict[str, Any], dict[str, Any]] | None = None,
         include_details: bool = False,
         sync_hot_path: bool = False,
+        defer_bootstrap_tool: bool = False,
     ) -> dict[str, Any]:
         state = self.load_runtime_state()
         if state.active_run_id and state.run_status in {"running", "paused"}:
@@ -7350,11 +9691,18 @@ class RuntimeController:
         )
         if bootstrap is None:
             supervisor = SupervisorLoop(project_root=self.project_root, planner=self._plan_run_via_model)
-            run_state, step_trace, tool_trace = supervisor.bootstrap(
-                request,
-                session_id=state.session_id,
-                recorded_at=recorded_at,
-            )
+            if defer_bootstrap_tool:
+                run_state, step_trace, tool_trace = supervisor.prepare_bootstrap(
+                    request,
+                    session_id=state.session_id,
+                    recorded_at=recorded_at,
+                )
+            else:
+                run_state, step_trace, tool_trace = supervisor.bootstrap(
+                    request,
+                    session_id=state.session_id,
+                    recorded_at=recorded_at,
+                )
         else:
             run_state, step_trace, tool_trace = bootstrap
             run_state = RunState(**to_dict(run_state))
@@ -7366,6 +9714,15 @@ class RuntimeController:
             run_state.session_id = state.session_id
             run_state.created_at = run_state.created_at or recorded_at
             run_state.updated_at = recorded_at
+        call_id = str(tool_trace.get("call_id") or f"{run_state.run_id}:tool:0")
+        step_trace.setdefault("run_id", run_state.run_id)
+        step_trace.setdefault("trace_ref", self._run_step_trace_ref(run_state.run_id, str(step_trace.get("step_id") or run_state.current_step_id or "step")))
+        step_trace.setdefault("round_id", None)
+        tool_trace.setdefault("run_id", run_state.run_id)
+        tool_trace.setdefault("call_id", call_id)
+        tool_trace.setdefault("trace_ref", self._run_tool_trace_ref(run_state.run_id, call_id))
+        tool_trace.setdefault("round_id", None)
+        tool_trace.setdefault("input", {"goal": request.goal})
         if dirty["detected"]:
             run_state.status = "paused"
             run_state.dirty_worktree_detected = True
@@ -7402,6 +9759,101 @@ class RuntimeController:
             "explain": self._run_explain_payload(run_state),
             "steps": [step_trace],
             "tools": [tool_payload],
+        }
+
+    def resolve_run_tool_approval(self, run_id: str, call_id: str, *, approved: bool) -> dict[str, Any]:
+        run_state = self._load_run_state(run_id)
+        tool_rows = self.trace_store.list_run_tools(run_id)
+        pending_tool = next(
+            (
+                row
+                for row in reversed(tool_rows)
+                if str(row.get("call_id") or "") == call_id
+            ),
+            None,
+        )
+        if pending_tool is None:
+            raise FileNotFoundError(f"run tool {call_id} not found")
+        recorded_at = utc_now_iso()
+        current_step = self._current_task_node(run_state)
+        step_trace = None
+        if current_step is not None:
+            step_trace = {
+                "run_id": run_state.run_id,
+                "step_id": current_step.node_id,
+                "title": current_step.title,
+                "detail": current_step.detail,
+                "status": "paused" if not approved else current_step.status,
+                "tool_choice": current_step.tool_choice,
+                "expected_observation": current_step.expected_observation,
+                "success_criteria": current_step.success_criteria,
+                "confidence": current_step.confidence,
+                "matched_files": list(current_step.metadata.get("matched_files", []) or []),
+                "trace_ref": self._run_step_trace_ref(run_state.run_id, current_step.node_id),
+                "round_id": None,
+            }
+
+        if approved:
+            supervisor = SupervisorLoop(project_root=self.project_root, planner=self._plan_run_via_model)
+            result = supervisor.execute_prepared_tool(
+                str(pending_tool.get("tool_name") or "repo_scan"),
+                goal=str((pending_tool.get("input") or {}).get("goal") or run_state.goal),
+            )
+            run_state.last_tool_result = result
+            run_state.updated_at = recorded_at
+            run_state.stop_reason = None
+            if current_step is not None:
+                current_step.metadata["matched_files"] = list(result.metadata.get("matched_files", []) or [])
+            tool_payload = {
+                **dict(pending_tool),
+                "status": result.status,
+                "summary": result.summary,
+                "output_excerpt": result.output_excerpt,
+                "before_state_hash": result.before_state_hash,
+                "after_state_hash": result.after_state_hash,
+                "matched_files": list(result.metadata.get("matched_files", []) or []),
+                "file_count": int(result.metadata.get("file_count", 0) or 0),
+                "recorded_at": recorded_at,
+                "recorded_date": iso_date(recorded_at),
+            }
+        else:
+            run_state.status = "paused"
+            run_state.stop_reason = StopReason(
+                code="operator_rejected",
+                message="tool execution rejected by operator",
+                retryable=True,
+                needs_operator=True,
+            )
+            run_state.updated_at = recorded_at
+            if current_step is not None:
+                current_step.status = "paused"
+            tool_payload = {
+                **dict(pending_tool),
+                "status": "rejected",
+                "summary": str(pending_tool.get("summary") or "tool execution rejected"),
+                "output_excerpt": "",
+                "recorded_at": recorded_at,
+                "recorded_date": iso_date(recorded_at),
+            }
+
+        self._persist_run_state(run_state)
+        if step_trace is not None:
+            self.trace_store.append_step_trace(
+                step_trace,
+                session_id=run_state.session_id,
+                recorded_at=recorded_at,
+                sync=True,
+            )
+        self.trace_store.append_tool_trace(
+            tool_payload,
+            session_id=run_state.session_id,
+            recorded_at=recorded_at,
+            sync=True,
+        )
+        return {
+            "run": self._run_status_payload(run_state),
+            "explain": self._run_explain_payload(run_state),
+            "tool": tool_payload,
         }
 
     def interrupt_run(
@@ -7504,15 +9956,21 @@ class RuntimeController:
         return {"run_id": effective_run_id, "tools": self.trace_store.list_run_tools(effective_run_id)}
 
     def resolve_round_ref(self, round_ref: int | str | None) -> int:
-        if round_ref is None or round_ref == "last":
+        if round_ref is None:
             round_id = self.load_runtime_state().round_count
             if round_id <= 0:
                 raise FileNotFoundError("no trace rounds recorded yet")
             return round_id
         if isinstance(round_ref, int):
             return round_ref
+        normalized_round_ref = round_ref.strip().lower()
+        if normalized_round_ref in {"last", "latest"}:
+            round_id = self.load_runtime_state().round_count
+            if round_id <= 0:
+                raise FileNotFoundError("no trace rounds recorded yet")
+            return round_id
         try:
-            return int(round_ref)
+            return int(normalized_round_ref)
         except ValueError as exc:
             raise ValueError(f"invalid round reference: {round_ref}") from exc
 
@@ -7524,11 +9982,16 @@ class RuntimeController:
         enriched.setdefault("motivation_feedback", {})
         enriched.setdefault("endogenous_tick_reason", {})
         enriched.setdefault("endogenous_policy_shift", {})
+        enriched.setdefault("endogenous_trigger_context", {})
+        enriched.setdefault("endogenous_suppression", {})
+        enriched.setdefault("micro_intent", {})
+        enriched.setdefault("endogenous_replay_chain", {})
         enriched["token_state"] = self._token_state_from_trace(enriched)
         enriched["cross_layer_coupling_verdict"] = self._cross_layer_coupling_verdict(enriched)
         enriched["renderer_decision_integrity"] = self._renderer_decision_integrity(enriched)
         enriched["conflict_arbitration"] = self._conflict_arbitration_summary(enriched)
         enriched["storage"] = self._trace_storage_payload(read_source=read_source)
+        enriched["trace_ref"] = f"round://{enriched['round_id']}"
         dream = self._dream_summary_from_trace(enriched)
         if dream is not None:
             enriched["dream_run_id"] = dream["run_id"]
@@ -7538,8 +10001,34 @@ class RuntimeController:
             enriched["dream_effect_summary"] = dream["effect_summary"]
         return enriched
 
+    def empty_trace_payload(self, round_ref: int | str | None = None) -> dict[str, Any]:
+        round_id = round_ref if isinstance(round_ref, int) else None
+        return {
+            "round_id": round_id,
+            "trace_ref": None,
+            "sampled_action": "nothing",
+            "top_drivers": [],
+            "style_profile": {},
+            "state_snapshot": {
+                "mode": self.load_runtime_state().mode,
+                "safe_mode": self.load_runtime_state().safe_mode,
+                "focus": self.load_runtime_state().focus,
+                "budget_remaining": self.load_runtime_state().budget_remaining,
+            },
+            "probability_field": {},
+            "token_state": {},
+            "cross_layer_coupling_verdict": {},
+            "renderer_decision_integrity": {},
+            "conflict_arbitration": {},
+            "storage": self._trace_storage_payload(),
+            "message": "无决策记录",
+        }
+
     def why_this(self, round_ref: int | str) -> dict[str, Any]:
         trace = self.trace_round(round_ref)
+        personality_anchor = trace.get("state_snapshot", {}).get("personality_anchor", {})
+        instinct_field = trace.get("state_snapshot", {}).get("instinct_field", {})
+        emergent_sketches = trace.get("state_snapshot", {}).get("emergent_action_sketches", [])
         return {
             "round_id": trace["round_id"],
             "sampled_action": trace["sampled_action"],
@@ -7552,6 +10041,17 @@ class RuntimeController:
             "identity_evolution": trace.get("identity_evolution", {}),
             "vitality_snapshot": trace.get("vitality_snapshot", {}),
             "vitality_events": trace.get("vitality_events", []),
+            "subjective_state": trace.get("state_snapshot", {}).get("subjective_state", {}),
+            "emotion_state": trace.get("state_snapshot", {}).get("emotion_state", {}),
+            "desire_state": trace.get("state_snapshot", {}).get("desire_state", {}),
+            "instinct_field": instinct_field,
+            "organic_mode": trace.get("state_snapshot", {}).get("organic_mode", {}),
+            "emergent_action_sketches": emergent_sketches,
+            "personality_anchor": personality_anchor,
+            "self_continuity_derivation": dict(personality_anchor.get("continuity_derivation", {}) or {}),
+            "high_dimensional_collapse": dict(instinct_field.get("collapse_trace", {}) or {}),
+            "anchor_alignment": round(float(personality_anchor.get("alignment", 0.0) or 0.0), 4),
+            "emergent_action_formalization": self._emergent_action_formalization_payload(emergent_sketches),
             "long_run_projection": trace.get("long_run_projection", {}),
             "motivation_pool": trace.get("motivation_pool", {}),
             "motivation_feedback": trace.get("motivation_feedback", {}),
@@ -7577,6 +10077,7 @@ class RuntimeController:
                 trace,
                 target_action=str(trace.get("sampled_action", "")),
             ),
+            "counterfactual_replays": self._counterfactual_replays_from_trace(trace),
             "dream": self._dream_summary_from_trace(trace),
             "state_snapshot": {
                 "mode": trace["state_snapshot"]["mode"],
@@ -7585,6 +10086,66 @@ class RuntimeController:
                 "budget_remaining": trace["state_snapshot"]["budget_remaining"],
             },
             "storage": trace.get("storage", self._trace_storage_payload()),
+        }
+
+    def empty_why_payload(self, round_ref: int | str | None = None) -> dict[str, Any]:
+        state = self.load_runtime_state()
+        self._sync_tlh_state(state)
+        return {
+            "round_id": round_ref if isinstance(round_ref, int) else None,
+            "sampled_action": "nothing",
+            "top_drivers": [],
+            "style_profile": {},
+            "stochastic_state": {},
+            "render_plan": {},
+            "rendered_expression": {},
+            "authenticity": {},
+            "identity_evolution": {},
+            "vitality_snapshot": {},
+            "vitality_events": [],
+            "subjective_state": to_dict(state.subjective_state),
+            "emotion_state": to_dict(state.emotion_state),
+            "desire_state": to_dict(state.desire_state),
+            "instinct_field": to_dict(state.instinct_field),
+            "organic_mode": to_dict(state.organic_mode),
+            "emergent_action_sketches": [],
+            "personality_anchor": to_dict(state.personality_anchor),
+            "self_continuity_derivation": {},
+            "high_dimensional_collapse": {},
+            "anchor_alignment": round(float(state.personality_anchor.alignment or 0.0), 4),
+            "emergent_action_formalization": {"sketches": [], "active_count": 0, "candidate_targets": []},
+            "long_run_projection": {},
+            "motivation_pool": {},
+            "motivation_feedback": {},
+            "endogenous_tick_reason": {},
+            "endogenous_policy_shift": {},
+            "appraisal_snapshot": {},
+            "state_delta_before_clip": {},
+            "state_delta_after_clip": {},
+            "delta_suppression_reason": [],
+            "run_context": {},
+            "run_contamination_detected": False,
+            "identity_evidence_score": 0.0,
+            "identity_trigger_blockers": [],
+            "temperament_window_summary": {},
+            "probability_field": {},
+            "token_state": {},
+            "cross_layer_coupling_verdict": {},
+            "renderer_decision_integrity": {},
+            "memory_write_gate": {},
+            "failure_taxonomy": [],
+            "conflict_arbitration": {},
+            "action_probability_explanation": {},
+            "counterfactual_replays": [],
+            "dream": None,
+            "state_snapshot": {
+                "mode": state.mode,
+                "safe_mode": state.safe_mode,
+                "focus": state.focus,
+                "budget_remaining": state.budget_remaining,
+            },
+            "storage": self._trace_storage_payload(),
+            "message": "无决策记录",
         }
 
     def _action_layer_from_trace(self, trace: dict[str, Any]) -> dict[str, Any]:
@@ -7603,6 +10164,7 @@ class RuntimeController:
         allowed_pairs = {
             ("context", "memory", "context_route"),
             ("memory", "action", "memory_prior"),
+            ("memory", "action", "organic_memory"),
             ("action", "token", "render_plan"),
         }
         observed_pairs: list[str] = []
@@ -7641,13 +10203,13 @@ class RuntimeController:
             mutation_reasons.append("render_plan_action_mismatch")
         if locked_action and post_render_action and post_render_action != locked_action:
             mutation_reasons.append("post_render_action_mismatch")
-        if locked_action and winner_target and winner_target != locked_action:
-            mutation_reasons.append("probability_field_winner_mismatch")
         return {
             "locked_action": locked_action,
             "render_plan_action": render_plan_action,
             "post_render_action": post_render_action,
             "winner_target": winner_target,
+            "field_peak_matches_locked_action": not (locked_action and winner_target and winner_target != locked_action),
+            "sampled_differs_from_peak": bool(locked_action and winner_target and winner_target != locked_action),
             "locked_probability": round(float(raw.get("locked_probability", winner_posterior.get(locked_action or sampled_action, 0.0) or 0.0)), 6),
             "gate_at_render": round(float(raw.get("gate_at_render", render_plan.get("safety_constraints", {}).get("gate", 1.0) or 0.0)), 6),
             "auth_guard_action": str(raw.get("auth_guard_action") or trace.get("authenticity", {}).get("guard_action") or ""),
@@ -7781,6 +10343,7 @@ class RuntimeController:
         action_layer = self._action_layer_from_trace(trace)
         final_energy = action_layer.get("final_energy", {}) if isinstance(action_layer.get("final_energy"), dict) else {}
         winner_target = str(action_layer.get("winner_target") or trace.get("sampled_action") or "")
+        sampled_action = str(trace.get("sampled_action") or "")
         stacked = self._stacked_action_contributions(action_layer, target_action)
         competing_peaks = self._competing_peaks(action_layer)
         if winner_target:
@@ -7801,6 +10364,8 @@ class RuntimeController:
         return {
             "target_action": target_action,
             "winner_target": winner_target,
+            "sampled_action": sampled_action,
+            "sampled_differs_from_peak": bool(sampled_action and winner_target and sampled_action != winner_target),
             "winner_posterior": dict(action_layer.get("winner_posterior", {}) or {}),
             "winner_energy": round(float(final_energy.get(winner_target, 0.0) or 0.0), 6) if winner_target else 0.0,
             "target_final_energy": round(float(final_energy.get(target_action, 0.0) or 0.0), 6)
@@ -7810,6 +10375,138 @@ class RuntimeController:
             "stacked_contributions": stacked,
             "competing_peaks": competing_peaks[:3],
         }
+
+    def _counterfactual_render_preview(self, trace: dict[str, Any], action: str) -> dict[str, Any]:
+        render_plan_payload = dict(trace.get("render_plan", {}) or {})
+        if not render_plan_payload:
+            return {
+                "action": action,
+                "would_output": action != "nothing",
+                "text": "",
+                "terminal_intent": action == "die",
+            }
+        render_plan_payload["action"] = action
+        message_plan = dict(render_plan_payload.get("message_plan", {}) or {})
+        message_plan["intent"] = action
+        message_plan["focus"] = action
+        render_plan_payload["message_plan"] = message_plan
+        preview_plan = RenderPlan(**render_plan_payload)
+        preview_text = fallback_render_text(preview_plan)
+        return {
+            "action": action,
+            "would_output": bool(preview_text),
+            "text": preview_text,
+            "terminal_intent": action == "die",
+        }
+
+    def _emergent_action_formalization_payload(self, sketches: list[dict[str, Any]] | list[Any]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for raw in sketches:
+            sketch = raw if isinstance(raw, dict) else to_dict(raw)
+            status = str(sketch.get("status", "latent") or "latent")
+            if status != "formalized":
+                continue
+            rows.append(
+                {
+                    "name": str(sketch.get("name") or ""),
+                    "status": status,
+                    "growth_score": round(float(sketch.get("growth_score", 0.0) or 0.0), 4),
+                    "anchor_alignment": round(float(sketch.get("anchor_alignment", 0.0) or 0.0), 4),
+                    "stability": int(sketch.get("stability", 0) or 0),
+                    "target_action_map": dict(sketch.get("target_action_map", {}) or {}),
+                }
+            )
+        return rows
+
+    def _sample_counterfactual_action(
+        self,
+        distribution: dict[str, float],
+        *,
+        seed: int,
+        default_action: str,
+    ) -> str:
+        normalized = self._normalize(distribution or {})
+        if not normalized:
+            return default_action
+        ordered = sorted(normalized.items())
+        seed_payload = f"{seed}:{','.join(f'{action}:{value:.6f}' for action, value in ordered)}"
+        threshold = (int(hashlib.sha1(seed_payload.encode("utf-8")).hexdigest()[:8], 16) % 1000000) / 1000000.0
+        cumulative = 0.0
+        sampled = default_action or ordered[-1][0]
+        for action, probability in sorted(normalized.items(), key=lambda item: item[1], reverse=True):
+            cumulative += max(float(probability), 0.0)
+            sampled = action
+            if threshold <= cumulative:
+                break
+        return sampled
+
+    def _counterfactual_replays_from_trace(self, trace: dict[str, Any], *, limit: int = 4) -> list[dict[str, Any]]:
+        instinct_field = dict(trace.get("state_snapshot", {}).get("instinct_field", {}) or {})
+        emergent_sketches = list(trace.get("state_snapshot", {}).get("emergent_action_sketches", []) or [])
+        personality_anchor = dict(trace.get("state_snapshot", {}).get("personality_anchor", {}) or {})
+        action_layer = self._action_layer_from_trace(trace)
+        final_energy = dict(action_layer.get("final_energy", {}) or {})
+        rows: list[dict[str, Any]] = []
+        action_order: list[str] = []
+        for action in list(instinct_field.get("candidate_actions", []) or []):
+            action_name = str(action).strip()
+            if action_name and action_name in final_energy and action_name not in action_order:
+                action_order.append(action_name)
+        for peak in self._competing_peaks(action_layer, limit=max(limit, 6)):
+            action_name = str(peak.get("action") or "").strip()
+            if action_name and action_name not in action_order:
+                action_order.append(action_name)
+        for action in action_order[:limit]:
+            peak = next((item for item in self._competing_peaks(action_layer, limit=max(limit, 6)) if item.get("action") == action), None)
+            if peak is None:
+                peak = {
+                    "action": action,
+                    "posterior": round(float(action_layer.get("winner_posterior", {}).get(action, 0.0) or 0.0), 6),
+                    "final_energy": round(float(final_energy.get(action, 0.0) or 0.0), 6),
+                }
+            action = str(peak.get("action") or "").strip()
+            if not action:
+                continue
+            explanation = self._action_probability_explanation(trace, target_action=action)
+            sketch_hits = []
+            for sketch in emergent_sketches:
+                if not isinstance(sketch, dict):
+                    continue
+                support_actions = dict(sketch.get("support_actions", {}) or {})
+                if action not in support_actions:
+                    continue
+                sketch_hits.append(
+                    {
+                        "name": str(sketch.get("name") or ""),
+                        "growth_score": round(float(sketch.get("growth_score", 0.0) or 0.0), 4),
+                        "status": str(sketch.get("status") or "latent"),
+                    }
+                )
+            render_preview = self._counterfactual_render_preview(trace, action)
+            rows.append(
+                {
+                    "action": action,
+                    "posterior": round(float(peak.get("posterior", 0.0) or 0.0), 6),
+                    "final_energy": round(float(peak.get("final_energy", 0.0) or 0.0), 6),
+                    "winner_region": instinct_field.get("winner_region", ""),
+                    "region_scores": dict(instinct_field.get("region_scores", {}) or {}),
+                    "collapse_trace": dict(instinct_field.get("collapse_trace", {}) or {}),
+                    "supporters": [
+                        item["module_name"]
+                        for item in explanation["stacked_contributions"]
+                        if item["direction"] in {"support", "background"} and not item["hard_masked"]
+                    ][:4],
+                    "blockers": [
+                        item["module_name"]
+                        for item in explanation["stacked_contributions"]
+                        if item["direction"] in {"block", "suppress"} or item["hard_masked"]
+                    ][:4],
+                    "emergent_sketches": sketch_hits[:3],
+                    "anchor_alignment": round(float(personality_anchor.get("alignment", 0.0) or 0.0), 4),
+                    "counterfactual_preview": render_preview,
+                }
+            )
+        return rows
 
     def _conflict_arbitration_summary(self, trace: dict[str, Any]) -> dict[str, Any]:
         explicit = dict(trace.get("conflict_arbitration", {}) or {})
@@ -7953,6 +10650,12 @@ class RuntimeController:
 
     def trace_skills(self, round_ref: int | str) -> dict[str, Any]:
         trace = self.trace_round(round_ref)
+        round_id = int(trace["round_id"])
+        stored_skill_rows = [
+            row
+            for row in self.trace_store.list_skill_traces()
+            if int(row.get("round_id", 0) or 0) == round_id
+        ]
         skills = [
             {
                 "skill_name": row.get("skill_name"),
@@ -7963,10 +10666,10 @@ class RuntimeController:
                 "fallback_route": row.get("fallback_route"),
                 "policy_rejection_reason": row.get("policy_rejection_reason"),
             }
-            for row in trace.get("skill_traces", [])
+            for row in (trace.get("skill_traces", []) or stored_skill_rows)
         ]
         return {
-            "round_id": trace["round_id"],
+            "round_id": round_id,
             "sampled_action": trace["sampled_action"],
             "skills": skills,
             "storage": trace.get("storage", self._trace_storage_payload()),
@@ -8051,6 +10754,7 @@ class RuntimeController:
         return self._average(scores)
 
     def metrics_summary(self) -> dict[str, Any]:
+        self.trace_store.flush(raise_on_error=False)
         payload = self.long_run_analyzer.metrics_summary()
         motivation = self.motivation_metrics()
         endogenous = self.endogenous_metrics()
@@ -8068,16 +10772,19 @@ class RuntimeController:
         return payload
 
     def authenticity_timeline(self) -> dict[str, Any]:
+        self.trace_store.flush(raise_on_error=False)
         payload = self.long_run_analyzer.authenticity_timeline()
         payload["storage"] = self._trace_storage_payload()
         return payload
 
     def vitality_timeline(self) -> dict[str, Any]:
+        self.trace_store.flush(raise_on_error=False)
         payload = self.long_run_analyzer.vitality_timeline()
         payload["storage"] = self._trace_storage_payload()
         return payload
 
     def motivation_metrics(self) -> dict[str, Any]:
+        self.trace_store.flush(raise_on_error=False)
         rounds = self.trace_store.list_rounds()
         active_rounds = [row for row in rounds if dict(row.get("motivation_pool", {}) or {}).get("active_motivations")]
         activation_scores = [
@@ -8095,6 +10802,7 @@ class RuntimeController:
         }
 
     def endogenous_metrics(self) -> dict[str, Any]:
+        self.trace_store.flush(raise_on_error=False)
         rounds = self.trace_store.list_rounds()
         endogenous_rounds = [row for row in rounds if row.get("cause_type") == "endogenous"]
         trigger_types: dict[str, int] = {}
@@ -8181,6 +10889,16 @@ class RuntimeController:
         )
         routes: dict[str, Any] = {}
         credential_present = bool(os.getenv("ARK_API_KEY"))
+
+        def credential_visible(route_cfg: ModelRouteConfig) -> bool:
+            if route_cfg.api_key_env:
+                return bool(os.getenv(route_cfg.api_key_env))
+            if route_cfg.backend == "doubao":
+                return bool(os.getenv("ARK_API_KEY"))
+            if route_cfg.backend == "deepseek":
+                return bool(os.getenv("DEEPSEEK_API_KEY"))
+            return True
+
         tiers = {
             tier_name: {
                 "mode": str(tier_cfg.get("mode", "local")),
@@ -8189,7 +10907,11 @@ class RuntimeController:
                 "base_url": tier_cfg.get("base_url"),
                 "timeout_ms": tier_cfg.get("timeout_ms"),
                 "api_key_env": tier_cfg.get("api_key_env"),
-                "credential_present": bool(os.getenv(str(tier_cfg.get("api_key_env", "")).strip()))
+                "credential_present": (
+                    True
+                    if not str(tier_cfg.get("api_key_env", "")).strip()
+                    else bool(os.getenv(str(tier_cfg.get("api_key_env", "")).strip()))
+                )
                 if str(tier_cfg.get("mode", "local")).lower() == "remote"
                 else True,
             }
@@ -8206,8 +10928,12 @@ class RuntimeController:
             ]
             last_row = route_rows[-1] if route_rows else None
             last_failure = fallback_rows[-1] if fallback_rows else None
+            binding_key = MODEL_ROUTE_BINDING_KEYS.get(route_name)
+            effective_route = self._route_config_for_binding(binding_key, route_name=route_name) if binding_key else None
+            status_route = effective_route or route
+            route_credential_present = credential_visible(status_route)
             health = "disabled" if not route.enabled else "ready"
-            if route.enabled and route.backend == "doubao" and not credential_present:
+            if route.enabled and not route_credential_present:
                 health = "degraded"
             if route.enabled and last_failure is not None:
                 health = "degraded"
@@ -8216,6 +10942,7 @@ class RuntimeController:
                 "enabled": route.enabled,
                 "backend": route.backend,
                 "model": route.model,
+                "credential_present": route_credential_present,
                 "timeout_ms": route.timeout_ms,
                 "retries": route.retries,
                 "bound_skills": bound_skills,
@@ -8244,6 +10971,11 @@ class RuntimeController:
     def replay(self, round_id: int, seed: int = 0) -> dict[str, Any]:
         trace = self.trace_round(round_id)
         proposal_rows = trace.get("proposal_summaries", [])
+        candidate_distribution = self._candidate_distribution_from_trace(trace)
+        counterfactual_replays = self._counterfactual_replays_from_trace(trace)
+        personality_anchor = trace.get("state_snapshot", {}).get("personality_anchor", {})
+        instinct_field = trace.get("state_snapshot", {}).get("instinct_field", {})
+        emergent_sketches = trace.get("state_snapshot", {}).get("emergent_action_sketches", [])
         ablations = []
         for item in proposal_rows[:3]:
             delta_map = item.get("delta_p", {}) if isinstance(item.get("delta_p"), dict) else {}
@@ -8255,38 +10987,103 @@ class RuntimeController:
                     "delta": round(float(delta_map.get(top_action, 0.0)), 4),
                 }
             )
+        replayed_action = self._sample_counterfactual_action(
+            candidate_distribution,
+            seed=seed,
+            default_action=str(trace.get("sampled_action") or ""),
+        )
+        preview = next(
+            (item.get("counterfactual_preview", {}) for item in counterfactual_replays if item.get("action") == replayed_action),
+            {"action": replayed_action, "would_output": replayed_action != "nothing", "text": "", "terminal_intent": replayed_action == "die"},
+        )
         return {
             "round_id": round_id,
             "original_action": trace["sampled_action"],
-            "replayed_action": trace["sampled_action"],
-            "candidate_distribution": self._candidate_distribution_from_trace(trace),
+            "replayed_action": replayed_action,
+            "candidate_distribution": candidate_distribution,
             "ablations": ablations,
+            "counterfactual_replays": counterfactual_replays,
+            "counterfactual_preview": preview,
+            "instinct_field": instinct_field,
+            "emergent_action_sketches": emergent_sketches,
+            "personality_anchor": personality_anchor,
+            "high_dimensional_collapse": dict(instinct_field.get("collapse_trace", {}) or {}),
+            "anchor_alignment": round(float(personality_anchor.get("alignment", 0.0) or 0.0), 4),
+            "emergent_action_formalization": self._emergent_action_formalization_payload(emergent_sketches),
             "seed": seed,
             "storage": self._trace_storage_payload(),
+        }
+
+    def empty_replay_payload(self, round_ref: int | str | None = None, *, seed: int = 0) -> dict[str, Any]:
+        return {
+            "round_id": round_ref if isinstance(round_ref, int) else None,
+            "original_action": "nothing",
+            "replayed_action": "nothing",
+            "candidate_distribution": {},
+            "ablations": [],
+            "counterfactual_replays": [],
+            "counterfactual_preview": {},
+            "instinct_field": {},
+            "emergent_action_sketches": [],
+            "personality_anchor": {},
+            "high_dimensional_collapse": {},
+            "anchor_alignment": 0.0,
+            "emergent_action_formalization": {"sketches": [], "active_count": 0, "candidate_targets": []},
+            "seed": seed,
+            "storage": self._trace_storage_payload(),
+            "message": "无决策记录",
         }
 
     def replay_motivation(self, round_id: int) -> dict[str, Any]:
         trace = self.trace_round(round_id)
         return {
             "round_id": round_id,
+            "trace_ref": trace.get("trace_ref", f"round://{round_id}"),
             "sampled_action": trace["sampled_action"],
             "motivation_pool": trace.get("motivation_pool", {}),
             "motivation_feedback": trace.get("motivation_feedback", {}),
             "endogenous_tick_reason": trace.get("endogenous_tick_reason", {}),
             "endogenous_policy_shift": trace.get("endogenous_policy_shift", {}),
+            "endogenous_trigger_context": trace.get("endogenous_trigger_context", {}),
+            "endogenous_suppression": trace.get("endogenous_suppression", {}),
+            "micro_intent": trace.get("micro_intent", {}),
+            "endogenous_replay_chain": trace.get("endogenous_replay_chain", {}),
             "storage": trace.get("storage", self._trace_storage_payload()),
+        }
+
+    def empty_motivation_payload(self, round_ref: int | str | None = None) -> dict[str, Any]:
+        return {
+            "round_id": round_ref if isinstance(round_ref, int) else None,
+            "trace_ref": None,
+            "sampled_action": "nothing",
+            "cause_type": "external_stimulus",
+            "motivation_pool": {},
+            "motivation_feedback": {},
+            "endogenous_tick_reason": {},
+            "endogenous_policy_shift": {},
+            "endogenous_trigger_context": {},
+            "endogenous_suppression": {},
+            "micro_intent": {},
+            "endogenous_replay_chain": {},
+            "storage": self._trace_storage_payload(),
+            "message": "无决策记录",
         }
 
     def why_motivation(self, round_ref: int | str) -> dict[str, Any]:
         trace = self.trace_round(round_ref)
         return {
             "round_id": trace["round_id"],
+            "trace_ref": trace.get("trace_ref", f"round://{trace['round_id']}"),
             "sampled_action": trace["sampled_action"],
             "cause_type": trace.get("cause_type", "external_stimulus"),
             "motivation_pool": trace.get("motivation_pool", {}),
             "motivation_feedback": trace.get("motivation_feedback", {}),
             "endogenous_tick_reason": trace.get("endogenous_tick_reason", {}),
             "endogenous_policy_shift": trace.get("endogenous_policy_shift", {}),
+            "endogenous_trigger_context": trace.get("endogenous_trigger_context", {}),
+            "endogenous_suppression": trace.get("endogenous_suppression", {}),
+            "micro_intent": trace.get("micro_intent", {}),
+            "endogenous_replay_chain": trace.get("endogenous_replay_chain", {}),
             "storage": trace.get("storage", self._trace_storage_payload()),
         }
 
@@ -8319,6 +11116,20 @@ class RuntimeController:
             "storage": self._trace_storage_payload(),
         }
 
+    def empty_why_not_payload(self, action: str = "", round_ref: int | str | None = None) -> dict[str, Any]:
+        return {
+            "round_id": round_ref if isinstance(round_ref, int) else None,
+            "action": str(action or ""),
+            "selected_action": "nothing",
+            "candidate_score": 0.0,
+            "blocked_by": [],
+            "stacked_contributions": [],
+            "competing_peaks": [],
+            "conflict_arbitration": {},
+            "storage": self._trace_storage_payload(),
+            "message": "无决策记录",
+        }
+
     def what_changed(self, window: int = 5) -> dict[str, Any]:
         rounds = self.trace_store.list_rounds()[-window:]
         if not rounds:
@@ -8339,6 +11150,7 @@ class RuntimeController:
         }
 
     def conflict_timeline(self) -> dict[str, Any]:
+        self.trace_store.flush(raise_on_error=False)
         points = []
         for trace in self.trace_store.list_rounds():
             conflict = dict(trace.get("conflict_arbitration", {}) or self._conflict_arbitration_summary(trace))
@@ -8379,6 +11191,7 @@ class RuntimeController:
         }
 
     def mode_switch_timeline(self) -> dict[str, Any]:
+        self.trace_store.flush(raise_on_error=False)
         points = []
         for trace in self.trace_store.list_rounds():
             points.append(
@@ -8621,6 +11434,7 @@ class RuntimeController:
         allowed_pairs = {
             ("context", "memory", "context_route"),
             ("memory", "action", "memory_prior"),
+            ("memory", "action", "organic_memory"),
             ("action", "token", "render_plan"),
         }
         pair_hits: dict[str, int] = {"->".join(pair): 0 for pair in allowed_pairs}
@@ -8845,15 +11659,52 @@ class RuntimeController:
                 consistency_scores.append(float(online_prior.get("self_consistency_score", 0.0) or 0.0))
                 volatility_signals.append(float(online_prior.get("volatility_signal", 0.0) or 0.0))
             conflict_summary = self._conflict_arbitration_summary(trace)
+            raw_conflict = dict(trace.get("conflict_arbitration", {}) or {})
+            latest_passes = list(raw_conflict.get("passes", []) or [])
+            latest_resolution = dict(latest_passes[-1].get("resolution", {})) if latest_passes else {}
             blocked_actions = {
                 str(action)
                 for action in list(conflict_summary.get("hard_masked_targets", []) or [])
                 if str(action)
             }
+            blocked_actions.update(
+                str(action)
+                for action in list(raw_conflict.get("blocked_actions", []) or [])
+                if str(action)
+            )
+            blocked_actions.update(
+                str(action)
+                for action in list(raw_conflict.get("circuit_breaker", {}).get("blocked_actions", []) or [])
+                if str(action)
+            )
+            blocked_actions.update(
+                str(action)
+                for action in list(latest_resolution.get("blocked_actions", []) or [])
+                if str(action)
+            )
+            action_layer = self._action_layer_from_trace(trace)
+            conflict_rows = [
+                row
+                for row in list(action_layer.get("contribution_audit", []) or [])
+                if isinstance(row, dict) and row.get("module_name") == "ConflictMonitorAgent"
+            ]
+            for row in conflict_rows:
+                blocked_actions.update(
+                    str(action)
+                    for action in list(row.get("hard_masked_targets", []) or [])
+                    if str(action)
+                )
+                blocked_actions.update(
+                    str(action)
+                    for action, value in dict(row.get("delta_projected", {}) or {}).items()
+                    if str(action) and float(value) < 0.0
+                )
             if blocked_actions:
                 blocked_action_rounds += 1
                 p_final = self._candidate_distribution_from_trace(trace)
-                if all(p_final.get(action, 0.0) <= 0.0001 for action in blocked_actions):
+                winner_target = str(action_layer.get("winner_target") or trace.get("sampled_action") or "")
+                sampled_action = str(trace.get("sampled_action") or "")
+                if all(action != winner_target and action != sampled_action for action in blocked_actions):
                     conflict_subordinated_rounds += 1
             authenticity = dict(trace.get("authenticity", {}) or {})
             candidate_penalties = {

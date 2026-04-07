@@ -22,7 +22,7 @@ from nalr.runtime.controller import RuntimeController
 from nalr.schemas.models import RoundEvent, to_dict
 
 
-app = typer.Typer(help="NeuroAnthropic Living Runtime CLI")
+app = typer.Typer(help="NeuroAnthropic Living Runtime CLI (TLH v1.2)")
 state_app = typer.Typer()
 body_app = typer.Typer()
 mood_app = typer.Typer()

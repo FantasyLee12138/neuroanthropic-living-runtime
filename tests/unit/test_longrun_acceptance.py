@@ -246,3 +246,92 @@ def test_longrun_prior_producer_passes_canonical_kwargs(monkeypatch):
     assert captured["raw_signal"]
     assert captured["modulated_delta"] == captured["raw_signal"]
     assert captured["projection_reason"] == "long-run prior projected from longitudinal continuity summary"
+
+
+def test_longrun_online_projection_prefers_latest_round_projection_over_full_metrics_scan():
+    class DummyTraceStore:
+        def list_rounds(self):
+            return [
+                {
+                    "long_run_projection": {"self_consistency_score": 0.73},
+                    "authenticity": {"self_grounding_score": 0.11},
+                }
+            ]
+
+    analyzer = LongRunAnalyzer(DummyTraceStore(), lambda: {}, ("plan", "respond", "clarify", "wander", "rest", "recall"))
+    analyzer.metrics_summary = lambda: (_ for _ in ()).throw(AssertionError("metrics_summary should not be called when latest round exists"))
+
+    projection = analyzer.build_online_projection(
+        round_id=2,
+        slow_variables={"affect_residue": 0.02, "relationship_drift": 0.01, "resource_scarcity": 0.0, "memory_activation": 0.0},
+        shaping_events=[],
+    )
+
+    assert projection["self_consistency_score"] == 0.73
+
+
+def test_longrun_projection_surfaces_anchor_summary_after_real_rounds(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.body_energy = 0.14
+    state.fatigue = 0.82
+    state.memory_fragments = 0.74
+    state.self_continuity = 0.38
+    state.meaning_strength = 0.41
+    state.subjective_state.spontaneous = 0.69
+    state.subjective_state.reject_all = 0.44
+    state.subjective_state.meaning_made = ["keep continuity through inward integration"]
+    controller._save_state(state, sync=True)
+
+    for cue in ("pause", "integrate", "continue"):
+        controller.tick(
+            RoundEvent(
+                source="user",
+                content=f"Please {cue} and keep continuity stable.",
+                target="user",
+                cue=cue,
+                valence=0.04,
+            ),
+            scenario="task",
+            mode="interactive",
+        )
+
+    trace = controller.trace_round("latest")
+    projection = trace["long_run_projection"]
+
+    assert "personality_anchor_summary" in projection
+    assert projection["personality_anchor_summary"]["axis_baseline"]
+    assert projection["personality_anchor_summary"]["driver_signature"]
+    assert projection["personality_anchor_summary"]["anchor_alignment"] >= 0.0
+
+
+def test_personality_anchor_accumulates_recent_driver_bias(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.body_energy = 0.12
+    state.fatigue = 0.86
+    state.memory_fragments = 0.8
+    state.self_continuity = 0.34
+    state.meaning_strength = 0.35
+    state.subjective_state.spontaneous = 0.76
+    state.subjective_state.reject_all = 0.63
+    state.subjective_state.meaning_made = ["absorb first, answer later"]
+    controller._save_state(state, sync=True)
+
+    for cue in ("quiet", "pause", "absorb", "settle"):
+        controller.tick(
+            RoundEvent(
+                source="user",
+                content=f"Stay with the {cue} pull and absorb before replying.",
+                target="user",
+                cue=cue,
+            ),
+            scenario="chat",
+            mode="interactive",
+        )
+
+    updated = controller.load_runtime_state()
+
+    assert updated.personality_anchor.action_bias
+    assert any(action in updated.personality_anchor.action_bias for action in ("absorb", "rest", "nothing"))
+    assert updated.personality_anchor.anchor_signature

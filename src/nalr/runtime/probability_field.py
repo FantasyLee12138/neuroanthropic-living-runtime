@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import math
 from typing import Iterable
 
@@ -13,6 +14,7 @@ from nalr.schemas.models import (
     ProbabilisticContribution,
     TokenFieldState,
 )
+from nalr.runtime.tlh_vectors import AXES, cosine_similarity, normalize_axis_map, remap_similarity, signed_map, unsigned_from_signed
 
 
 def _clip(value: float, low: float, high: float) -> float:
@@ -78,6 +80,122 @@ def _top_peaks(
     return rows[:limit]
 
 
+def _normalize_signed_vector(values: dict[str, float]) -> dict[str, float]:
+    norm = math.sqrt(sum(float(values.get(axis, 0.0) or 0.0) ** 2 for axis in AXES))
+    if norm <= 1e-9:
+        return {axis: 0.0 for axis in AXES}
+    return {axis: round(float(values.get(axis, 0.0) or 0.0) / norm, 6) for axis in AXES}
+
+
+def _stable_rank_key(action: str, *, seed: int) -> float:
+    digest = hashlib.sha1(f"{seed}:{action}".encode("utf-8")).hexdigest()
+    return int(digest[:8], 16) / 0xFFFFFFFF
+
+
+def compute_tlh_vector_collapse(
+    *,
+    v_main: dict[str, float],
+    v_mod: dict[str, float],
+    v_anchor: dict[str, float],
+    action_vectors: dict[str, dict[str, float]],
+    modulation_directions: dict[str, dict[str, float]],
+    action_bias: dict[str, float] | None = None,
+    weight: float = 1.0,
+    tie_break_seed: int = 0,
+    tie_break_epsilon: float = 1e-4,
+) -> dict[str, object]:
+    v_main_norm = normalize_axis_map(v_main)
+    v_anchor_norm = normalize_axis_map(v_anchor)
+    v_mod_norm = {
+        str(key): round(_clip(float(value or 0.0), 0.0, 1.0), 6)
+        for key, value in dict(v_mod or {}).items()
+    }
+    action_vectors_norm = {
+        str(action): normalize_axis_map(vector)
+        for action, vector in dict(action_vectors or {}).items()
+    }
+    modulation_vectors = {
+        str(name): normalize_axis_map(vector)
+        for name, vector in dict(modulation_directions or {}).items()
+    }
+
+    subject_signed = {
+        axis: round(float(signed_map(v_main_norm)[axis]) * 0.64 + float(signed_map(v_anchor_norm)[axis]) * 0.22, 6)
+        for axis in AXES
+    }
+    modulation_weights = {
+        "memory_fragments": 0.14,
+        "spontaneous": 0.08,
+        "reject_all": 0.34,
+        "emergent_growth": 0.12,
+    }
+    for name, base_weight in modulation_weights.items():
+        scale = float(v_mod_norm.get(name, 0.0) or 0.0)
+        if scale <= 0.0:
+            continue
+        direction = signed_map(modulation_vectors.get(name))
+        for axis in AXES:
+            subject_signed[axis] = round(
+                float(subject_signed[axis]) + float(direction[axis]) * scale * base_weight,
+                6,
+            )
+    subject_signed = _normalize_signed_vector(subject_signed)
+    subject_vector = unsigned_from_signed(subject_signed)
+
+    bias_map = {str(key): round(float(value or 0.0), 6) for key, value in dict(action_bias or {}).items()}
+    match_scores: dict[str, float] = {}
+    action_regions: dict[str, dict[str, float | dict[str, float]]] = {}
+    for action, vector in action_vectors_norm.items():
+        similarity = cosine_similarity(subject_vector, vector)
+        bias = float(bias_map.get(action, 0.0) or 0.0)
+        adjusted = round(_clip(similarity + bias * 0.12, -1.0, 1.0), 6)
+        match_scores[action] = adjusted
+        action_regions[action] = {
+            "vector": dict(vector),
+            "cosine_similarity": adjusted,
+            "match_strength": remap_similarity(adjusted),
+        }
+
+    mean_match = sum(float(value) for value in match_scores.values()) / max(len(match_scores), 1)
+    collapse_scale = 0.62 + max(float(weight), 0.0) * 0.12
+    modulated_delta = {
+        action: round((float(score) - mean_match) * collapse_scale, 6)
+        for action, score in match_scores.items()
+    }
+
+    ranked_actions = sorted(
+        match_scores,
+        key=lambda action: (float(match_scores[action]), -_stable_rank_key(action, seed=tie_break_seed), action),
+        reverse=True,
+    )
+    selected_action = ranked_actions[0] if ranked_actions else ""
+    if len(ranked_actions) >= 2:
+        top_action = ranked_actions[0]
+        next_action = ranked_actions[1]
+        if abs(float(match_scores[top_action]) - float(match_scores[next_action])) <= tie_break_epsilon:
+            selected_action = max(
+                (top_action, next_action),
+                key=lambda action: _stable_rank_key(action, seed=tie_break_seed),
+            )
+
+    return {
+        "v_main": v_main_norm,
+        "v_mod": v_mod_norm,
+        "v_anchor": v_anchor_norm,
+        "normalized_axes": dict(v_main_norm),
+        "subject_vector": subject_vector,
+        "coupled_axes": dict(subject_vector),
+        "random_point": dict(subject_vector),
+        "action_vectors": action_vectors_norm,
+        "modulation_directions": modulation_vectors,
+        "match_scores": match_scores,
+        "action_regions": action_regions,
+        "selected_action": selected_action,
+        "collapse_delta": modulated_delta,
+        "modulated_delta": dict(modulated_delta),
+    }
+
+
 class DeltaNormalizationLayer:
     def normalize(self, delta: dict[str, float], spec: EnergyProjectionSpec) -> tuple[dict[str, float], DeltaStatistics]:
         stats = _stats(delta)
@@ -103,6 +221,7 @@ class ProbabilityFieldIntegrator:
     ALLOWED_COUPLINGS = {
         ("context", "memory", "context_route"),
         ("memory", "action", "memory_prior"),
+        ("memory", "action", "organic_memory"),
         ("action", "token", "render_plan"),
     }
 
@@ -304,6 +423,67 @@ class ProbabilityFieldIntegrator:
                 if not cue_strengths:
                     continue
                 propagated["recall"] = round(propagated.get("recall", 0.0) + max(cue_strengths) * 0.2, 6)
+            elif (
+                coupling.source_layer == "memory"
+                and coupling.target_layer == "action"
+                and coupling.carrier_signal == "organic_memory"
+            ):
+                memory_state = source_states.get("memory")
+                if memory_state is None:
+                    continue
+                memory_energy = dict(memory_state.final_energy or {})
+                fatigue = max(0.0, float(memory_energy.get("state:fatigue", 0.0) or 0.0))
+                fragments = max(0.0, float(memory_energy.get("state:fragments", 0.0) or 0.0))
+                continuity_drop = max(0.0, float(memory_energy.get("state:continuity_drop", 0.0) or 0.0))
+                meaning_strength = max(0.0, float(memory_energy.get("state:meaning_strength", 0.0) or 0.0))
+                reject_all = max(0.0, float(memory_energy.get("state:reject_all", 0.0) or 0.0))
+                spontaneous = max(0.0, float(memory_energy.get("state:spontaneous", 0.0) or 0.0))
+                felt_density = sum(
+                    max(0.0, float(value))
+                    for key, value in memory_energy.items()
+                    if str(key).startswith("felt:")
+                )
+                meaning_density = sum(
+                    max(0.0, float(value))
+                    for key, value in memory_energy.items()
+                    if str(key).startswith("meaning:")
+                )
+                propagated["absorb"] = round(
+                    propagated.get("absorb", 0.0) + fragments * 0.16 + spontaneous * 0.08 + meaning_density * 0.12,
+                    6,
+                )
+                propagated["rest"] = round(
+                    propagated.get("rest", 0.0) + fatigue * 0.14 + continuity_drop * 0.05,
+                    6,
+                )
+                propagated["nothing"] = round(
+                    propagated.get("nothing", 0.0) + reject_all * 0.14 + felt_density * 0.06 + continuity_drop * 0.04,
+                    6,
+                )
+                propagated["wander"] = round(
+                    propagated.get("wander", 0.0) + spontaneous * 0.08 + fragments * 0.05,
+                    6,
+                )
+                propagated["die"] = round(
+                    propagated.get("die", 0.0) + continuity_drop * 0.08 + max(0.0, 0.2 - meaning_strength) * 0.05,
+                    6,
+                )
+                propagated["respond"] = round(
+                    propagated.get("respond", 0.0) + max(0.0, meaning_strength - reject_all) * 0.05,
+                    6,
+                )
+                propagated["plan"] = round(
+                    propagated.get("plan", 0.0) - fatigue * 0.05 - continuity_drop * 0.03,
+                    6,
+                )
+                propagated["connect"] = round(
+                    propagated.get("connect", 0.0) - reject_all * 0.05,
+                    6,
+                )
+                propagated["clarify"] = round(
+                    propagated.get("clarify", 0.0) - reject_all * 0.03,
+                    6,
+                )
             elif (
                 coupling.source_layer == "action"
                 and coupling.target_layer == "token"

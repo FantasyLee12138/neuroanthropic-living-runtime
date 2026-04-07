@@ -365,20 +365,40 @@ class DesireAgent(BaseAgent):
         score = 0.0
         if any(token in content for token in {"quick", "easy", "coffee", "break", "rest"}):
             score = 0.45
+        if hasattr(state, "desire_state"):
+            score = max(score, float(getattr(state.desire_state, "drive_tension", 0.0) or 0.0) * 0.6)
         return {"score": score}
 
     def compute_effort_avoidance(self, event: RoundEvent, state: RuntimeState, scenario: dict, context: dict) -> ProbabilisticContribution:
         content = event.content.lower()
+        latent = dict(getattr(getattr(state, "desire_state", None), "latent_drives", {}) or {})
+        dominant = str(getattr(getattr(state, "desire_state", None), "dominant_drive", "") or "")
         prefs = {}
         if any(token in content for token in {"quick", "easy", "coffee", "break", "rest"}):
             prefs["rest"] = 0.12 + (1.0 - state.body_energy) * 0.18
             prefs["respond"] = 0.06
+        comfort = float(latent.get("comfort", 0.0) or 0.0)
+        meaning = float(latent.get("meaning", 0.0) or 0.0)
+        relation = float(latent.get("relation", 0.0) or 0.0)
+        exploration = float(latent.get("exploration", 0.0) or 0.0)
+        completion = float(latent.get("completion", 0.0) or 0.0)
+        prefs["rest"] = max(prefs.get("rest", 0.0), 0.04 + comfort * 0.18)
+        prefs["absorb"] = max(prefs.get("absorb", 0.0), 0.02 + meaning * 0.08 + exploration * 0.05)
+        prefs["wander"] = max(prefs.get("wander", 0.0), 0.01 + exploration * 0.08)
+        prefs["connect"] = max(prefs.get("connect", 0.0), relation * 0.06)
+        prefs["plan"] = max(prefs.get("plan", 0.0), completion * 0.04)
+        if dominant == "comfort":
+            prefs["plan"] = min(prefs.get("plan", 0.0), 0.03)
+        if dominant == "exploration":
+            prefs["wander"] = max(prefs.get("wander", 0.0), 0.06 + exploration * 0.08)
+        if dominant == "meaning":
+            prefs["absorb"] = max(prefs.get("absorb", 0.0), 0.05 + meaning * 0.1)
         return _action_contribution(
             self.name,
             "desire",
             prefs,
             confidence=0.54,
-            reason="comfort seeking",
+            reason=f"latent drive={dominant or 'comfort'}",
             projection_reason="desire bias projected from desire head",
             applied_at_stage="desire_pressure",
             native_operator="desire_bias",
@@ -934,6 +954,9 @@ class HabitAgent(BaseAgent):
         if habit_strength > 0:
             prefs["respond"] = 0.06 + habit_strength * scenario.get("habit_weight", 0.1)
             prefs["recall"] = 0.04 + habit_strength * 0.12
+        elif context.get("cue"):
+            prefs["respond"] = 0.02
+            prefs["recall"] = 0.01
         return _action_contribution(
             self.name,
             "habit",
@@ -1178,6 +1201,8 @@ class PerspectiveModel(BaseAgent):
         prefs = {}
         if scenario.get("relationship_weight", 0.0) >= 0.22 and event.target:
             prefs["clarify"] = 0.05 + context["closeness"] * 0.08
+        elif event.target:
+            prefs["clarify"] = 0.015 + context.get("closeness", 0.5) * 0.02
         return _action_contribution(
             self.name,
             "perspective",
@@ -1388,14 +1413,10 @@ class ConflictMonitorAgent(BaseAgent):
             return to_dict(ConflictResolution(flag=False, reason="below_conflict_threshold"))
 
         signals = {name: float(assessment.get("priority_signals", {}).get(name, 0.0)) for name in PRIORITY_ORDER}
-        winning_priority = None
-        for bucket in PRIORITY_ORDER:
-            threshold = 0.48 if bucket in {"body_safety", "budget_overload", "relation_boundary"} else 0.42
-            if signals.get(bucket, 0.0) >= threshold:
-                winning_priority = bucket
-                break
-        if winning_priority is None:
-            winning_priority = max(PRIORITY_ORDER, key=lambda name: signals.get(name, 0.0))
+        winning_priority = max(
+            PRIORITY_ORDER,
+            key=lambda name: (signals.get(name, 0.0), 0 if name in {"body_safety", "budget_overload", "relation_boundary"} else 1),
+        )
 
         blocked_actions = set(DEFAULT_BLOCKS.get(winning_priority, set()))
         if action_view is not None:
@@ -1610,9 +1631,12 @@ class ConflictMonitorAgent(BaseAgent):
         passes = list(conflict_state.get("passes", []) or [])
         latest_resolution = dict(passes[-1].get("resolution", {})) if passes else {}
         action_scales = dict(latest_resolution.get("action_scales", {}) or {})
-        blocked_actions = set(latest_resolution.get("blocked_actions", []) or [])
         circuit_breaker = dict(conflict_state.get("circuit_breaker", {}) or {})
-        blocked_actions.update(circuit_breaker.get("blocked_actions", []) or [])
+        soft_blocked_actions = set(latest_resolution.get("blocked_actions", []) or [])
+        hard_blocked_actions = set(circuit_breaker.get("blocked_actions", []) or [])
+        for action, scale in action_scales.items():
+            if float(scale or 0.0) <= 0.25:
+                hard_blocked_actions.add(str(action))
 
         modulated_delta: dict[str, float] = {}
         for action, scale in action_scales.items():
@@ -1621,7 +1645,14 @@ class ConflictMonitorAgent(BaseAgent):
                 continue
             modulated_delta[action] = round(scale_value - 1.0, 6)
 
-        if not modulated_delta and not blocked_actions and score > 0.0 and winning_priority in DEFAULT_BLOCKS:
+        if score > 0.0:
+            soft_penalty_strength = min(0.85, score * max(0.25, priority_signals.get(winning_priority, 0.0) or 0.25))
+            for action in sorted(soft_blocked_actions):
+                raw_mass = float(distribution.get(action, 0.0) or 0.0)
+                penalty = -soft_penalty_strength * (0.25 + raw_mass)
+                modulated_delta[action] = round(min(modulated_delta.get(action, 0.0), penalty), 6)
+
+        if not modulated_delta and not soft_blocked_actions and not hard_blocked_actions and score > 0.0 and winning_priority in DEFAULT_BLOCKS:
             soft_penalty_strength = min(0.85, score * max(0.25, priority_signals.get(winning_priority, 0.0)))
             for action in DEFAULT_BLOCKS[winning_priority]:
                 raw_mass = float(distribution.get(action, 0.0) or 0.0)
@@ -1646,7 +1677,7 @@ class ConflictMonitorAgent(BaseAgent):
                     break
                 gate_scale = float(gate.get(action, 1.0) or 1.0)
                 action_scale = float(action_scales.get(action, 1.0) or 1.0)
-                blocked = action in blocked_actions
+                blocked = action in hard_blocked_actions
                 adjusted_mass = 0.0 if blocked else max(0.0, raw_mass * max(action_scale, 0.0) * gate_scale)
                 candidate_rows.append((action, raw_mass, adjusted_mass, blocked))
                 if len(candidate_rows) >= 4:
@@ -1706,7 +1737,7 @@ class ConflictMonitorAgent(BaseAgent):
             target_space="action",
             raw_signal=dict(modulated_delta),
             modulated_delta=modulated_delta,
-            hard_mask={action: True for action in sorted(blocked_actions)},
+            hard_mask={action: True for action in sorted(hard_blocked_actions)},
             posterior=winner_peak_posterior,
             peak_clusters=peak_clusters,
             compromise_template_prior=compromise_template_prior,

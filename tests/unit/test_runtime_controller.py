@@ -10,14 +10,19 @@ import pytest
 from nalr.agents.modules import ValueAgent
 from nalr.providers.router import ModelResponse
 from nalr.runtime.controller import RuntimeController
+from nalr.runtime.entropy import QuantumEntropyUnavailableError
 from nalr.schemas.models import (
+    ActionCandidate,
+    EndogenousTickTrigger,
     ProbabilityFieldSnapshot,
     ProbabilityLayerState,
     ProbabilisticContribution,
     QuantumEntropyRef,
     RenderPlan,
     RoundEvent,
+    StochasticState,
     TokenFieldState,
+    to_dict,
 )
 from nalr.trace.store import ROUND_CANONICAL_SCHEMA
 from nalr.skills.registry import build_skill_registry
@@ -27,17 +32,13 @@ from nalr.trace.store import TraceStore
 CONFIG_ROOT = Path(__file__).resolve().parents[2] / "config"
 
 
-def test_tick_degrades_when_entropy_provider_unavailable_and_config_allows_fallback(tmp_path, monkeypatch):
+def test_tick_blocks_when_entropy_provider_unavailable_even_if_hard_block_disabled(tmp_path, monkeypatch):
     config_root = tmp_path / "config"
     shutil.copytree(CONFIG_ROOT, config_root)
     (config_root / "entropy.yaml").write_text(
         """entropy:
-  provider: anu_qrng
-  endpoint: "https://broken-qrng.test/api"
-  timeout_s: 1.7
+  provider: macos_os_urandom
   prefetch_bytes: 96
-  min_batch_bytes: 32
-  max_batch_bytes: 1024
   hard_block_on_unavailable: false
 """,
         encoding="utf-8",
@@ -51,27 +52,24 @@ def test_tick_degrades_when_entropy_provider_unavailable_and_config_allows_fallb
 
     monkeypatch.setattr(controller.entropy_pool.provider, "fetch_batch", broken_fetch_batch)
 
-    result = controller.tick(
-        RoundEvent(
-            source="user",
-            content="你好，今天状态怎么样？",
-            target="user",
-            cue="状态",
-        ),
-        scenario="chat",
-        mode="interactive",
-    )
+    with pytest.raises(QuantumEntropyUnavailableError):
+        controller.tick(
+            RoundEvent(
+                source="user",
+                content="你好，今天状态怎么样？",
+                target="user",
+                cue="状态",
+            ),
+            scenario="chat",
+            mode="interactive",
+        )
 
     assert controller.entropy_pool.prefetch_bytes == 96
-    assert controller.entropy_pool.provider.endpoint == "https://broken-qrng.test/api"
-    assert controller.entropy_pool.provider.timeout_s == 1.7
-    assert result.trace.stochastic_state["entropy_ref"]["source"] == "deterministic_fallback"
-    assert result.trace.stochastic_state["entropy_ref"]["degraded"] is True
-    assert result.trace.stochastic_state["entropy_ref"]["health_state"] == "degraded"
+    assert controller.entropy_pool.provider.endpoint == "file:///dev/urandom"
     state = controller.load_runtime_state()
-    assert state.entropy_health_state["state"] == "degraded"
-    assert state.entropy_health_state["last_failure"]["failure_class"] == "provider_fetch_failed"
-    assert state.last_entropy_failure == {}
+    assert state.entropy_health_state["state"] == "blocked"
+    assert state.entropy_health_state["last_failure"]["failure_class"] == "os_urandom_failed"
+    assert state.last_entropy_failure["failure_class"] == "os_urandom_failed"
 
 
 def test_tick_records_trace_and_top_drivers(tmp_path):
@@ -93,6 +91,38 @@ def test_tick_records_trace_and_top_drivers(tmp_path):
     assert result.sampled_action.name in {"respond", "plan", "recall", "rest", "clarify"}
     assert len(result.trace.top_drivers) == 3
     assert any(item.agent_name == "PFCAgent" for item in result.trace.contributions)
+
+
+def test_tick_uses_macos_system_entropy_when_pytest_seed_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("NALR_DISABLE_TEST_QRNG_SEED", "1")
+    monkeypatch.setattr("os.urandom", lambda byte_count: bytes([128]) * byte_count)
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    result = controller.tick(
+        RoundEvent(
+            source="user",
+            content="Please help me plan my day and remember breakfast.",
+            target="user",
+            valence=0.2,
+            energy_delta=-0.1,
+        ),
+        scenario="task",
+        mode="interactive",
+    )
+
+    assert result.trace.stochastic_state["entropy_ref"]["source"] == "macos_os_urandom"
+    assert result.trace.stochastic_state["entropy_ref"]["endpoint"] == "file:///dev/urandom"
+    refs = result.trace.stochastic_state["entropy_refs_by_node"]
+    assert refs
+    assert all(ref["source"] == "macos_os_urandom" for ref in refs.values())
+    assert all(ref["failure_class"] == "" for ref in refs.values())
+
+
+def test_die_action_labels_surface_life_ending_semantics(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    assert controller._action_phrase("die") == "准备自主结束生命"
+    assert controller._focus_label("die") == "正在转向自主结束生命"
 
 
 def test_model_status_surfaces_route_health_and_recent_model_activity(tmp_path):
@@ -433,7 +463,6 @@ def test_acceptance_report_surfaces_bypass_and_parallel_evidence(tmp_path, monke
     assert not report["bypass_detection"]["legacy_bridge_residues"]
     assert "salience_value_prefetch" in report["parallel_evidence"]["observed_groups"]
     assert "intent_prefetch" in report["parallel_evidence"]["observed_groups"]
-    assert "action_bias_prefetch" in report["parallel_evidence"]["observed_groups"]
     assert report["parallel_evidence"]["groups_with_overlap"]
     assert report["parallel_evidence"]["true_parallel_group_rate"] > 0.0
     assert report["scale_consistency"]["rounds_evaluated"] == 1
@@ -717,6 +746,22 @@ def test_trace_round_reads_canonical_payload_after_legacy_history_rewrite(tmp_pa
     assert "distribution_state" not in trace_payload
 
 
+def test_resolve_round_ref_accepts_latest_alias(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="帮我计划今晚。",
+            target="user",
+            cue="今晚",
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    assert controller.resolve_round_ref("latest") == 1
+
+
 def test_command_safe_mode_and_checkpoint_emit_command_trace(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
 
@@ -759,6 +804,7 @@ def test_state_and_trace_payloads_surface_trace_storage_status(tmp_path):
     assert trace_payload["token_state"]["step_index"] == 1
     assert trace_payload["cross_layer_coupling_verdict"]["legal"] is True
     assert trace_payload["cross_layer_coupling_verdict"]["observed_pairs"]
+    assert "memory->action->organic_memory" in trace_payload["cross_layer_coupling_verdict"]["observed_pairs"]
     assert why_payload["storage"]["read_source"] == "parquet"
     assert why_payload["token_state"]["step_index"] == 1
     assert why_payload["cross_layer_coupling_verdict"]["legal"] is True
@@ -1343,12 +1389,12 @@ def test_renderer_integrity_reads_field_native_gate_not_action_bookkeeping_snaps
 
     output_gate = controller.agent_map["OutputGate"]
     original_run_skill = output_gate.run_skill
-    mirror_state = {"output_gate_seen": False, "corrupted": False, "gated_action": None}
+    mirror_state = {"output_gate_seen": False, "corrupted": False, "gated_actions": []}
 
     def patched_run_skill(skill_name, *args):
         if skill_name == "apply_output_gate":
             mirror_state["output_gate_seen"] = True
-            mirror_state["gated_action"] = args[0]
+            mirror_state["gated_actions"].append(args[0])
             return {"gate": 0.95}
         return original_run_skill(skill_name, *args)
 
@@ -1357,7 +1403,7 @@ def test_renderer_integrity_reads_field_native_gate_not_action_bookkeeping_snaps
     def patched_finalize(action_bookkeeping, action_layer, *, finalize_stage):
         original_finalize(action_bookkeeping, action_layer, finalize_stage=finalize_stage)
         if mirror_state["output_gate_seen"] and finalize_stage == "final" and not mirror_state["corrupted"]:
-            action_bookkeeping.gate[mirror_state["gated_action"]] = 0.99
+            action_bookkeeping.gate[mirror_state["gated_actions"][-1]] = 0.99
             mirror_state["corrupted"] = True
 
     monkeypatch.setattr(output_gate, "run_skill", patched_run_skill)
@@ -1387,8 +1433,11 @@ def test_renderer_integrity_reads_field_native_gate_not_action_bookkeeping_snaps
     sampled_action = result.sampled_action.name
 
     assert mirror_state["corrupted"] is True
-    assert mirror_state["gated_action"] == sampled_action
-    assert result.trace.render_plan["safety_constraints"]["gate"] == pytest.approx(0.95)
+    assert sampled_action in mirror_state["gated_actions"]
+    assert result.trace.render_plan["safety_constraints"]["gate"] == pytest.approx(
+        result.trace.renderer_decision_integrity["gate_at_render"]
+    )
+    assert result.trace.renderer_decision_integrity["gate_at_render"] != pytest.approx(0.99)
     assert result.trace.renderer_decision_integrity["gate_at_render"] == pytest.approx(0.95)
 
 
@@ -1434,6 +1483,75 @@ def test_conflict_controller_receives_field_native_action_truth_from_snapshot(tm
         )
 
 
+def test_trace_preserves_field_peak_when_terminal_sample_differs(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    monkeypatch.setattr(
+        controller,
+        "_apply_stochastic_layer",
+        lambda deterministic, action_bookkeeping, control_ledger, state, event, scenario_cfg, relation_state, conflict_score, round_seed, action_energy: (
+            dict(deterministic),
+            StochasticState(
+                emo_channel="neutral",
+                xi_emo=0.0,
+                xi_mood=0.0,
+                lambda_noise=0.0,
+                r_intensity=0.0,
+                noise_guard_triggered=False,
+                round_seed=round_seed,
+                base_stochastic_distribution=dict(deterministic),
+                q_noise_distribution=dict(deterministic),
+                q_noise_pre_guard_summary=dict(deterministic),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        controller.authenticity_policy,
+        "apply_sampling_penalties",
+        lambda distribution, **kwargs: (dict(distribution), {}, 0.0),
+    )
+    monkeypatch.setattr(
+        controller.vitality_engine,
+        "build_vitality_modulation_contribution",
+        lambda snapshot: ProbabilisticContribution(
+            module_name="VitalityEngine",
+            module_type="vitality",
+            level="action",
+            target_space="action",
+        ),
+    )
+
+    def force_non_peak(distribution, sample_value=0.5):
+        ordered = sorted(distribution.items(), key=lambda item: item[1], reverse=True)
+        top_action = ordered[0][0]
+        fallback_action = ordered[1][0] if len(ordered) > 1 else top_action
+        return ActionCandidate(
+            name=fallback_action,
+            probability=float(distribution.get(fallback_action, 0.0)),
+            rationale=f"forced_non_peak:{sample_value}",
+        )
+
+    monkeypatch.setattr(controller, "_sample_action_from_distribution", force_non_peak)
+
+    result = controller.tick(
+        RoundEvent(
+            source="user",
+            content="Please help me plan carefully and keep the response grounded.",
+            target="user",
+            cue="plan",
+            valence=0.06,
+        ),
+        scenario="task",
+        mode="interactive",
+    )
+
+    action_layer = result.trace.probability_field["action"]
+    field_peak = max(action_layer["winner_posterior"], key=action_layer["winner_posterior"].get)
+
+    assert result.sampled_action.name != field_peak
+    assert action_layer["winner_target"] == field_peak
+
+
 def test_tick_only_finalizes_action_bookkeeping_once_before_trace(tmp_path, monkeypatch):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     finalize_stages: list[str] = []
@@ -1460,6 +1578,44 @@ def test_tick_only_finalizes_action_bookkeeping_once_before_trace(tmp_path, monk
     assert result.trace.probability_field["action"]["winner_posterior"]
     assert finalize_stages == ["final"]
     assert not hasattr(result.trace, "distribution_state")
+
+
+def test_dmn_reads_frozen_snapshot_instead_of_live_emotion_patch(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.mood = 0.73
+    controller._save_state(state, sync=True)
+
+    observed: dict[str, float] = {}
+    emotion_agent = controller.agent_map["EmotionAgent"]
+    dmn_agent = controller.agent_map["DMNAgent"]
+    original_dmn = dmn_agent.build_direct_action_contribution
+
+    monkeypatch.setattr(
+        emotion_agent,
+        "update_affect_state",
+        lambda event, state, scenario, context: {"state_patch": {"mood": 0.05}},
+    )
+
+    def capture_dmn(event, state, scenario, context):
+        observed["mood"] = float(state.mood)
+        return original_dmn(event, state, scenario, context)
+
+    monkeypatch.setattr(dmn_agent, "build_direct_action_contribution", capture_dmn)
+
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="Please help me plan, but I may drift.",
+            target="user",
+            cue="drift",
+            valence=0.04,
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    assert observed["mood"] == pytest.approx(0.73)
 
 
 def test_main_tick_no_longer_routes_direct_action_contributions_through_bundle_bridge(tmp_path, monkeypatch):
@@ -1871,8 +2027,23 @@ def test_longrun_online_prior_does_not_amplify_conflict_blocked_actions(tmp_path
 
     high_final = high_result.trace.probability_field["action"]["winner_posterior"]
     low_final = low_result.trace.probability_field["action"]["winner_posterior"]
+    high_conflict_rows = [
+        row
+        for row in high_result.trace.probability_field["action"]["contribution_audit"]
+        if row["module_name"] == "ConflictMonitorAgent"
+    ]
+    low_conflict_rows = [
+        row
+        for row in low_result.trace.probability_field["action"]["contribution_audit"]
+        if row["module_name"] == "ConflictMonitorAgent"
+    ]
 
-    assert high_final.get("plan", 0.0) <= low_final.get("plan", 0.0)
+    assert high_conflict_rows and high_conflict_rows[0]["delta_projected"].get("plan", 0.0) < 0.0
+    assert low_conflict_rows and low_conflict_rows[0]["delta_projected"].get("plan", 0.0) < 0.0
+    assert high_result.trace.probability_field["action"]["winner_target"] != "plan"
+    assert low_result.trace.probability_field["action"]["winner_target"] != "plan"
+    assert high_final.get("plan", 0.0) < high_final.get("recall", 1.0)
+    assert low_final.get("plan", 0.0) < low_final.get("recall", 1.0)
     assert high_result.sampled_action.name != "plan"
     assert low_result.sampled_action.name != "plan"
 
@@ -2047,7 +2218,7 @@ def test_run_endogenous_tick_builds_stable_micro_intent_without_external_input(t
     assert snapshots[-1]["cause_type"] == "endogenous"
     assert snapshots[-1]["boundary_action"] == "allow_internal"
     assert snapshots[-1]["micro_intent"]["stability"] >= 2
-    assert state.endogenous_state["current_intent"] is not None
+    assert state.endogenous_state.current_intent is not None
     assert state.endogenous_scheduler_state.last_endogenous_tick_at is not None
     assert state.motivation_pool_state is not None
 
@@ -2070,6 +2241,75 @@ def test_why_motivation_and_replay_motivation_surface_endogenous_trace_fields(tm
     assert "endogenous_tick_reason" in why_payload
     assert "motivation_feedback" in replay_payload
     assert "endogenous_policy_shift" in replay_payload
+
+
+def test_run_endogenous_tick_is_atomic_when_mainline_tick_fails(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(source="user", content="记住茶和没说完的话。", target="user", cue="tea", valence=-0.2),
+        scenario="companion",
+        mode="interactive",
+    )
+    before_state = controller.load_runtime_state()
+
+    def fail_tick(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(controller, "tick", fail_tick)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        controller.run_endogenous_tick(trigger="idle")
+
+    after_state = controller.load_runtime_state()
+
+    assert after_state.round_count == before_state.round_count
+    assert to_dict(after_state.endogenous_scheduler_state) == to_dict(before_state.endogenous_scheduler_state)
+    assert to_dict(after_state.endogenous_state) == to_dict(before_state.endogenous_state)
+
+
+def test_endogenous_trace_snapshot_matches_final_persisted_state_and_micro_intent(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(source="user", content="记住茶和刚才没说完的话。", target="user", cue="tea", valence=-0.2),
+        scenario="companion",
+        mode="interactive",
+    )
+
+    endogenous = controller.run_endogenous_tick(trigger="idle")
+    state = controller.load_runtime_state()
+    trace = controller.trace_round(endogenous["round_id"])
+
+    assert trace["state_snapshot"]["motivation_learning_state"] == to_dict(state.motivation_learning_state)
+    assert trace["state_snapshot"]["motivation_pool_state"] == to_dict(state.motivation_pool_state)
+    assert trace["state_snapshot"]["endogenous_state"] == to_dict(state.endogenous_state)
+    assert trace["micro_intent"] == endogenous["micro_intent"]
+
+
+def test_external_tick_can_auto_schedule_endogenous_round(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    monkeypatch.setattr(
+        controller.endogenous_scheduler,
+        "build_trigger",
+        lambda **kwargs: EndogenousTickTrigger(
+            trigger_type="motivation_sum_high",
+            trigger_score=0.77,
+            source_metrics={"motivation_activation": 0.77},
+            selected_mode="endogenous_light",
+            audit_reason="forced by test",
+        ),
+    )
+
+    result = controller.tick(
+        RoundEvent(source="user", content="想起茶和没说完的话。", target="user", cue="tea", valence=-0.2),
+        scenario="companion",
+        mode="interactive",
+    )
+    state = controller.load_runtime_state()
+
+    assert result.round_id == 1
+    assert state.round_count == 2
+    assert controller.trace_round(2)["cause_type"] == "endogenous"
 
 
 def test_chat_turn_sanitizes_execution_state_for_pfc_route_when_task_run_is_paused(tmp_path):
@@ -2352,7 +2592,8 @@ def test_probability_field_observability_surfaces_stacked_action_contributions(t
     heatmap_payload = controller.metrics_heatmap()
 
     explanation = why_payload["action_probability_explanation"]
-    assert explanation["winner_target"] == why_payload["sampled_action"]
+    assert explanation["winner_target"] in explanation["winner_posterior"]
+    assert why_payload["sampled_action"] in explanation["winner_posterior"]
     assert explanation["winner_posterior"]
     assert explanation["stacked_contributions"]
     assert any(item["module_name"] == "PFCAgent" for item in explanation["stacked_contributions"])
@@ -2367,6 +2608,156 @@ def test_probability_field_observability_surfaces_stacked_action_contributions(t
 
     assert heatmap_payload["action_module_heatmap"]
     assert any("PFCAgent" in modules for modules in heatmap_payload["action_module_heatmap"].values())
+
+
+def test_console_refresh_payload_includes_default_why_not_for_current_round(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="我现在有点乱，你觉得我应该先做哪一步？",
+            target="user",
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    payload = controller.console_refresh_payload()
+
+    assert payload["state"]["current_round"]["round_id"] == 1
+    assert payload["action_field"]["winner"]["action"]
+    assert "why_not" in payload
+    assert payload["why_not"] is not None
+    assert payload["why_not"]["action"] != payload["action_field"]["winner"]["action"]
+    assert payload["why_not"]["why_not"]["blocked_by"]
+
+
+def test_console_refresh_payload_surfaces_tlh_links_and_counterfactual_preview(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.body_energy = 0.09
+    state.fatigue = 0.88
+    state.memory_fragments = 0.81
+    state.self_continuity = 0.27
+    state.meaning_strength = 0.19
+    state.subjective_state.reject_all = 0.82
+    state.subjective_state.spontaneous = 0.74
+    state.subjective_state.meaning_made = ["先吸收，再决定是否回应"]
+    controller._save_state(state, sync=True)
+
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="先别急着给答案。",
+            target="user",
+            cue="答案",
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    payload = controller.console_refresh_payload()
+
+    instinct_field = payload["state"]["cognitive_snapshot"]["tlh"]["instinct_field"]
+    assert {"axis_values", "region_scores", "winner_region", "collapse_trace"} <= set(instinct_field)
+    assert {"context", "memory", "action", "token"} <= set(payload["probability_field"])
+    assert payload["probability_field"]["action"]["winner_posterior"]
+
+    assert payload["counterfactual_preview"]
+    assert "action" in payload["counterfactual_preview"]
+
+    source_links = {item["panel_id"]: item for item in payload["source_links"]}
+    assert source_links["brain_state"]["api_path"] == "/console/state"
+    assert source_links["brain_state"]["controller_method"] == "RuntimeController.console_state"
+    assert source_links["action_field"]["api_path"] == "/console/action-field"
+    assert source_links["timeline"]["api_path"] == "/console/timeline"
+    assert source_links["why_current"]["api_path"] == "/console/why/current"
+    assert source_links["why_not"]["api_path"].startswith("/console/why-not/")
+    assert source_links["instinct_space"]["controller_method"] == "RuntimeController.cognitive_snapshot"
+    assert source_links["probability_layers"]["api_path"] == "/trace/probability/latest"
+    assert source_links["probability_layers"]["controller_method"] == "RuntimeController.trace_probability_field"
+    assert source_links["counterfactual_replay"]["api_path"] == "/replay/1"
+    assert source_links["counterfactual_replay"]["round_id"] == 1
+
+    assert payload["recent_rounds"]
+    assert payload["recent_rounds"][-1]["round_id"] == 1
+
+
+def test_autonomy_lifecycle_surfaces_status_and_console_payload(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    started = controller.start_autonomy(profile="tool_level")
+    stepped = controller.autonomy_step()
+    refreshed = controller.console_refresh_payload()
+    stopped = controller.stop_autonomy(reason="user_stop")
+
+    assert started["enabled"] is True
+    assert started["running"] is True
+    assert started["profile"] == "tool_level"
+    assert started["kill_switch_available"] is True
+
+    assert stepped["running"] is True
+    assert stepped["last_step_at"]
+    assert stepped["last_action_type"]
+    assert stepped["budget_usage"]["remaining"] >= 0.0
+
+    assert refreshed["autonomy"]["enabled"] is True
+    assert refreshed["autonomy"]["last_step_at"]
+    assert refreshed["autonomy"]["kill_switch_available"] is True
+
+    assert stopped["enabled"] is False
+    assert stopped["running"] is False
+    assert stopped["stop_reason"] == "user_stop"
+
+
+def test_autonomy_execute_command_rejects_blocked_command_with_reason(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.autonomy_policy.enabled = True
+    state.autonomy_policy.blocked_commands.append("body rest")
+    controller._save_state(state, sync=True)
+
+    result = controller._autonomy_execute_command("body rest")
+
+    assert result["allowed"] is False
+    assert result["command"] == "body rest"
+    assert result["reason"] == "blocked_by_policy"
+    assert "body rest" in result["blocked_commands"]
+
+
+def test_autonomy_start_resets_windowed_budgets_and_expired_window_does_not_stop_loop(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.autonomy_policy.enabled = True
+    state.autonomy_loop.running = True
+    state.autonomy_loop.window_started_at = "2000-01-01T00:00:00+00:00"
+    state.autonomy_loop.window_tool_actions = state.autonomy_policy.max_tool_actions_per_hour
+    state.autonomy_loop.window_endogenous_rounds = state.autonomy_policy.max_rounds_per_hour
+    controller._save_state(state, sync=True)
+
+    started = controller.start_autonomy(profile="tool_level")
+    stepped = controller.autonomy_step()
+
+    assert started["budget_usage"]["tool_actions"] == 0
+    assert started["budget_usage"]["endogenous_rounds"] == 0
+    assert stepped["stop_reason"] != "tool_budget_reached"
+    assert stepped["stop_reason"] != "round_budget_reached"
+
+
+def test_autonomy_start_can_clear_safe_mode_for_observer_resume(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.safe_mode = True
+    state.mode = "safe"
+    controller._save_state(state, sync=True)
+
+    started = controller.start_autonomy(profile="tool_level", clear_safe_mode=True)
+    restored = controller.load_runtime_state()
+
+    assert started["running"] is True
+    assert restored.safe_mode is False
+    assert restored.mode == "interactive"
 
 
 def test_probability_field_observability_surfaces_tool_affordance_for_active_run(tmp_path):

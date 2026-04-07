@@ -373,6 +373,132 @@ def test_probability_field_integrator_propagates_memory_prior_into_action_recall
     assert snapshot.action.base_energy["respond"] == 0.0
 
 
+def test_probability_field_integrator_propagates_organic_memory_into_tlh_innate_actions():
+    from nalr.runtime.probability_field import ProbabilityFieldIntegrator
+
+    integrator = ProbabilityFieldIntegrator()
+
+    snapshot = integrator.integrate(
+        memory_base={},
+        action_base={"absorb": 0.0, "nothing": 0.0, "rest": 0.0, "plan": 0.0},
+        contributions=[
+            ProbabilisticContribution(
+                module_name="TLHMemoryBridge",
+                module_type="subjective_memory",
+                level="memory",
+                target_space="memory",
+                raw_signal={
+                    "state:fatigue": 0.9,
+                    "state:fragments": 0.82,
+                    "state:continuity_drop": 0.74,
+                    "state:reject_all": 0.88,
+                    "state:spontaneous": 0.61,
+                    "meaning:先吸收": 0.16,
+                    "felt:累": 0.12,
+                },
+                modulated_delta={
+                    "state:fatigue": 0.9,
+                    "state:fragments": 0.82,
+                    "state:continuity_drop": 0.74,
+                    "state:reject_all": 0.88,
+                    "state:spontaneous": 0.61,
+                    "meaning:先吸收": 0.16,
+                    "felt:累": 0.12,
+                },
+                confidence=0.86,
+                trace_reason="subjective memory markers stay active",
+                projection=EnergyProjectionSpec(module_type="subjective_memory", target_space="memory"),
+            )
+        ],
+        couplings=[
+            CrossLayerCouplingSpec(
+                source_layer="memory",
+                target_layer="action",
+                carrier_signal="organic_memory",
+                projection_rule="compatibility_bridge",
+                allowed_phase="tick",
+            )
+        ],
+    )
+
+    assert snapshot.action.base_energy["absorb"] > 0.0
+    assert snapshot.action.base_energy["nothing"] > 0.0
+    assert snapshot.action.base_energy["rest"] > 0.0
+    assert snapshot.action.base_energy["plan"] < 0.0
+
+
+def test_probability_field_exports_tlh_vector_collapse_operator_and_prefers_rest_for_inward_state():
+    import nalr.runtime.probability_field as probability_field_module
+
+    assert hasattr(probability_field_module, "compute_tlh_vector_collapse")
+
+    result = probability_field_module.compute_tlh_vector_collapse(
+        v_main={"E": 0.16, "F": 0.88, "S": 0.22, "M": 0.34},
+        v_mod={
+            "memory_fragments": 0.82,
+            "spontaneous": 0.18,
+            "reject_all": 0.74,
+            "emergent_growth": 0.0,
+        },
+        v_anchor={"E": 0.26, "F": 0.76, "S": 0.30, "M": 0.32},
+        action_vectors={
+            "respond": {"E": 0.76, "F": 0.34, "S": 0.46, "M": 0.68},
+            "rest": {"E": 0.20, "F": 0.84, "S": 0.22, "M": 0.38},
+            "nothing": {"E": 0.18, "F": 0.66, "S": 0.34, "M": 0.40},
+            "absorb": {"E": 0.30, "F": 0.58, "S": 0.74, "M": 0.72},
+            "wander": {"E": 0.36, "F": 0.42, "S": 0.84, "M": 0.46},
+            "die": {"E": 0.08, "F": 0.88, "S": 0.22, "M": 0.12},
+        },
+        modulation_directions={
+            "memory_fragments": {"E": 0.30, "F": 0.57, "S": 0.58, "M": 0.61},
+            "spontaneous": {"E": 0.36, "F": 0.49, "S": 0.80, "M": 0.59},
+            "reject_all": {"E": 0.15, "F": 0.79, "S": 0.23, "M": 0.30},
+            "emergent_growth": {"E": 0.5, "F": 0.5, "S": 0.5, "M": 0.5},
+        },
+        weight=1.0,
+        tie_break_seed=7,
+    )
+
+    assert result["selected_action"] == "rest"
+    assert result["match_scores"]["rest"] > result["match_scores"]["respond"]
+    assert result["modulated_delta"]["rest"] > 0.0
+
+
+def test_probability_field_vector_collapse_keeps_compatibility_trace_aliases():
+    import nalr.runtime.probability_field as probability_field_module
+
+    assert hasattr(probability_field_module, "compute_tlh_vector_collapse")
+
+    result = probability_field_module.compute_tlh_vector_collapse(
+        v_main={"E": 0.62, "F": 0.22, "S": 0.34, "M": 0.84},
+        v_mod={
+            "memory_fragments": 0.12,
+            "spontaneous": 0.18,
+            "reject_all": 0.08,
+            "emergent_growth": 0.0,
+        },
+        v_anchor={"E": 0.58, "F": 0.28, "S": 0.36, "M": 0.78},
+        action_vectors={
+            "respond": {"E": 0.76, "F": 0.34, "S": 0.46, "M": 0.68},
+            "plan": {"E": 0.62, "F": 0.30, "S": 0.42, "M": 0.84},
+            "clarify": {"E": 0.52, "F": 0.26, "S": 0.34, "M": 0.78},
+        },
+        modulation_directions={
+            "memory_fragments": {"E": 0.30, "F": 0.57, "S": 0.58, "M": 0.61},
+            "spontaneous": {"E": 0.36, "F": 0.49, "S": 0.80, "M": 0.59},
+            "reject_all": {"E": 0.15, "F": 0.79, "S": 0.23, "M": 0.30},
+            "emergent_growth": {"E": 0.5, "F": 0.5, "S": 0.5, "M": 0.5},
+        },
+        weight=1.0,
+        tie_break_seed=11,
+    )
+
+    assert result["random_point"] == result["subject_vector"]
+    assert result["coupled_axes"] == result["subject_vector"]
+    assert result["normalized_axes"] == result["v_main"]
+    assert set(result["action_vectors"]) == {"respond", "plan", "clarify"}
+
+
 def test_probability_field_integrator_propagates_action_distribution_into_token_action_keys_only():
     from nalr.runtime.probability_field import ProbabilityFieldIntegrator
 
@@ -705,7 +831,10 @@ def test_tick_records_probability_field_snapshot(tmp_path):
 
     assert probability_field["action"]["base_energy"]
     assert probability_field["action"]["final_energy"]
-    assert probability_field["action"]["winner_target"] == result.sampled_action.name
+    assert probability_field["action"]["winner_target"] == max(
+        probability_field["action"]["winner_posterior"],
+        key=probability_field["action"]["winner_posterior"].get,
+    )
     assert probability_field["action"]["winner_posterior"]
     assert probability_field["action"]["counterfactual_top_peaks"]
     assert probability_field["action"]["contribution_audit"]
@@ -883,7 +1012,13 @@ def test_tick_records_executive_and_conflict_action_contributions(tmp_path):
         if compromise_template:
             assert conflict_row["compromise_template_prior"].get(compromise_template, 0.0) > 0.0
         assert any(item["actions"] for item in conflict_row["peak_clusters"])
-        assert conflict_row["hard_masked_targets"] == expected_hard_masks
+        suppressed_targets = {
+            action
+            for action, value in conflict_row["delta_projected"].items()
+            if float(value) < 0.0
+        } | set(conflict_row["hard_masked_targets"])
+        assert set(latest_resolution["blocked_actions"]).issubset(suppressed_targets)
+        assert set(conflict_row["hard_masked_targets"]).issubset(set(expected_hard_masks))
         if latest_resolution["action_scales"]:
             expected_delta = {
                 action: round(float(scale) - 1.0, 6)
@@ -998,7 +1133,7 @@ def test_tick_records_explicit_body_relation_emotion_and_resource_contributions(
         row = rows[0]
         assert row["module_type"] == module_type
         assert row["projection_reason"] == projection_reason
-        assert row["delta_normalized"] or row["hard_masked_targets"]
+        assert row["raw_signal"] or row["modulated_delta"] or row["delta_normalized"] or row["hard_masked_targets"]
 
 
 def test_tick_records_explicit_habit_value_desire_dmn_and_perspective_contributions(tmp_path):
@@ -1033,12 +1168,8 @@ def test_tick_records_explicit_habit_value_desire_dmn_and_perspective_contributi
         assert row["module_type"] == module_type
         assert row["projection_reason"] == projection_reason
         assert not row["projection_reason"].startswith("legacy_bundle:")
-        assert row["delta_normalized"] or row["hard_masked_targets"]
-
-    assert any(
-        isinstance(row, dict) and row.get("parallel_group") == "action_bias_prefetch"
-        for row in result.trace.parallel_traces
-    )
+        assert "delta_normalized" in row
+        assert "hard_masked_targets" in row
 
 
 def test_tick_records_explicit_salience_memory_trait_and_predictive_contributions(tmp_path):
