@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+import shutil
 from typing import Any
 
 from nalr.runtime.metadata import utc_now_iso
@@ -72,3 +73,22 @@ class TerminalSessionStore:
         if not self.current_path.exists():
             raise FileNotFoundError("no current terminal session recorded")
         return TerminalSessionState(**self._hydrate_payload(json.loads(self.current_path.read_text(encoding="utf-8"))))
+
+    def list_sessions(self) -> list[TerminalSessionState]:
+        sessions: list[TerminalSessionState] = []
+        for path in sorted(self.sessions_dir.glob("*.json")):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            sessions.append(TerminalSessionState(**self._hydrate_payload(payload)))
+        sessions.sort(key=lambda item: item.updated_at or item.created_at or "", reverse=True)
+        return sessions
+
+    def clear(self) -> None:
+        for path in self.sessions_dir.glob("*.json"):
+            path.unlink(missing_ok=True)
+        self.current_path.unlink(missing_ok=True)
+
+    def clear_all(self) -> None:
+        shutil.rmtree(self.sessions_dir, ignore_errors=True)
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        if self.current_path.exists():
+            self.current_path.unlink()

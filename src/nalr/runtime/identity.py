@@ -259,32 +259,50 @@ class IdentityRuntime:
         modulated_delta: dict[str, float] = {}
         query_kind = str(identity_context.query_kind or "general")
         disclosure_intent = str(identity_context.disclosure_intent or "withhold")
+        affect_residue = float(getattr(state, "affect_residue", 0.0) or 0.0)
+        resource_state = getattr(state, "resource_state", {}) or {}
+        if not isinstance(resource_state, dict):
+            resource_state = {}
+        budget_remaining = float(getattr(state, "budget_remaining", 1.0) or 1.0)
+        body_energy = float(getattr(state, "body_energy", 0.55) or 0.55)
+        identity_state = getattr(state, "identity_state", None)
+        display_name = str(getattr(identity_state, "display_name", "") or "")
+        stress_load = _clip(
+            max(
+                affect_residue,
+                float(resource_state.get("scarcity_index", _clip(1.0 - budget_remaining))),
+                max(0.0, 0.55 - body_energy),
+            ),
+            0.0,
+            1.0,
+        )
+        prior_scale = _clip(0.80 - stress_load * 0.45, 0.25, 0.80)
 
         if query_kind in {"self_identity", "provider_identity"}:
-            modulated_delta["respond"] = modulated_delta.get("respond", 0.0) + 0.22
-            modulated_delta["clarify"] = modulated_delta.get("clarify", 0.0) + 0.10
-            modulated_delta["wander"] = modulated_delta.get("wander", 0.0) - 0.12
+            modulated_delta["respond"] = modulated_delta.get("respond", 0.0) + 0.16 * prior_scale
+            modulated_delta["clarify"] = modulated_delta.get("clarify", 0.0) + 0.06 * prior_scale
+            modulated_delta["wander"] = modulated_delta.get("wander", 0.0) - 0.06 * prior_scale
         elif query_kind == "answer_explanation":
-            modulated_delta["respond"] = modulated_delta.get("respond", 0.0) + 0.14
-            modulated_delta["recall"] = modulated_delta.get("recall", 0.0) + 0.10
-            modulated_delta["wander"] = modulated_delta.get("wander", 0.0) - 0.08
+            modulated_delta["respond"] = modulated_delta.get("respond", 0.0) + 0.10 * prior_scale
+            modulated_delta["recall"] = modulated_delta.get("recall", 0.0) + 0.08 * prior_scale
+            modulated_delta["wander"] = modulated_delta.get("wander", 0.0) - 0.04 * prior_scale
         else:
-            modulated_delta["respond"] = modulated_delta.get("respond", 0.0) + 0.04
+            modulated_delta["respond"] = modulated_delta.get("respond", 0.0) + 0.02 * prior_scale
 
         if disclosure_intent == "withhold":
-            modulated_delta["connect"] = modulated_delta.get("connect", 0.0) - 0.08
-            modulated_delta["wander"] = modulated_delta.get("wander", 0.0) - 0.04
+            modulated_delta["connect"] = modulated_delta.get("connect", 0.0) - 0.05 * prior_scale
+            modulated_delta["wander"] = modulated_delta.get("wander", 0.0) - 0.02 * prior_scale
         elif disclosure_intent == "provider_origin":
-            modulated_delta["clarify"] = modulated_delta.get("clarify", 0.0) + 0.06
+            modulated_delta["clarify"] = modulated_delta.get("clarify", 0.0) + 0.04 * prior_scale
         elif disclosure_intent == "relational_self_disclosure":
-            modulated_delta["connect"] = modulated_delta.get("connect", 0.0) + 0.06
+            modulated_delta["connect"] = modulated_delta.get("connect", 0.0) + 0.04 * prior_scale
 
-        if state.identity_state.display_name:
-            modulated_delta["respond"] = modulated_delta.get("respond", 0.0) + 0.03
+        if display_name:
+            modulated_delta["respond"] = modulated_delta.get("respond", 0.0) + 0.015 * prior_scale
 
         query_confidence = max(identity_context.query_intent_posterior.values(), default=0.0)
         disclosure_confidence = max(identity_context.disclosure_intent_posterior.values(), default=0.0)
-        confidence = _clip(0.35 + max(query_confidence, disclosure_confidence) * 0.55, 0.0, 1.0)
+        confidence = _clip(0.20 + max(query_confidence, disclosure_confidence) * 0.40 + prior_scale * 0.15, 0.0, 1.0)
 
         dependency_trace = [
             f"query_kind:{query_kind}",

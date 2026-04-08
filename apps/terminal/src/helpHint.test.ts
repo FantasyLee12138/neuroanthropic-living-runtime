@@ -1,31 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import { buildHelpHint } from "./helpHint.js";
+import { createInitialUiState } from "./state/sessionStore.js";
 import type { UiState } from "./types.js";
 
 function makeState(overrides: Partial<UiState> = {}): UiState {
   return {
+    ...createInitialUiState(),
     activeSessionId: "sess-1",
     activeRunId: "run-1",
-    sessionMeta: null,
-    run: null,
-    steps: [],
-    tools: [],
-    toolTimeline: [],
-    lastWhy: null,
-    sidebarSnapshot: null,
-    statusline: null,
-    lines: [],
-    activityRail: [],
-    transcriptMode: "full",
-    promptHistoryByCwd: {},
-    pendingApprovals: [],
-    actionBar: { primary: [], secondary: [], selectedIndex: 0 },
-    permissionMode: "plan",
-    assistantStreamActive: false,
-    detailDrawer: null,
-    focusZone: "input",
-    approvalCursor: 0,
     ...overrides,
   };
 }

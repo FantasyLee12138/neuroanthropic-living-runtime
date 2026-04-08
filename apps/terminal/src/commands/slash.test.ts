@@ -11,6 +11,8 @@ describe("parseSlashCommand", () => {
     expect(parseSlashCommand("/state")).toEqual({ kind: "bridge", command: "state" });
     expect(parseSlashCommand("/dream")).toEqual({ kind: "bridge", command: "dream" });
     expect(parseSlashCommand("/probability")).toEqual({ kind: "bridge", command: "probability" });
+    expect(parseSlashCommand("/initiative")).toEqual({ kind: "bridge", command: "initiative" });
+    expect(parseSlashCommand("/monologue")).toEqual({ kind: "bridge", command: "monologue" });
   });
 
   it("keeps local shell commands local", () => {
@@ -25,6 +27,8 @@ describe("parseSlashCommand", () => {
     expect(parseSlashCommand("/permissions ask")).toEqual({ kind: "bridge", command: "permissions", value: "ask" });
     expect(parseSlashCommand("/mode")).toEqual({ kind: "bridge", command: "mode" });
     expect(parseSlashCommand("/dream tea")).toEqual({ kind: "bridge", command: "dream", value: "tea" });
+    expect(parseSlashCommand("/initiative distribution")).toEqual({ kind: "bridge", command: "initiative", value: "distribution" });
+    expect(parseSlashCommand("/monologue show 5")).toEqual({ kind: "bridge", command: "monologue", value: "show 5" });
     expect(parseSlashCommand("/probability action wander")).toEqual({
       kind: "bridge",
       command: "probability",
@@ -35,6 +39,12 @@ describe("parseSlashCommand", () => {
       command: "probability",
       value: "layer token",
     });
+    expect(parseSlashCommand("/why-motivation last")).toEqual({ kind: "bridge", command: "why-motivation", value: "last" });
+    expect(parseSlashCommand("/replay-motivation 12")).toEqual({ kind: "bridge", command: "replay-motivation", value: "12" });
+    expect(parseSlashCommand("/replay 12 7")).toEqual({ kind: "bridge", command: "replay", value: "12 7" });
+    expect(parseSlashCommand("/why-not plan 12")).toEqual({ kind: "bridge", command: "why-not", value: "plan 12" });
+    expect(parseSlashCommand("/what-changed 8")).toEqual({ kind: "bridge", command: "what-changed", value: "8" });
+    expect(parseSlashCommand("/eval 32")).toEqual({ kind: "bridge", command: "eval", value: "32" });
   });
 
   it("returns null for plain chat input", () => {

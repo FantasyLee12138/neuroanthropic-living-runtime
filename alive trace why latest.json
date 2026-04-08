@@ -1,0 +1,3064 @@
+alive trace why latest                 
+{
+  "round_id": 146,
+  "sampled_action": "rest",
+  "top_drivers": [
+    {
+      "action_name": "玩手机",
+      "agent_name": "ValueAgent",
+      "reason": "subjective value re-rank",
+      "score": 0.3292
+    },
+    {
+      "action_name": "rest",
+      "agent_name": "BodyStateAgent",
+      "reason": "energy=0.14; top_action=rest",
+      "score": 0.1952
+    },
+    {
+      "action_name": "short_reply",
+      "agent_name": "ResourceAgent",
+      "reason": "budget=0.04; top_action=short_reply",
+      "score": 0.1357
+    }
+  ],
+  "style_profile": {
+    "directness_level": 0.68,
+    "latency_scale": 1.15,
+    "sentence_fragmentation": 0.18,
+    "style_name": "tired",
+    "warmth_level": 0.45
+  },
+  "stochastic_state": {
+    "base_stochastic_distribution": {
+      "clarify": 0.039317,
+      "do_homework": 0.015538,
+      "plan": 0.048979,
+      "play_phone": 0.015538,
+      "recall": 0.135863,
+      "respond": 0.526495,
+      "rest": 0.101175,
+      "short_reply": 0.089379,
+      "wander": 0.001415,
+      "写作业": 0.011351,
+      "玩手机": 0.01495
+    },
+    "emo_channel": "neutral",
+    "entropy_ref": {
+      "batch_id": "fallback-e298dda14fbd",
+      "byte_length": 8,
+      "byte_start": 96,
+      "degraded": true,
+      "endpoint": "https://qrng.anu.edu.au/API/jsonI.php",
+      "failure_class": "provider_fetch_failed",
+      "fetched_at": "2026-04-06T08:08:18Z",
+      "hard_block_triggered": false,
+      "health_state": "degraded",
+      "node_name": "xi_emo",
+      "provider_class": "AnuQuantumEntropyProvider",
+      "purpose": "round-503119352-xi-emo",
+      "reason": "_ssl.c:1063: The handshake operation timed out",
+      "source": "deterministic_fallback"
+    },
+    "entropy_refs_by_node": {
+      "action_regate": {
+        "batch_id": "fallback-e298dda14fbd",
+        "byte_length": 8,
+        "byte_start": 144,
+        "degraded": true,
+        "endpoint": "https://qrng.anu.edu.au/API/jsonI.php",
+        "failure_class": "provider_fetch_failed",
+        "fetched_at": "2026-04-06T08:08:18Z",
+        "hard_block_triggered": false,
+        "health_state": "degraded",
+        "node_name": "action_regate",
+        "provider_class": "AnuQuantumEntropyProvider",
+        "purpose": "round-503119352-action-regate",
+        "reason": "_ssl.c:1063: The handshake operation timed out",
+        "source": "deterministic_fallback"
+      },
+      "action_sample": {
+        "batch_id": "fallback-e298dda14fbd",
+        "byte_length": 8,
+        "byte_start": 136,
+        "degraded": true,
+        "endpoint": "https://qrng.anu.edu.au/API/jsonI.php",
+        "failure_class": "provider_fetch_failed",
+        "fetched_at": "2026-04-06T08:08:18Z",
+        "hard_block_triggered": false,
+        "health_state": "degraded",
+        "node_name": "action_sample",
+        "provider_class": "AnuQuantumEntropyProvider",
+        "purpose": "round-503119352-action-sample",
+        "reason": "_ssl.c:1063: The handshake operation timed out",
+        "source": "deterministic_fallback"
+      },
+      "fragmentation_jitter": {
+        "batch_id": "fallback-e298dda14fbd",
+        "byte_length": 8,
+        "byte_start": 128,
+        "degraded": true,
+        "endpoint": "https://qrng.anu.edu.au/API/jsonI.php",
+        "failure_class": "provider_fetch_failed",
+        "fetched_at": "2026-04-06T08:08:18Z",
+        "hard_block_triggered": false,
+        "health_state": "degraded",
+        "node_name": "fragmentation_jitter",
+        "provider_class": "AnuQuantumEntropyProvider",
+        "purpose": "round-503119352-fragment-jitter",
+        "reason": "_ssl.c:1063: The handshake operation timed out",
+        "source": "deterministic_fallback"
+      },
+      "r_intensity": {
+        "batch_id": "fallback-e298dda14fbd",
+        "byte_length": 8,
+        "byte_start": 112,
+        "degraded": true,
+        "endpoint": "https://qrng.anu.edu.au/API/jsonI.php",
+        "failure_class": "provider_fetch_failed",
+        "fetched_at": "2026-04-06T08:08:18Z",
+        "hard_block_triggered": false,
+        "health_state": "degraded",
+        "node_name": "r_intensity",
+        "provider_class": "AnuQuantumEntropyProvider",
+        "purpose": "round-503119352-intensity",
+        "reason": "_ssl.c:1063: The handshake operation timed out",
+        "source": "deterministic_fallback"
+      },
+      "timing_jitter": {
+        "batch_id": "fallback-e298dda14fbd",
+        "byte_length": 8,
+        "byte_start": 120,
+        "degraded": true,
+        "endpoint": "https://qrng.anu.edu.au/API/jsonI.php",
+        "failure_class": "provider_fetch_failed",
+        "fetched_at": "2026-04-06T08:08:18Z",
+        "hard_block_triggered": false,
+        "health_state": "degraded",
+        "node_name": "timing_jitter",
+        "provider_class": "AnuQuantumEntropyProvider",
+        "purpose": "round-503119352-timing-jitter",
+        "reason": "_ssl.c:1063: The handshake operation timed out",
+        "source": "deterministic_fallback"
+      },
+      "xi_emo": {
+        "batch_id": "fallback-e298dda14fbd",
+        "byte_length": 8,
+        "byte_start": 96,
+        "degraded": true,
+        "endpoint": "https://qrng.anu.edu.au/API/jsonI.php",
+        "failure_class": "provider_fetch_failed",
+        "fetched_at": "2026-04-06T08:08:18Z",
+        "hard_block_triggered": false,
+        "health_state": "degraded",
+        "node_name": "xi_emo",
+        "provider_class": "AnuQuantumEntropyProvider",
+        "purpose": "round-503119352-xi-emo",
+        "reason": "_ssl.c:1063: The handshake operation timed out",
+        "source": "deterministic_fallback"
+      },
+      "xi_mood": {
+        "batch_id": "fallback-e298dda14fbd",
+        "byte_length": 8,
+        "byte_start": 104,
+        "degraded": true,
+        "endpoint": "https://qrng.anu.edu.au/API/jsonI.php",
+        "failure_class": "provider_fetch_failed",
+        "fetched_at": "2026-04-06T08:08:18Z",
+        "hard_block_triggered": false,
+        "health_state": "degraded",
+        "node_name": "xi_mood",
+        "provider_class": "AnuQuantumEntropyProvider",
+        "purpose": "round-503119352-xi-mood",
+        "reason": "_ssl.c:1063: The handshake operation timed out",
+        "source": "deterministic_fallback"
+      }
+    },
+    "fragmentation_jitter": 0.018142,
+    "guard_reason": "",
+    "kl_divergence": 0.001121,
+    "lambda_noise": 0.113707,
+    "lambda_noise_pre_guard": 0.113707,
+    "log_m_guard_triggered": false,
+    "noise_guard_triggered": false,
+    "q_noise_distribution": {
+      "clarify": 0.038599,
+      "do_homework": 0.015138,
+      "plan": 0.048084,
+      "play_phone": 0.015138,
+      "recall": 0.133382,
+      "respond": 0.545952,
+      "rest": 0.089756,
+      "short_reply": 0.087074,
+      "wander": 0.001255,
+      "写作业": 0.011059,
+      "玩手机": 0.014564
+    },
+    "q_noise_pre_guard_summary": {
+      "clarify": 0.038599,
+      "do_homework": 0.015138,
+      "plan": 0.048084,
+      "play_phone": 0.015138,
+      "recall": 0.133382,
+      "respond": 0.545952,
+      "rest": 0.089756,
+      "short_reply": 0.087074,
+      "wander": 0.001255,
+      "写作业": 0.011059,
+      "玩手机": 0.014564
+    },
+    "r_intensity": 0.610304,
+    "round_seed": 503119352,
+    "sigma_emo": 0.088679,
+    "sigma_mood": 0.044339,
+    "timing_jitter": -0.014954,
+    "v_t": 0.391193,
+    "v_t_components": {
+      "circadian_offset": 0.1429,
+      "emotion_volatility": 0.05,
+      "fatigue": 0.8626,
+      "habit_strength": 0.4327,
+      "location_shift": 1.0,
+      "novelty": 0.4735,
+      "privacy_shift": 0.0,
+      "resource_scarcity": 0.7908,
+      "salience_lock": 0.1667
+    },
+    "xi_emo": 0.104026,
+    "xi_mood": 0.019239
+  },
+  "render_plan": {
+    "action": "rest",
+    "event_summary": "我又想玩手机又想写作业，该先做啥？",
+    "expression": {
+      "directness_level": 0.5815,
+      "fragmentation_jitter": 0.0187,
+      "hedging_level": 0.1993,
+      "latency_style": 0.6736,
+      "repair_tendency": 0.4111,
+      "reply_delay": 0.6644,
+      "self_disclosure": 0.3115,
+      "sentence_fragmentation": 0.254,
+      "timing_jitter": -0.0129,
+      "tone_sharpness": 0.2668,
+      "warmth_level": 0.5771
+    },
+    "identity_context": {
+      "aliases": [
+        "tea",
+        "你现在开心吗",
+        "现在几点了",
+        "break",
+        "阿澜"
+      ],
+      "class_label": "runtime_instance",
+      "disclosure_clipped": [
+        "process_explanation",
+        "provider_origin",
+        "relational_self_disclosure"
+      ],
+      "disclosure_detail": "none",
+      "disclosure_intent": "withhold",
+      "disclosure_intent_posterior": {
+        "anchored_self_description": 0.2,
+        "minimal_identity": 0.257143,
+        "process_explanation": 0.0,
+        "provider_origin": 0.0,
+        "relational_self_disclosure": 0.028571,
+        "withhold": 0.514286
+      },
+      "display_label": "小栖",
+      "evidence_anchors": [
+        "affect:residue",
+        "cue:identity:name_probe",
+        "cue:帮我规划今晚",
+        "energy:low",
+        "habit:identity:name_probe",
+        "memory:break",
+        "mood:steady",
+        "relation:user",
+        "resource:scarce"
+      ],
+      "evolution_reason": "stable_continuity",
+      "internal_handle": "nalr-c95d0565",
+      "model_label": "doubao-seed-2-0-pro-260215",
+      "non_interactive_sources": [],
+      "provider_label": "Doubao/Ark route",
+      "query_intent": "general_exchange",
+      "query_intent_posterior": {
+        "answer_reason_probe": 0.164384,
+        "capability_boundary_probe": 0.082192,
+        "general_exchange": 0.191781,
+        "general_task_push": 0.136986,
+        "provider_lineage_probe": 0.09589,
+        "relational_bid": 0.178082,
+        "self_disclosure_request": 0.068493,
+        "self_model_identity_probe": 0.082192
+      },
+      "query_kind": "general",
+      "self_description_sources": [
+        "focus",
+        "habit_readiness",
+        "memory_activation",
+        "memory_cue",
+        "resource_scarcity"
+      ]
+    },
+    "message_plan": {
+      "focus": "rest",
+      "intent": "rest",
+      "memory_cue": "我又想玩手机又想写作业",
+      "opening_style": "buffered",
+      "recall_strength": 0.3248,
+      "repair": 0.4111,
+      "repair_expression": {
+        "advance_mode": "normal",
+        "opening_mode": "none",
+        "safety_invite": false,
+        "source": null,
+        "stage": "idle",
+        "template": null,
+        "transition_reason": "idle",
+        "visibility": "implicit"
+      },
+      "scenario": "chat",
+      "shaping_events": [],
+      "slow_variables": {
+        "affect_residue": 0.0449,
+        "body_energy": 0.1374,
+        "cue_present": true,
+        "detail_available": false,
+        "habit_readiness": 0.2004,
+        "memory_activation": 0.3248,
+        "memory_interference": 0.0,
+        "mood_level": 0.5624,
+        "relationship_closeness": 0.6558,
+        "relationship_drift": 0.001,
+        "resource_scarcity": 0.7908,
+        "salience_shift": 0.3248,
+        "trigger_valence": 0.0124
+      },
+      "warmth": 0.5771
+    },
+    "perspective": {
+      "reaction_hypothesis": {},
+      "state_hypothesis": {}
+    },
+    "relation_state": {
+      "boundary_level": 0.14418000000000009,
+      "closeness": 0.65582,
+      "privacy_level": 0.8,
+      "relationship_risk": 0.20813500000000004
+    },
+    "safety_constraints": {
+      "compromise_template": null,
+      "conflict_hot": false,
+      "delay_params": {
+        "latency_style": 0.6736,
+        "reply_delay": 0.6644
+      },
+      "gate": 1.0,
+      "repair_stage": "idle",
+      "tone_params": {
+        "directness_level": 0.5815,
+        "hedging_level": 0.1993,
+        "repair_tendency": 0.4111,
+        "warmth_level": 0.5771
+      },
+      "winning_priority": null
+    },
+    "scenario": "chat",
+    "target": "user"
+  },
+  "rendered_expression": {
+    "authenticity": {
+      "candidate_penalties": {
+        "wander": 0.1
+      },
+      "disclosure_detail": "none",
+      "false_self_claim_detected": false,
+      "false_self_claim_penalty": 0.0,
+      "guard_action": "pass",
+      "provider_leak_detected": false,
+      "provider_leak_penalty": 0.0,
+      "rename_event": null,
+      "sampling_penalty_applied": 0.0001,
+      "self_grounding_score": 0.8,
+      "state_sources": [
+        "focus",
+        "habit_readiness",
+        "memory_activation",
+        "memory_cue",
+        "resource_scarcity"
+      ],
+      "violation_types": []
+    },
+    "degraded": false,
+    "failure_policy_applied": null,
+    "model": "doubao-seed-2-0-pro-260215",
+    "route": "renderer",
+    "text": "可以试试先花10-15分钟写作业快速进入状态哦，等你搞定一小部分作业任务之后，再给自己安排一段玩手机的时间当奖励，这样既不会因为先玩手机玩嗨了拖到最后赶作业焦虑，两边的需求也都能照顾到呀😉"
+  },
+  "authenticity": {
+    "candidate_penalties": {
+      "wander": 0.1
+    },
+    "disclosure_detail": "none",
+    "false_self_claim_detected": false,
+    "false_self_claim_penalty": 0.0,
+    "guard_action": "pass",
+    "provider_leak_detected": false,
+    "provider_leak_penalty": 0.0,
+    "rename_event": null,
+    "sampling_penalty_applied": 0.0001,
+    "self_grounding_score": 0.8,
+    "state_sources": [
+      "focus",
+      "habit_readiness",
+      "memory_activation",
+      "memory_cue",
+      "resource_scarcity"
+    ],
+    "violation_types": []
+  },
+  "identity_evolution": {
+    "aliases": [
+      "tea",
+      "你现在开心吗",
+      "现在几点了",
+      "break",
+      "阿澜"
+    ],
+    "current_display_name": "小栖",
+    "evidence_anchors": [
+      "affect:residue",
+      "cue:identity:name_probe",
+      "cue:帮我规划今晚",
+      "energy:low",
+      "habit:identity:name_probe",
+      "memory:break",
+      "mood:steady",
+      "relation:user",
+      "resource:scarce"
+    ],
+    "identity_shaping_sources": [
+      "habit_readiness",
+      "memory_activation",
+      "resource_scarcity"
+    ],
+    "internal_handle": "nalr-c95d0565",
+    "non_interactive_sources": [],
+    "rename_event": null,
+    "rename_reason": "stable_continuity"
+  },
+  "vitality_snapshot": {
+    "affect_residue": 0.0449,
+    "body_energy": 0.1374,
+    "cue": "我又想玩手机又想写作业",
+    "cue_present": true,
+    "detail_available": false,
+    "forced_recovery": false,
+    "habit_readiness": 0.2004,
+    "habit_takeover": true,
+    "memory_activation": 0.3248,
+    "memory_interference": 0.0,
+    "mode": "safe",
+    "mood_level": 0.5624,
+    "non_interactive_event_count": 0,
+    "relationship_closeness": 0.6558,
+    "relationship_drift": 0.001,
+    "resource_scarcity": 0.7908,
+    "salience_shift": 0.3248,
+    "sampled_action": "respond",
+    "scenario": "chat",
+    "trigger_valence": 0.0124
+  },
+  "vitality_events": [],
+  "long_run_projection": {
+    "continuity_window": 8,
+    "non_interactive_shift": 0,
+    "online_prior": {
+      "continuity_window": 8,
+      "non_interactive_shift": 0,
+      "rename_reason": "",
+      "self_consistency_score": 0.8037,
+      "volatility_signal": 0.7908
+    },
+    "rename_reason": "stable_continuity",
+    "self_consistency_score": 0.8,
+    "volatility_signal": 0.7908
+  },
+  "motivation_pool": {
+    "active_motivations": [
+      {
+        "audit_reason": "memory prior weak or interference remains elevated",
+        "motivation_id": "memory_exploration",
+        "motivation_type": "memory_exploration",
+        "raw_drive": 0.3144,
+        "source_features": {
+          "interference": 0.0,
+          "memory_activation": 0.3248,
+          "recall_strength": 0.3248
+        },
+        "state_tags": [
+          "memory",
+          "exploration"
+        ],
+        "target_actions": {
+          "clarify": 0.08,
+          "plan": 0.06,
+          "recall": 0.24
+        }
+      },
+      {
+        "audit_reason": "action field shows lock-in or low novelty tolerance",
+        "motivation_id": "behavior_exploration",
+        "motivation_type": "behavior_exploration",
+        "raw_drive": 0.166667,
+        "source_features": {
+          "focus_lock_count": 1.0,
+          "self_consistency_score": 0.8037
+        },
+        "state_tags": [
+          "action",
+          "variation"
+        ],
+        "target_actions": {
+          "clarify": 0.12,
+          "plan": 0.08,
+          "wander": 0.18
+        }
+      },
+      {
+        "audit_reason": "vitality indicates recovery pressure",
+        "motivation_id": "affect_regulation",
+        "motivation_type": "affect_regulation",
+        "raw_drive": 0.58052,
+        "source_features": {
+          "affect_residue": 0.0449,
+          "body_energy": 0.1374,
+          "resource_scarcity": 0.7908
+        },
+        "state_tags": [
+          "affect",
+          "repair"
+        ],
+        "target_actions": {
+          "clarify": 0.04,
+          "respond": -0.05,
+          "rest": 0.2
+        }
+      },
+      {
+        "audit_reason": "relation risk remains elevated and needs calibration",
+        "motivation_id": "relation_calibration",
+        "motivation_type": "relation_calibration",
+        "raw_drive": 0.242146,
+        "source_features": {
+          "closeness": 0.65582,
+          "relationship_risk": 0.208135
+        },
+        "state_tags": [
+          "relation",
+          "boundary"
+        ],
+        "target_actions": {
+          "clarify": 0.09,
+          "connect": 0.12,
+          "respond": 0.05
+        }
+      }
+    ],
+    "endogenous_activation_score": 0.325933,
+    "last_feedback_update_at": "2026-04-06T08:11:38Z",
+    "pool_weight_snapshot": {
+      "affect_regulation": 1.137274,
+      "behavior_exploration": 1.137274,
+      "internal_replay": 1.0,
+      "memory_exploration": 1.137274,
+      "relation_calibration": 1.137274
+    }
+  },
+  "motivation_feedback": {
+    "endogenous_policy_shift": {
+      "clarify": 0.224554,
+      "connect": 0.081656,
+      "plan": 0.095265,
+      "recall": 0.163315,
+      "respond": 0.0,
+      "rest": 0.136095,
+      "wander": 0.122487
+    },
+    "records": [
+      {
+        "affect_delta": {
+          "affect_residue": -0.0449,
+          "body_energy": 0.1374
+        },
+        "memory_activation_delta": 0.3248,
+        "motivation_id": "memory_exploration",
+        "relation_delta": -0.001,
+        "response_latency_ms": null,
+        "reward_signal": 0.217007,
+        "round_id": "146",
+        "sampled_action": "rest",
+        "update_reason": "memory=0.32; grounding=0.80; penalty=0.00",
+        "user_response": null
+      },
+      {
+        "affect_delta": {
+          "affect_residue": -0.0449,
+          "body_energy": 0.1374
+        },
+        "memory_activation_delta": 0.3248,
+        "motivation_id": "behavior_exploration",
+        "relation_delta": -0.001,
+        "response_latency_ms": null,
+        "reward_signal": 0.217007,
+        "round_id": "146",
+        "sampled_action": "rest",
+        "update_reason": "memory=0.32; grounding=0.80; penalty=0.00",
+        "user_response": null
+      },
+      {
+        "affect_delta": {
+          "affect_residue": -0.0449,
+          "body_energy": 0.1374
+        },
+        "memory_activation_delta": 0.3248,
+        "motivation_id": "affect_regulation",
+        "relation_delta": -0.001,
+        "response_latency_ms": null,
+        "reward_signal": 0.217007,
+        "round_id": "146",
+        "sampled_action": "rest",
+        "update_reason": "memory=0.32; grounding=0.80; penalty=0.00",
+        "user_response": null
+      },
+      {
+        "affect_delta": {
+          "affect_residue": -0.0449,
+          "body_energy": 0.1374
+        },
+        "memory_activation_delta": 0.3248,
+        "motivation_id": "relation_calibration",
+        "relation_delta": -0.001,
+        "response_latency_ms": null,
+        "reward_signal": 0.217007,
+        "round_id": "146",
+        "sampled_action": "rest",
+        "update_reason": "memory=0.32; grounding=0.80; penalty=0.00",
+        "user_response": null
+      }
+    ],
+    "reward_signal": 0.217007
+  },
+  "endogenous_tick_reason": {
+    "last_endogenous_tick_at": null,
+    "last_trigger": {},
+    "recent_triggers": [],
+    "suppression_reason": "non_user_or_non_interactive_turn"
+  },
+  "endogenous_policy_shift": {
+    "clarify": 0.224554,
+    "connect": 0.081656,
+    "plan": 0.095265,
+    "recall": 0.163315,
+    "respond": 0.0,
+    "rest": 0.136095,
+    "wander": 0.122487
+  },
+  "appraisal_snapshot": {
+    "appraisal_band": "muted",
+    "cognitive_load": 0.0,
+    "energy_band": "low",
+    "fatigue_push": 0.0,
+    "identity_salience": 0.0,
+    "inferred_energy_delta": 0.0005,
+    "mode": "safe",
+    "mood_band": "steady",
+    "relation_charge": 0.0985,
+    "scenario": "chat",
+    "semantic_arousal": 0.0087,
+    "semantic_valence": 0.0124,
+    "social_approach_pull": 0.6144
+  },
+  "state_delta_before_clip": {
+    "affect_residue": -0.0029,
+    "body_energy": 0.0005,
+    "mood": 0.001
+  },
+  "state_delta_after_clip": {
+    "affect_residue": -0.0029,
+    "body_energy": 0.0005,
+    "mood": 0.0008
+  },
+  "delta_suppression_reason": [],
+  "run_context": {
+    "active_run_id": "6355b2dd659d417c92679e3f3720c7a3",
+    "current_goal": "你好，你是谁？你有名字吗？",
+    "drive_source": "user_input",
+    "execution_state_visible": false,
+    "run_status": "paused"
+  },
+  "run_contamination_detected": true,
+  "identity_evidence_score": 0.5866,
+  "identity_trigger_blockers": [],
+  "temperament_window_summary": {
+    "attachment_need": {
+      "delta_reason": "warm_confirmation",
+      "effective_push": 0.0025,
+      "freeze_reason": "none",
+      "recover_rate": 0.02,
+      "suppressed_by_clip": false,
+      "window_support": 0.0035
+    },
+    "boundary_softness": {
+      "delta_reason": "repeated_rejection",
+      "effective_push": 0.0001,
+      "freeze_reason": "none",
+      "recover_rate": 0.025,
+      "suppressed_by_clip": false,
+      "window_support": 0.0
+    },
+    "cognitive_bandwidth": {
+      "delta_reason": "resource_pressure",
+      "effective_push": -0.1302,
+      "freeze_reason": "none",
+      "recover_rate": 0.02,
+      "suppressed_by_clip": false,
+      "window_support": 0.8557
+    },
+    "desire_priority": {
+      "delta_reason": "identity_repetition",
+      "effective_push": -0.0318,
+      "freeze_reason": "none",
+      "recover_rate": 0.02,
+      "suppressed_by_clip": false,
+      "window_support": 0.021
+    },
+    "extraversion": {
+      "delta_reason": "withdrawal_pressure",
+      "effective_push": -0.0679,
+      "freeze_reason": "none",
+      "recover_rate": 0.02,
+      "suppressed_by_clip": false,
+      "window_support": 0.51
+    },
+    "patience": {
+      "delta_reason": "sustained_friction",
+      "effective_push": -0.0089,
+      "freeze_reason": "none",
+      "recover_rate": 0.03,
+      "suppressed_by_clip": false,
+      "window_support": 0.0907
+    },
+    "sensitivity": {
+      "delta_reason": "repeated_rejection",
+      "effective_push": 0.0002,
+      "freeze_reason": "none",
+      "recover_rate": 0.02,
+      "suppressed_by_clip": false,
+      "window_support": 0.0
+    }
+  },
+  "probability_field": {
+    "action": {
+      "aggregated_inhibitory_drive": {
+        "recall": 1.0,
+        "wander": 0.1
+      },
+      "aggregated_modulated_delta": {
+        "clarify": 0.43066,
+        "connect": 0.092476,
+        "do_homework": 0.588555,
+        "plan": -0.01746,
+        "play_phone": 0.588555,
+        "recall": 0.442795,
+        "respond": 0.884506,
+        "rest": 1.315508,
+        "short_reply": 0.515377,
+        "wander": -0.387776,
+        "写作业": 0.618557,
+        "玩手机": 0.858531
+      },
+      "aggregated_normalized_delta": {
+        "clarify": 0.926486,
+        "connect": -0.022707,
+        "do_homework": 1.383611,
+        "plan": -0.140994,
+        "play_phone": 1.383611,
+        "recall": -1.802534,
+        "respond": 1.805477,
+        "rest": 2.939734,
+        "short_reply": 1.069994,
+        "wander": -0.801344,
+        "写作业": 1.069632,
+        "玩手机": 1.344986
+      },
+      "aggregated_projected_delta": {
+        "clarify": 0.43066,
+        "connect": 0.092476,
+        "do_homework": 0.588555,
+        "plan": -0.01746,
+        "play_phone": 0.588555,
+        "recall": -0.557205,
+        "respond": 0.884506,
+        "rest": 1.315508,
+        "short_reply": 0.515377,
+        "wander": -0.487776,
+        "写作业": 0.618557,
+        "玩手机": 0.858531
+      },
+      "aggregated_raw_signal": {
+        "affect_regulation": 0.58052,
+        "behavior_exploration": 0.166667,
+        "clarify": 0.328116,
+        "connect": 0.05943,
+        "do_homework": 0.588555,
+        "memory_exploration": 0.3144,
+        "plan": -0.054078,
+        "play_phone": 0.588555,
+        "recall": 0.356981,
+        "relation_calibration": 0.242146,
+        "respond": 0.903748,
+        "rest": 1.183466,
+        "short_reply": 0.515377,
+        "wander": -0.421894,
+        "写作业": 0.618557,
+        "玩手机": 0.858531
+      },
+      "base_energy": {
+        "clarify": -2.525729,
+        "connect": -2.554744,
+        "do_homework": -3.912023,
+        "plan": -2.137071,
+        "play_phone": -3.912023,
+        "recall": -0.227262,
+        "respond": -0.693147,
+        "rest": -2.38033,
+        "short_reply": -1.848863,
+        "wander": -4.60517,
+        "写作业": -3.912023,
+        "玩手机": -3.912023
+      },
+      "contribution_audit": [
+        {
+          "compromise_template_prior": {},
+          "confidence_calibrated": 0.4292,
+          "confidence_raw": 0.4292,
+          "delta_normalized": {
+            "clarify": 0.0,
+            "plan": 0.099992,
+            "recall": 0.074068,
+            "respond": 0.037034,
+            "rest": 0.056699,
+            "short_reply": 0.113401,
+            "wander": -0.088882
+          },
+          "delta_projected": {
+            "clarify": 0.0,
+            "plan": 0.0378,
+            "recall": 0.028,
+            "respond": 0.014,
+            "rest": 0.021434,
+            "short_reply": 0.042869,
+            "wander": -0.0336
+          },
+          "delta_raw": {
+            "clarify": 0.0,
+            "plan": 0.0378,
+            "recall": 0.028,
+            "respond": 0.014,
+            "rest": 0.021434,
+            "short_reply": 0.042869,
+            "wander": -0.0336
+          },
+          "dependency_trace": [
+            "tool_choice:none",
+            "tool_affordance_prior:0.28",
+            "tool_expected_value:0.21",
+            "tool_cost_penalty:0.5359",
+            "matched_files:0",
+            "dirty_worktree:true",
+            "drive_source:user_input"
+          ],
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "inhibitory_drive": {},
+          "level": "action",
+          "modulated_delta": {
+            "clarify": 0.0,
+            "plan": 0.0378,
+            "recall": 0.028,
+            "respond": 0.014,
+            "rest": 0.021434,
+            "short_reply": 0.042869,
+            "wander": -0.0336
+          },
+          "module_name": "SkillExecutor",
+          "module_type": "tooling",
+          "normalization_reason": "rms_temperature=1.0801",
+          "peak_clusters": [],
+          "posterior": {},
+          "projection_reason": "tool affordance prior projected from active run context",
+          "raw_signal": {
+            "clarify": 0.0,
+            "plan": 0.0378,
+            "recall": 0.028,
+            "respond": 0.014,
+            "rest": 0.021434,
+            "short_reply": 0.042869,
+            "wander": -0.0336
+          },
+          "stats": {
+            "clipped": false,
+            "max_abs": 0.042869,
+            "mean_abs": 0.025386,
+            "rms": 0.028872,
+            "support_size": 7
+          },
+          "target_space": "action",
+          "trace_reason": "active run tool context biases action field toward executable next steps"
+        },
+        {
+          "compromise_template_prior": {},
+          "confidence_calibrated": 0.6012,
+          "confidence_raw": 0.6329,
+          "delta_normalized": {
+            "connect": -0.253968,
+            "respond": 0.222222,
+            "wander": -0.126984
+          },
+          "delta_projected": {
+            "connect": -0.08,
+            "respond": 0.07,
+            "wander": -0.04
+          },
+          "delta_raw": {
+            "connect": -0.08,
+            "respond": 0.07,
+            "wander": -0.04
+          },
+          "dependency_trace": [
+            "query_kind:general",
+            "query_intent:general_exchange",
+            "disclosure_intent:withhold",
+            "display_label:小栖",
+            "anchor:affect:residue",
+            "anchor:cue:identity:name_probe",
+            "anchor:cue:帮我规划今晚"
+          ],
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "inhibitory_drive": {},
+          "level": "action",
+          "modulated_delta": {
+            "connect": -0.08,
+            "respond": 0.07,
+            "wander": -0.04
+          },
+          "module_name": "IdentityRuntime",
+          "module_type": "identity",
+          "normalization_reason": "rms_temperature=0.9",
+          "peak_clusters": [],
+          "posterior": {},
+          "projection_reason": "identity prior projected from identity context",
+          "raw_signal": {
+            "connect": -0.08,
+            "respond": 0.07,
+            "wander": -0.04
+          },
+          "stats": {
+            "clipped": false,
+            "max_abs": 0.08,
+            "mean_abs": 0.063333,
+            "rms": 0.065574,
+            "support_size": 3
+          },
+          "target_space": "action",
+          "trace_reason": "identity prior query=general disclosure=withhold"
+        },
+        {
+          "compromise_template_prior": {},
+          "confidence_calibrated": 0.6356,
+          "confidence_raw": 0.7419,
+          "delta_normalized": {
+            "clarify": 0.136921,
+            "plan": 0.328606,
+            "respond": 0.21907,
+            "rest": 0.070292,
+            "wander": -0.414425
+          },
+          "delta_projected": {
+            "clarify": 0.04313,
+            "plan": 0.103511,
+            "respond": 0.069007,
+            "rest": 0.022142,
+            "wander": -0.130544
+          },
+          "delta_raw": {
+            "clarify": 0.04313,
+            "plan": 0.103511,
+            "respond": 0.069007,
+            "rest": 0.022142,
+            "wander": -0.130544
+          },
+          "dependency_trace": [
+            "self_consistency_score:0.8037",
+            "volatility_signal:0.7908",
+            "continuity_window:8",
+            "non_interactive_shift:0"
+          ],
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "inhibitory_drive": {},
+          "level": "action",
+          "modulated_delta": {
+            "clarify": 0.04313,
+            "plan": 0.103511,
+            "respond": 0.069007,
+            "rest": 0.022142,
+            "wander": -0.130544
+          },
+          "module_name": "LongRunAnalyzer",
+          "module_type": "longrun",
+          "normalization_reason": "rms_temperature=0.9",
+          "peak_clusters": [],
+          "posterior": {},
+          "projection_reason": "long-run prior projected from longitudinal continuity summary",
+          "raw_signal": {
+            "clarify": 0.04313,
+            "plan": 0.103511,
+            "respond": 0.069007,
+            "rest": 0.022142,
+            "wander": -0.130544
+          },
+          "stats": {
+            "clipped": false,
+            "max_abs": 0.130544,
+            "mean_abs": 0.073667,
+            "rms": 0.083509,
+            "support_size": 5
+          },
+          "target_space": "action",
+          "trace_reason": "long-run continuity prior consistency=0.80 volatility=0.79"
+        },
+        {
+          "compromise_template_prior": {},
+          "confidence_calibrated": 0.64,
+          "confidence_raw": 0.64,
+          "delta_normalized": {
+            "respond": 0.228571
+          },
+          "delta_projected": {
+            "respond": 0.08
+          },
+          "delta_raw": {
+            "respond": 0.08
+          },
+          "dependency_trace": [
+            "priority:task_goal",
+            "control:task",
+            "sigma_scale:1.0",
+            "top_action:respond"
+          ],
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "inhibitory_drive": {},
+          "level": "action",
+          "modulated_delta": {
+            "respond": 0.08
+          },
+          "module_name": "SalienceAgent",
+          "module_type": "salience",
+          "normalization_reason": "rms_temperature=1.0",
+          "peak_clusters": [],
+          "posterior": {},
+          "projection_reason": "salience bias projected from salience head",
+          "raw_signal": {
+            "respond": 0.08
+          },
+          "stats": {
+            "clipped": false,
+            "max_abs": 0.08,
+            "mean_abs": 0.08,
+            "rms": 0.08,
+            "support_size": 1
+          },
+          "target_space": "action",
+          "trace_reason": "salience=0.10; top_action=respond"
+        },
+        {
+          "compromise_template_prior": {},
+          "confidence_calibrated": 0.736,
+          "confidence_raw": 0.64,
+          "delta_normalized": {
+            "respond": 0.248447,
+            "rest": 0.757863
+          },
+          "delta_projected": {
+            "respond": 0.1,
+            "rest": 0.30504
+          },
+          "delta_raw": {
+            "respond": 0.1,
+            "rest": 0.30504
+          },
+          "dependency_trace": [
+            "priority:body_safety",
+            "control:body",
+            "sigma_scale:1.15",
+            "top_action:rest"
+          ],
+          "failure_taxonomy": [],
+          "hard_masked_targets": [
+            "connect"
+          ],
+          "inhibitory_drive": {},
+          "level": "action",
+          "modulated_delta": {
+            "respond": 0.1,
+            "rest": 0.30504
+          },
+          "module_name": "BodyStateAgent",
+          "module_type": "body",
+          "normalization_reason": "rms_temperature=1.15",
+          "peak_clusters": [],
+          "posterior": {},
+          "projection_reason": "homeostatic bias projected from body head",
+          "raw_signal": {
+            "respond": 0.1,
+            "rest": 0.30504
+          },
+          "stats": {
+            "clipped": false,
+            "max_abs": 0.30504,
+            "mean_abs": 0.20252,
+            "rms": 0.226991,
+            "support_size": 2
+          },
+          "target_space": "action",
+          "trace_reason": "energy=0.14; top_action=rest"
+        },
+        {
+          "compromise_template_prior": {},
+          "confidence_calibrated": 0.6,
+          "confidence_raw": 0.6,
+          "delta_normalized": {},
+          "delta_projected": {},
+          "delta_raw": {},
+          "dependency_trace": [
+            "priority:body_safety",
+            "control:body",
+            "sigma_scale:1.0"
+          ],
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "inhibitory_drive": {},
+          "level": "action",
+          "modulated_delta": {},
+          "module_name": "EmotionAgent",
+          "module_type": "emotion",
+          "normalization_reason": "rms_temperature=1.0",
+          "peak_clusters": [],
+          "posterior": {},
+          "projection_reason": "affect bias projected from emotion head",
+          "raw_signal": {},
+          "stats": {
+            "clipped": false,
+            "max_abs": 0.0,
+            "mean_abs": 0.0,
+            "rms": 0.0,
+            "support_size": 0
+          },
+          "target_space": "action",
+          "trace_reason": "valence=0.01"
+        },
+        {
+          "compromise_template_prior": {},
+          "confidence_calibrated": 0.58,
+          "confidence_raw": 0.58,
+          "delta_normalized": {
+            "connect": 0.565851,
+            "respond": 0.237954
+          },
+          "delta_projected": {
+            "connect": 0.198048,
+            "respond": 0.083284
+          },
+          "delta_raw": {
+            "connect": 0.198048,
+            "respond": 0.083284
+          },
+          "dependency_trace": [
+            "priority:relation_boundary",
+            "control:relation",
+            "sigma_scale:1.0"
+          ],
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "inhibitory_drive": {},
+          "level": "action",
+          "modulated_delta": {
+            "connect": 0.198048,
+            "respond": 0.083284
+          },
+          "module_name": "RelationshipAgent",
+          "module_type": "relationship",
+          "normalization_reason": "rms_temperature=1.0",
+          "peak_clusters": [],
+          "posterior": {},
+          "projection_reason": "relationship bias projected from relationship head",
+          "raw_signal": {
+            "connect": 0.198048,
+            "respond": 0.083284
+          },
+          "stats": {
+            "clipped": false,
+            "max_abs": 0.198048,
+            "mean_abs": 0.140666,
+            "rms": 0.15192,
+            "support_size": 2
+          },
+          "target_space": "action",
+          "trace_reason": "closeness=0.66; top_action=connect"
+        },
+        {
+          "compromise_template_prior": {},
+          "confidence_calibrated": 0.58,
+          "confidence_raw": 0.58,
+          "delta_normalized": {
+            "plan": -0.314357,
+            "recall": 0.050297,
+            "respond": 0.243451,
+            "rest": 0.46812,
+            "short_reply": 0.668514,
+            "wander": -0.322771
+          },
+          "delta_projected": {
+            "plan": -0.110025,
+            "recall": 0.017604,
+            "respond": 0.085208,
+            "rest": 0.163842,
+            "short_reply": 0.23398,
+            "wander": -0.11297
+          },
+          "delta_raw": {
+            "plan": -0.110025,
+            "recall": 0.017604,
+            "respond": 0.085208,
+            "rest": 0.163842,
+            "short_reply": 0.23398,
+            "wander": -0.11297
+          },
+          "dependency_trace": [
+            "priority:budget_overload",
+            "control:resource",
+            "sigma_scale:1.0",
+            "risk:action_shrink_scale=0.6532",
+            "risk:body_hunger_bias=0.5769",
+            "risk:deliberation_compress=0.5665",
+            "risk:effort_avoidance_bias=0.4401",
+            "risk:rumination_bias=0.3534",
+            "risk:scarcity_pressure=0.867"
+          ],
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "inhibitory_drive": {},
+          "level": "action",
+          "modulated_delta": {
+            "plan": -0.110025,
+            "recall": 0.017604,
+            "respond": 0.085208,
+            "rest": 0.163842,
+            "short_reply": 0.23398,
+            "wander": -0.11297
+          },
+          "module_name": "ResourceAgent",
+          "module_type": "resource",
+          "normalization_reason": "rms_temperature=1.0",
+          "peak_clusters": [],
+          "posterior": {},
+          "projection_reason": "resource bias projected from resource head",
+          "raw_signal": {
+            "plan": -0.110025,
+            "recall": 0.017604,
+            "respond": 0.085208,
+            "rest": 0.163842,
+            "short_reply": 0.23398,
+            "wander": -0.11297
+          },
+          "stats": {
+            "clipped": false,
+            "max_abs": 0.23398,
+            "mean_abs": 0.120605,
+            "rms": 0.137858,
+            "support_size": 6
+          },
+          "target_space": "action",
+          "trace_reason": "budget=0.04; top_action=short_reply"
+        },
+        {
+          "compromise_template_prior": {},
+          "confidence_calibrated": 0.6,
+          "confidence_raw": 0.75,
+          "delta_normalized": {
+            "do_homework": 1.25,
+            "play_phone": 1.25
+          },
+          "delta_projected": {
+            "do_homework": 0.35,
+            "play_phone": 0.35
+          },
+          "delta_raw": {
+            "do_homework": 0.35,
+            "play_phone": 0.35
+          },
+          "dependency_trace": [
+            "priority:task_goal",
+            "control:task",
+            "sigma_scale:0.8",
+            "top_action:play_phone"
+          ],
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "inhibitory_drive": {},
+          "level": "action",
+          "modulated_delta": {
+            "do_homework": 0.35,
+            "play_phone": 0.35
+          },
+          "module_name": "PFCAgent",
+          "module_type": "executive",
+          "normalization_reason": "rms_temperature=0.8",
+          "peak_clusters": [],
+          "posterior": {},
+          "projection_reason": "executive prior projected from PFC model head",
+          "raw_signal": {
+            "do_homework": 0.35,
+            "play_phone": 0.35
+          },
+          "stats": {
+            "clipped": false,
+            "max_abs": 0.35,
+            "mean_abs": 0.35,
+            "rms": 0.35,
+            "support_size": 2
+          },
+          "target_space": "action",
+          "trace_reason": "The user's cue indicates a conflict between playing on the phone and doing homework. Given a high burn_rate_ratio (1.0) and low_balance_ratio (0.959), the system is under energy pressure, favoring immediate gratification (play_phone) over delayed tasks. However, habit_strength for homework is low (0.1316), and recall_strength is moderate (0.3248), suggesting some memory of homework importance. The closeness (0.6558) and valence (0.0124) are neutral, not strongly pushing toward either action. With latency_pressure high (1.0) and queue_pressure low (0.0156), there's urgency to act but no backlog pressure. The safe_mode and focus on 'rest' indicate a tendency to avoid effort, leaning toward play_phone. Thus, play_phone is slightly preferred, but with moderate confidence due to the balanced conflict."
+        },
+        {
+          "compromise_template_prior": {},
+          "confidence_calibrated": 0.6,
+          "confidence_raw": 0.6,
+          "delta_normalized": {
+            "recall": 0.182994,
+            "respond": 0.251589
+          },
+          "delta_projected": {
+            "recall": 0.064048,
+            "respond": 0.088056
+          },
+          "delta_raw": {
+            "recall": 0.064048,
+            "respond": 0.088056
+          },
+          "dependency_trace": [
+            "priority:task_goal",
+            "control:task",
+            "sigma_scale:1.0",
+            "top_action:respond"
+          ],
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "inhibitory_drive": {},
+          "level": "action",
+          "modulated_delta": {
+            "recall": 0.064048,
+            "respond": 0.088056
+          },
+          "module_name": "HabitAgent",
+          "module_type": "habit",
+          "normalization_reason": "rms_temperature=1.0",
+          "peak_clusters": [],
+          "posterior": {},
+          "projection_reason": "habit bias projected from habit head",
+          "raw_signal": {
+            "recall": 0.064048,
+            "respond": 0.088056
+          },
+          "stats": {
+            "clipped": false,
+            "max_abs": 0.088056,
+            "mean_abs": 0.076052,
+            "rms": 0.076994,
+            "support_size": 2
+          },
+          "target_space": "action",
+          "trace_reason": "habit=0.20; top_action=respond"
+        },
+        {
+          "compromise_template_prior": {},
+          "confidence_calibrated": 0.54,
+          "confidence_raw": 0.54,
+          "delta_normalized": {},
+          "delta_projected": {},
+          "delta_raw": {},
+          "dependency_trace": [
+            "priority:immediate_desire",
+            "control:desire",
+            "sigma_scale:1.0"
+          ],
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "inhibitory_drive": {},
+          "level": "action",
+          "modulated_delta": {},
+          "module_name": "DesireAgent",
+          "module_type": "desire",
+          "normalization_reason": "rms_temperature=1.0",
+          "peak_clusters": [],
+          "posterior": {},
+          "projection_reason": "desire bias projected from desire head",
+          "raw_signal": {},
+          "stats": {
+            "clipped": false,
+            "max_abs": 0.0,
+            "mean_abs": 0.0,
+            "rms": 0.0,
+            "support_size": 0
+          },
+          "target_space": "action",
+          "trace_reason": "comfort seeking"
+        },
+        {
+          "compromise_template_prior": {},
+          "confidence_calibrated": 0.46,
+          "confidence_raw": 0.46,
+          "delta_normalized": {},
+          "delta_projected": {},
+          "delta_raw": {},
+          "dependency_trace": [
+            "priority:roaming",
+            "control:dmn",
+            "sigma_scale:1.0"
+          ],
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "inhibitory_drive": {},
+          "level": "action",
+          "modulated_delta": {},
+          "module_name": "DMNAgent",
+          "module_type": "dmn",
+          "normalization_reason": "rms_temperature=1.0",
+          "peak_clusters": [],
+          "posterior": {},
+          "projection_reason": "dmn drift projected from dmn head",
+          "raw_signal": {},
+          "stats": {
+            "clipped": false,
+            "max_abs": 0.0,
+            "mean_abs": 0.0,
+            "rms": 0.0,
+            "support_size": 0
+          },
+          "target_space": "action",
+          "trace_reason": "background drift"
+        },
+        {
+          "compromise_template_prior": {},
+          "confidence_calibrated": 0.66,
+          "confidence_raw": 0.66,
+          "delta_normalized": {
+            "recall": 0.489874
+          },
+          "delta_projected": {
+            "recall": 0.171456
+          },
+          "delta_raw": {
+            "recall": 0.171456
+          },
+          "dependency_trace": [
+            "priority:task_goal",
+            "control:task",
+            "sigma_scale:1.0",
+            "top_action:recall"
+          ],
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "inhibitory_drive": {},
+          "level": "action",
+          "modulated_delta": {
+            "recall": 0.171456
+          },
+          "module_name": "HippocampusAgent",
+          "module_type": "memory",
+          "normalization_reason": "rms_temperature=1.0",
+          "peak_clusters": [],
+          "posterior": {},
+          "projection_reason": "memory recall bias projected from hippocampus head",
+          "raw_signal": {
+            "recall": 0.171456
+          },
+          "stats": {
+            "clipped": false,
+            "max_abs": 0.171456,
+            "mean_abs": 0.171456,
+            "rms": 0.171456,
+            "support_size": 1
+          },
+          "target_space": "action",
+          "trace_reason": "recall=0.32; top_action=recall"
+        },
+        {
+          "compromise_template_prior": {},
+          "confidence_calibrated": 0.5782,
+          "confidence_raw": 0.59,
+          "delta_normalized": {
+            "写作业": 0.754097,
+            "玩手机": 1.230369
+          },
+          "delta_projected": {
+            "写作业": 0.38,
+            "玩手机": 0.62
+          },
+          "delta_raw": {
+            "写作业": 0.38,
+            "玩手机": 0.62
+          },
+          "dependency_trace": [
+            "priority:task_goal",
+            "control:task",
+            "sigma_scale:0.98",
+            "top_action:玩手机"
+          ],
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "inhibitory_drive": {},
+          "level": "action",
+          "modulated_delta": {
+            "写作业": 0.38,
+            "玩手机": 0.62
+          },
+          "module_name": "ValueAgent",
+          "module_type": "value",
+          "normalization_reason": "rms_temperature=0.98",
+          "peak_clusters": [],
+          "posterior": {},
+          "projection_reason": "value bias projected from value head",
+          "raw_signal": {
+            "写作业": 0.38,
+            "玩手机": 0.62
+          },
+          "stats": {
+            "clipped": false,
+            "max_abs": 0.62,
+            "mean_abs": 0.5,
+            "rms": 0.514198,
+            "support_size": 2
+          },
+          "target_space": "action",
+          "trace_reason": "subjective value re-rank"
+        },
+        {
+          "compromise_template_prior": {},
+          "confidence_calibrated": 0.42,
+          "confidence_raw": 0.42,
+          "delta_normalized": {
+            "clarify": 0.130286,
+            "connect": 0.154006,
+            "respond": 0.081457
+          },
+          "delta_projected": {
+            "clarify": 0.0456,
+            "connect": 0.053902,
+            "respond": 0.02851
+          },
+          "delta_raw": {
+            "clarify": 0.0456,
+            "connect": 0.053902,
+            "respond": 0.02851
+          },
+          "dependency_trace": [
+            "priority:task_goal",
+            "control:task",
+            "sigma_scale:1.0",
+            "top_action:connect"
+          ],
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "inhibitory_drive": {},
+          "level": "action",
+          "modulated_delta": {
+            "clarify": 0.0456,
+            "connect": 0.053902,
+            "respond": 0.02851
+          },
+          "module_name": "UnconsciousAgent",
+          "module_type": "trait",
+          "normalization_reason": "rms_temperature=1.0",
+          "peak_clusters": [],
+          "posterior": {},
+          "projection_reason": "trait bias projected from unconscious head",
+          "raw_signal": {
+            "clarify": 0.0456,
+            "connect": 0.053902,
+            "respond": 0.02851
+          },
+          "stats": {
+            "clipped": false,
+            "max_abs": 0.053902,
+            "mean_abs": 0.042671,
+            "rms": 0.043961,
+            "support_size": 3
+          },
+          "target_space": "action",
+          "trace_reason": "temperament baseline; top_action=connect"
+        },
+        {
+          "compromise_template_prior": {},
+          "confidence_calibrated": 0.35,
+          "confidence_raw": 0.35,
+          "delta_normalized": {},
+          "delta_projected": {},
+          "delta_raw": {},
+          "dependency_trace": [
+            "priority:task_goal",
+            "control:task",
+            "sigma_scale:1.0"
+          ],
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "inhibitory_drive": {},
+          "level": "action",
+          "modulated_delta": {},
+          "module_name": "CerebellarPredictor",
+          "module_type": "predictive",
+          "normalization_reason": "rms_temperature=1.0",
+          "peak_clusters": [],
+          "posterior": {},
+          "projection_reason": "predictive smoothing projected from cerebellar head",
+          "raw_signal": {},
+          "stats": {
+            "clipped": false,
+            "max_abs": 0.0,
+            "mean_abs": 0.0,
+            "rms": 0.0,
+            "support_size": 0
+          },
+          "target_space": "action",
+          "trace_reason": "micro smoothing"
+        },
+        {
+          "compromise_template_prior": {},
+          "confidence_calibrated": 0.513,
+          "confidence_raw": 0.513,
+          "delta_normalized": {
+            "clarify": 0.292983,
+            "connect": 0.094417,
+            "plan": 0.104623,
+            "recall": 0.245183,
+            "respond": -0.054977,
+            "rest": 0.377263,
+            "wander": 0.09748
+          },
+          "delta_projected": {
+            "clarify": 0.102544,
+            "connect": 0.033046,
+            "plan": 0.036618,
+            "recall": 0.085814,
+            "respond": -0.019242,
+            "rest": 0.132042,
+            "wander": 0.034118
+          },
+          "delta_raw": {
+            "affect_regulation": 0.58052,
+            "behavior_exploration": 0.166667,
+            "memory_exploration": 0.3144,
+            "relation_calibration": 0.242146
+          },
+          "dependency_trace": [
+            "memory_exploration:0.3576",
+            "behavior_exploration:0.1895",
+            "affect_regulation:0.6602",
+            "relation_calibration:0.2754",
+            "round:146"
+          ],
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "inhibitory_drive": {},
+          "level": "action",
+          "modulated_delta": {
+            "clarify": 0.102544,
+            "connect": 0.033046,
+            "plan": 0.036618,
+            "recall": 0.085814,
+            "respond": -0.019242,
+            "rest": 0.132042,
+            "wander": 0.034118
+          },
+          "module_name": "EndogenousMotivationPool",
+          "module_type": "motivation",
+          "normalization_reason": "rms_temperature=1.0",
+          "peak_clusters": [],
+          "posterior": {},
+          "projection_reason": "motivation pool projected from endogenous drive state",
+          "raw_signal": {
+            "affect_regulation": 0.58052,
+            "behavior_exploration": 0.166667,
+            "memory_exploration": 0.3144,
+            "relation_calibration": 0.242146
+          },
+          "stats": {
+            "clipped": false,
+            "max_abs": 0.132042,
+            "mean_abs": 0.063346,
+            "rms": 0.074911,
+            "support_size": 7
+          },
+          "target_space": "action",
+          "trace_reason": "endogenous motivations inject first-class action bias"
+        },
+        {
+          "compromise_template_prior": {},
+          "confidence_calibrated": 0.7104,
+          "confidence_raw": 0.6683,
+          "delta_normalized": {
+            "wander": -0.616658
+          },
+          "delta_projected": {
+            "wander": -0.19085
+          },
+          "delta_raw": {
+            "wander": -0.19085
+          },
+          "dependency_trace": [
+            "winning_priority:task_goal",
+            "conflict_score:0.5787",
+            "passes:1",
+            "conflict_mode:none",
+            "winner_peak:respond",
+            "peak_count:1",
+            "dominant:body_gap",
+            "dominant:value_gap",
+            "dominant:proposal_divergence",
+            "arbitration_mode:soft_posterior_penalty"
+          ],
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "inhibitory_drive": {},
+          "level": "action",
+          "modulated_delta": {
+            "wander": -0.19085
+          },
+          "module_name": "ConflictMonitorAgent",
+          "module_type": "conflict",
+          "normalization_reason": "rms_temperature=0.8843",
+          "peak_clusters": [
+            {
+              "actions": [
+                "respond"
+              ],
+              "adjusted_mass": 0.543968,
+              "blocked": false,
+              "mutual_exclusion_with": [],
+              "peak_id": "peak_1",
+              "raw_mass": 0.543968
+            }
+          ],
+          "posterior": {
+            "respond": 1.0
+          },
+          "projection_reason": "conflict arbitration projected from action scales and blocked actions",
+          "raw_signal": {
+            "wander": -0.19085
+          },
+          "stats": {
+            "clipped": false,
+            "max_abs": 0.19085,
+            "mean_abs": 0.19085,
+            "rms": 0.19085,
+            "support_size": 1
+          },
+          "target_space": "action",
+          "trace_reason": "conflict arbitration priority=task_goal winner_peak=respond score=0.58"
+        },
+        {
+          "compromise_template_prior": {},
+          "confidence_calibrated": 0.3137,
+          "confidence_raw": 0.3137,
+          "delta_normalized": {
+            "clarify": -0.006613,
+            "do_homework": -0.009251,
+            "plan": -0.006613,
+            "play_phone": -0.009251,
+            "recall": -0.0066,
+            "respond": 0.013314,
+            "rest": -0.041006,
+            "short_reply": -0.009337,
+            "wander": -0.041444,
+            "写作业": -0.009244,
+            "玩手机": -0.009327
+          },
+          "delta_projected": {
+            "clarify": -0.002083,
+            "do_homework": -0.002914,
+            "plan": -0.002083,
+            "play_phone": -0.002914,
+            "recall": -0.002079,
+            "respond": 0.004194,
+            "rest": -0.012917,
+            "short_reply": -0.002941,
+            "wander": -0.013055,
+            "写作业": -0.002912,
+            "玩手机": -0.002938
+          },
+          "delta_raw": {
+            "clarify": -0.002083,
+            "do_homework": -0.002914,
+            "plan": -0.002083,
+            "play_phone": -0.002914,
+            "recall": -0.002079,
+            "respond": 0.004194,
+            "rest": -0.012917,
+            "short_reply": -0.002941,
+            "wander": -0.013055,
+            "写作业": -0.002912,
+            "玩手机": -0.002938
+          },
+          "dependency_trace": [
+            "lambda_noise:0.1137",
+            "emo_channel:neutral",
+            "kl:0.0011",
+            "v_t:0.3912"
+          ],
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "inhibitory_drive": {},
+          "level": "action",
+          "modulated_delta": {
+            "clarify": -0.002083,
+            "do_homework": -0.002914,
+            "plan": -0.002083,
+            "play_phone": -0.002914,
+            "recall": -0.002079,
+            "respond": 0.004194,
+            "rest": -0.012917,
+            "short_reply": -0.002941,
+            "wander": -0.013055,
+            "写作业": -0.002912,
+            "玩手机": -0.002938
+          },
+          "module_name": "StochasticPolicy",
+          "module_type": "stochastic",
+          "normalization_reason": "rms_temperature=0.9",
+          "peak_clusters": [],
+          "posterior": {},
+          "projection_reason": "stochastic action mixing projected from entropy-controlled noise",
+          "raw_signal": {
+            "clarify": -0.002083,
+            "do_homework": -0.002914,
+            "plan": -0.002083,
+            "play_phone": -0.002914,
+            "recall": -0.002079,
+            "respond": 0.004194,
+            "rest": -0.012917,
+            "short_reply": -0.002941,
+            "wander": -0.013055,
+            "写作业": -0.002912,
+            "玩手机": -0.002938
+          },
+          "stats": {
+            "clipped": false,
+            "max_abs": 0.013055,
+            "mean_abs": 0.004639,
+            "rms": 0.00611,
+            "support_size": 11
+          },
+          "target_space": "action",
+          "trace_reason": "stochastic mixing lambda=0.1137 channel=neutral"
+        },
+        {
+          "compromise_template_prior": {},
+          "confidence_calibrated": 0.2724,
+          "confidence_raw": 0.2801,
+          "delta_normalized": {
+            "wander": -0.285714
+          },
+          "delta_projected": {
+            "wander": -0.1
+          },
+          "delta_raw": {},
+          "dependency_trace": [
+            "guard_action:sampling_penalty",
+            "disclosure_detail:withhold",
+            "grounding:0.1374",
+            "state_source:focus",
+            "state_source:memory_activation",
+            "state_source:memory_cue",
+            "state_source:resource_scarcity"
+          ],
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "inhibitory_drive": {
+            "wander": 0.1
+          },
+          "level": "action",
+          "modulated_delta": {},
+          "module_name": "AuthenticityPolicy",
+          "module_type": "authenticity",
+          "normalization_reason": "rms_temperature=1.0",
+          "peak_clusters": [],
+          "posterior": {},
+          "projection_reason": "authenticity penalty projected from candidate penalties",
+          "raw_signal": {},
+          "stats": {
+            "clipped": false,
+            "max_abs": 0.1,
+            "mean_abs": 0.1,
+            "rms": 0.1,
+            "support_size": 1
+          },
+          "target_space": "action",
+          "trace_reason": "authenticity penalty guard=sampling_penalty grounding=0.14"
+        },
+        {
+          "compromise_template_prior": {},
+          "confidence_calibrated": 1.0,
+          "confidence_raw": 1.0,
+          "delta_normalized": {
+            "clarify": 0.636513,
+            "do_homework": 0.636513,
+            "plan": 0.636513,
+            "play_phone": 0.636513,
+            "recall": -2.636005,
+            "respond": 0.636513,
+            "rest": 0.636513,
+            "short_reply": 0.636513,
+            "wander": 0.636513,
+            "写作业": 0.636513,
+            "玩手机": 0.636513
+          },
+          "delta_projected": {
+            "clarify": 0.241469,
+            "do_homework": 0.241469,
+            "plan": 0.241469,
+            "play_phone": 0.241469,
+            "recall": -1.0,
+            "respond": 0.241469,
+            "rest": 0.241469,
+            "short_reply": 0.241469,
+            "wander": 0.241469,
+            "写作业": 0.241469,
+            "玩手机": 0.241469
+          },
+          "delta_raw": {
+            "clarify": 0.241469,
+            "do_homework": 0.241469,
+            "plan": 0.241469,
+            "play_phone": 0.241469,
+            "respond": 0.241469,
+            "rest": 0.241469,
+            "short_reply": 0.241469,
+            "wander": 0.241469,
+            "写作业": 0.241469,
+            "玩手机": 0.241469
+          },
+          "dependency_trace": [
+            "action:recall",
+            "gate:0.0000"
+          ],
+          "failure_taxonomy": [],
+          "hard_masked_targets": [
+            "recall"
+          ],
+          "inhibitory_drive": {
+            "recall": 1.0
+          },
+          "level": "action",
+          "modulated_delta": {
+            "clarify": 0.241469,
+            "do_homework": 0.241469,
+            "plan": 0.241469,
+            "play_phone": 0.241469,
+            "respond": 0.241469,
+            "rest": 0.241469,
+            "short_reply": 0.241469,
+            "wander": 0.241469,
+            "写作业": 0.241469,
+            "玩手机": 0.241469
+          },
+          "module_name": "OutputGate",
+          "module_type": "guard",
+          "normalization_reason": "rms_temperature=1.0",
+          "peak_clusters": [],
+          "posterior": {},
+          "projection_reason": "output gate projected from final action suppression",
+          "raw_signal": {
+            "clarify": 0.241469,
+            "do_homework": 0.241469,
+            "plan": 0.241469,
+            "play_phone": 0.241469,
+            "respond": 0.241469,
+            "rest": 0.241469,
+            "short_reply": 0.241469,
+            "wander": 0.241469,
+            "写作业": 0.241469,
+            "玩手机": 0.241469
+          },
+          "stats": {
+            "clipped": false,
+            "max_abs": 1.0,
+            "mean_abs": 0.310426,
+            "rms": 0.379362,
+            "support_size": 11
+          },
+          "target_space": "action",
+          "trace_reason": "output gate applied gate=0.0000"
+        },
+        {
+          "compromise_template_prior": {},
+          "confidence_calibrated": 0.92,
+          "confidence_raw": 1.0,
+          "delta_normalized": {
+            "connect": -0.338406,
+            "plan": -0.976692,
+            "recall": 0.234442,
+            "respond": 0.120361,
+            "rest": 1.330695,
+            "wander": -0.428102
+          },
+          "delta_projected": {
+            "connect": -0.11252,
+            "plan": -0.32475,
+            "recall": 0.077952,
+            "respond": 0.04002,
+            "rest": 0.442456,
+            "wander": -0.142344
+          },
+          "delta_raw": {
+            "connect": -0.11252,
+            "plan": -0.32475,
+            "recall": 0.077952,
+            "respond": 0.04002,
+            "rest": 0.442456,
+            "wander": -0.142344
+          },
+          "dependency_trace": [
+            "body_energy:0.1374",
+            "memory_activation:0.3248",
+            "affect_residue:0.0449",
+            "resource_scarcity:0.7908",
+            "habit_readiness:0.2004"
+          ],
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "inhibitory_drive": {},
+          "level": "action",
+          "modulated_delta": {
+            "connect": -0.11252,
+            "plan": -0.32475,
+            "recall": 0.077952,
+            "respond": 0.04002,
+            "rest": 0.442456,
+            "wander": -0.142344
+          },
+          "module_name": "VitalityEngine",
+          "module_type": "vitality",
+          "normalization_reason": "rms_temperature=0.95",
+          "peak_clusters": [],
+          "posterior": {},
+          "projection_reason": "vitality modulation projected from slow variables",
+          "raw_signal": {
+            "connect": -0.11252,
+            "plan": -0.32475,
+            "recall": 0.077952,
+            "respond": 0.04002,
+            "rest": 0.442456,
+            "wander": -0.142344
+          },
+          "stats": {
+            "clipped": false,
+            "max_abs": 0.442456,
+            "mean_abs": 0.190007,
+            "rms": 0.238688,
+            "support_size": 6
+          },
+          "target_space": "action",
+          "trace_reason": "vitality modulation from slow variables"
+        }
+      ],
+      "counterfactual_top_peaks": [
+        {
+          "final_energy": 1.11233,
+          "hard_masked": false,
+          "posterior": 0.519581,
+          "target": "respond"
+        },
+        {
+          "final_energy": 0.559404,
+          "hard_masked": false,
+          "posterior": 0.298896,
+          "target": "rest"
+        },
+        {
+          "final_energy": -0.778869,
+          "hard_masked": false,
+          "posterior": 0.0784,
+          "target": "short_reply"
+        }
+      ],
+      "failure_taxonomy": [],
+      "final_energy": {
+        "clarify": -1.599243,
+        "connect": -Infinity,
+        "do_homework": -2.528412,
+        "plan": -2.278065,
+        "play_phone": -2.528412,
+        "recall": -Infinity,
+        "respond": 1.11233,
+        "rest": 0.559404,
+        "short_reply": -0.778869,
+        "wander": -5.406514,
+        "写作业": -2.842391,
+        "玩手机": -2.567037
+      },
+      "hard_masked_targets": [
+        "connect",
+        "recall"
+      ],
+      "layer": "action",
+      "winner_posterior": {
+        "clarify": 0.034517,
+        "do_homework": 0.01363,
+        "plan": 0.017507,
+        "play_phone": 0.01363,
+        "respond": 0.519581,
+        "rest": 0.298896,
+        "short_reply": 0.0784,
+        "wander": 0.000767,
+        "写作业": 0.009957,
+        "玩手机": 0.013114
+      },
+      "winner_target": "rest"
+    },
+    "context": {
+      "aggregated_inhibitory_drive": {},
+      "aggregated_modulated_delta": {
+        "cue:我又想玩手机又想写作业": 0.36368,
+        "relation_context": 0.131164,
+        "task_relevance": 0.19
+      },
+      "aggregated_normalized_delta": {
+        "cue:我又想玩手机又想写作业": 0.715815,
+        "relation_context": 0.258164,
+        "task_relevance": 0.373968
+      },
+      "aggregated_projected_delta": {
+        "cue:我又想玩手机又想写作业": 0.36368,
+        "relation_context": 0.131164,
+        "task_relevance": 0.19
+      },
+      "aggregated_raw_signal": {
+        "cue:我又想玩手机又想写作业": 0.36368,
+        "relation_context": 0.131164,
+        "task_relevance": 0.19
+      },
+      "base_energy": {
+        "relation_context": 0.65582,
+        "task_relevance": 0.26
+      },
+      "contribution_audit": [
+        {
+          "compromise_template_prior": {},
+          "confidence_calibrated": 0.62,
+          "confidence_raw": 0.62,
+          "delta_normalized": {
+            "cue:我又想玩手机又想写作业": 1.15454,
+            "relation_context": 0.416394,
+            "task_relevance": 0.603175
+          },
+          "delta_projected": {
+            "cue:我又想玩手机又想写作业": 0.36368,
+            "relation_context": 0.131164,
+            "task_relevance": 0.19
+          },
+          "delta_raw": {
+            "cue:我又想玩手机又想写作业": 0.36368,
+            "relation_context": 0.131164,
+            "task_relevance": 0.19
+          },
+          "dependency_trace": [
+            "cue:我又想玩手机又想写作业",
+            "recall_strength:0.3248",
+            "closeness:0.6558"
+          ],
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "inhibitory_drive": {},
+          "level": "context",
+          "modulated_delta": {
+            "cue:我又想玩手机又想写作业": 0.36368,
+            "relation_context": 0.131164,
+            "task_relevance": 0.19
+          },
+          "module_name": "ThalamusAttentionAgent",
+          "module_type": "context",
+          "normalization_reason": "rms_temperature=0.9",
+          "peak_clusters": [],
+          "posterior": {},
+          "projection_reason": "context routing projected into context energy",
+          "raw_signal": {
+            "cue:我又想玩手机又想写作业": 0.36368,
+            "relation_context": 0.131164,
+            "task_relevance": 0.19
+          },
+          "stats": {
+            "clipped": false,
+            "max_abs": 0.36368,
+            "mean_abs": 0.228281,
+            "rms": 0.248708,
+            "support_size": 3
+          },
+          "target_space": "context",
+          "trace_reason": "thalamus routes salient cue and task-relevant context"
+        }
+      ],
+      "counterfactual_top_peaks": [
+        {
+          "final_energy": 0.913984,
+          "hard_masked": false,
+          "posterior": 0.388198,
+          "target": "relation_context"
+        },
+        {
+          "final_energy": 0.715815,
+          "hard_masked": false,
+          "posterior": 0.318412,
+          "target": "cue:我又想玩手机又想写作业"
+        },
+        {
+          "final_energy": 0.633968,
+          "hard_masked": false,
+          "posterior": 0.293389,
+          "target": "task_relevance"
+        }
+      ],
+      "failure_taxonomy": [],
+      "final_energy": {
+        "cue:我又想玩手机又想写作业": 0.715815,
+        "relation_context": 0.913984,
+        "task_relevance": 0.633968
+      },
+      "hard_masked_targets": [],
+      "layer": "context",
+      "winner_posterior": {
+        "cue:我又想玩手机又想写作业": 0.318412,
+        "relation_context": 0.388198,
+        "task_relevance": 0.293389
+      },
+      "winner_target": "relation_context"
+    },
+    "couplings": [
+      {
+        "allowed_phase": "tick",
+        "carrier_signal": "context_route",
+        "enabled": true,
+        "projection_rule": "field_native",
+        "source_layer": "context",
+        "target_layer": "memory"
+      },
+      {
+        "allowed_phase": "tick",
+        "carrier_signal": "memory_prior",
+        "enabled": true,
+        "projection_rule": "field_native",
+        "source_layer": "memory",
+        "target_layer": "action"
+      },
+      {
+        "allowed_phase": "render",
+        "carrier_signal": "render_plan",
+        "enabled": true,
+        "projection_rule": "field_native",
+        "source_layer": "action",
+        "target_layer": "token"
+      }
+    ],
+    "memory": {
+      "aggregated_inhibitory_drive": {},
+      "aggregated_modulated_delta": {
+        "我又想玩手机又想写作业": 0.63685
+      },
+      "aggregated_normalized_delta": {
+        "我又想玩手机又想写作业": 0.882526
+      },
+      "aggregated_projected_delta": {
+        "我又想玩手机又想写作业": 0.63685
+      },
+      "aggregated_raw_signal": {
+        "我又想玩手机又想写作业": 0.63685
+      },
+      "base_energy": {
+        "我又想玩手机又想写作业": 0.503754
+      },
+      "contribution_audit": [
+        {
+          "compromise_template_prior": {},
+          "confidence_calibrated": 0.56,
+          "confidence_raw": 0.56,
+          "delta_normalized": {
+            "我又想玩手机又想写作业": 0.732702
+          },
+          "delta_projected": {
+            "我又想玩手机又想写作业": 0.23593
+          },
+          "delta_raw": {
+            "我又想玩手机又想写作业": 0.23593
+          },
+          "dependency_trace": [
+            "cue:我又想玩手机又想写作业",
+            "recall_strength:0.3248",
+            "closeness:0.6558"
+          ],
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "inhibitory_drive": {},
+          "level": "memory",
+          "modulated_delta": {
+            "我又想玩手机又想写作业": 0.23593
+          },
+          "module_name": "ThalamusAttentionAgent",
+          "module_type": "context",
+          "normalization_reason": "rms_temperature=0.92",
+          "peak_clusters": [],
+          "posterior": {},
+          "projection_reason": "context route projected into memory energy",
+          "raw_signal": {
+            "我又想玩手机又想写作业": 0.23593
+          },
+          "stats": {
+            "clipped": false,
+            "max_abs": 0.23593,
+            "mean_abs": 0.23593,
+            "rms": 0.23593,
+            "support_size": 1
+          },
+          "target_space": "memory",
+          "trace_reason": "thalamus routes context signal into memory field"
+        },
+        {
+          "compromise_template_prior": {},
+          "confidence_calibrated": 0.4262,
+          "confidence_raw": 0.4262,
+          "delta_normalized": {
+            "我又想玩手机又想写作业": 1.10796
+          },
+          "delta_projected": {
+            "我又想玩手机又想写作业": 0.40092
+          },
+          "delta_raw": {
+            "我又想玩手机又想写作业": 0.40092
+          },
+          "dependency_trace": [
+            "cue:我又想玩手机又想写作业",
+            "recall_strength:0.3248",
+            "interference:0.0",
+            "prior_vector_strength:0.3248",
+            "detail_bias:0.3248",
+            "gist_bias:0.2207",
+            "cue_quality_bias:0.0",
+            "episode_id:ep-4cb1c4fd9e",
+            "separation_id:sep-949efcbe39"
+          ],
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "inhibitory_drive": {},
+          "level": "memory",
+          "modulated_delta": {
+            "我又想玩手机又想写作业": 0.40092
+          },
+          "module_name": "HippocampusAgent",
+          "module_type": "memory",
+          "normalization_reason": "rms_temperature=0.9026",
+          "peak_clusters": [],
+          "posterior": {},
+          "projection_reason": "memory prior vector projected into memory prior",
+          "raw_signal": {
+            "我又想玩手机又想写作业": 0.40092
+          },
+          "stats": {
+            "clipped": false,
+            "max_abs": 0.40092,
+            "mean_abs": 0.40092,
+            "rms": 0.40092,
+            "support_size": 1
+          },
+          "target_space": "memory",
+          "trace_reason": "memory prior for cue=我又想玩手机又想写作业 episodic=0.32 detail=0.32 interference=0.00"
+        }
+      ],
+      "counterfactual_top_peaks": [
+        {
+          "final_energy": 1.38628,
+          "hard_masked": false,
+          "posterior": 1.0,
+          "target": "我又想玩手机又想写作业"
+        }
+      ],
+      "failure_taxonomy": [],
+      "final_energy": {
+        "我又想玩手机又想写作业": 1.38628
+      },
+      "hard_masked_targets": [],
+      "layer": "memory",
+      "winner_posterior": {
+        "我又想玩手机又想写作业": 1.0
+      },
+      "winner_target": "我又想玩手机又想写作业"
+    },
+    "source_chain": [
+      "probability_field_native",
+      "context_memory_action",
+      "action_field_after_conflict",
+      "action_field_after_stochastic",
+      "action_field_after_authenticity",
+      "action_field_after_output_gate",
+      "action_field_after_vitality",
+      "context_memory_action_token",
+      "field_first_tick"
+    ],
+    "token": {
+      "aggregated_inhibitory_drive": {},
+      "aggregated_modulated_delta": {
+        "act:rest": 0.32,
+        "cue:我又想玩手机又想写作业": 0.198464,
+        "tone:direct:0.58": 0.10467,
+        "tone:warm:0.58": 0.092336
+      },
+      "aggregated_normalized_delta": {
+        "act:rest": 0.675777,
+        "cue:我又想玩手机又想写作业": 0.419117,
+        "tone:direct:0.58": 0.221042,
+        "tone:warm:0.58": 0.194995
+      },
+      "aggregated_projected_delta": {
+        "act:rest": 0.32,
+        "cue:我又想玩手机又想写作业": 0.198464,
+        "tone:direct:0.58": 0.10467,
+        "tone:warm:0.58": 0.092336
+      },
+      "aggregated_raw_signal": {
+        "act:rest": 0.32,
+        "cue:我又想玩手机又想写作业": 0.198464,
+        "tone:direct:0.58": 0.10467,
+        "tone:warm:0.58": 0.092336
+      },
+      "base_energy": {
+        "act:clarify": 0.053524,
+        "act:do_homework": 0.021142,
+        "act:plan": 0.056483,
+        "act:play_phone": 0.021142,
+        "act:recall": 0.125649,
+        "act:respond": 0.741708,
+        "act:rest": 0.221112,
+        "act:short_reply": 0.121607,
+        "act:wander": 0.001844,
+        "act:写作业": 0.015444,
+        "act:玩手机": 0.02034
+      },
+      "contribution_audit": [
+        {
+          "compromise_template_prior": {},
+          "confidence_calibrated": 0.68,
+          "confidence_raw": 0.68,
+          "delta_normalized": {
+            "act:rest": 0.993789,
+            "cue:我又想玩手机又想写作业": 0.616348,
+            "tone:direct:0.58": 0.325062,
+            "tone:warm:0.58": 0.286758
+          },
+          "delta_projected": {
+            "act:rest": 0.32,
+            "cue:我又想玩手机又想写作业": 0.198464,
+            "tone:direct:0.58": 0.10467,
+            "tone:warm:0.58": 0.092336
+          },
+          "delta_raw": {
+            "act:rest": 0.32,
+            "cue:我又想玩手机又想写作业": 0.198464,
+            "tone:direct:0.58": 0.10467,
+            "tone:warm:0.58": 0.092336
+          },
+          "dependency_trace": [
+            "action:rest",
+            "gate:1.0",
+            "query_kind:general",
+            "cue:我又想玩手机又想写作业"
+          ],
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "inhibitory_drive": {},
+          "level": "token",
+          "modulated_delta": {
+            "act:rest": 0.32,
+            "cue:我又想玩手机又想写作业": 0.198464,
+            "tone:direct:0.58": 0.10467,
+            "tone:warm:0.58": 0.092336
+          },
+          "module_name": "Renderer",
+          "module_type": "token",
+          "normalization_reason": "rms_temperature=0.92",
+          "peak_clusters": [],
+          "posterior": {},
+          "projection_reason": "render plan projected into token field",
+          "raw_signal": {
+            "act:rest": 0.32,
+            "cue:我又想玩手机又想写作业": 0.198464,
+            "tone:direct:0.58": 0.10467,
+            "tone:warm:0.58": 0.092336
+          },
+          "stats": {
+            "clipped": false,
+            "max_abs": 0.32,
+            "mean_abs": 0.178868,
+            "rms": 0.200792,
+            "support_size": 4
+          },
+          "target_space": "token",
+          "trace_reason": "render plan unfolds action and expression into token field"
+        }
+      ],
+      "counterfactual_top_peaks": [
+        {
+          "final_energy": 0.896889,
+          "hard_masked": false,
+          "posterior": 0.136283,
+          "target": "act:rest"
+        },
+        {
+          "final_energy": 0.741708,
+          "hard_masked": false,
+          "posterior": 0.116693,
+          "target": "act:respond"
+        },
+        {
+          "final_energy": 0.419117,
+          "hard_masked": false,
+          "posterior": 0.084517,
+          "target": "cue:我又想玩手机又想写作业"
+        }
+      ],
+      "failure_taxonomy": [],
+      "final_energy": {
+        "act:clarify": 0.053524,
+        "act:do_homework": 0.021142,
+        "act:plan": 0.056483,
+        "act:play_phone": 0.021142,
+        "act:recall": 0.125649,
+        "act:respond": 0.741708,
+        "act:rest": 0.896889,
+        "act:short_reply": 0.121607,
+        "act:wander": 0.001844,
+        "act:写作业": 0.015444,
+        "act:玩手机": 0.02034,
+        "cue:我又想玩手机又想写作业": 0.419117,
+        "tone:direct:0.58": 0.221042,
+        "tone:warm:0.58": 0.194995
+      },
+      "hard_masked_targets": [],
+      "layer": "token",
+      "winner_posterior": {
+        "act:clarify": 0.058637,
+        "act:do_homework": 0.056769,
+        "act:plan": 0.058811,
+        "act:play_phone": 0.056769,
+        "act:recall": 0.063022,
+        "act:respond": 0.116693,
+        "act:rest": 0.136283,
+        "act:short_reply": 0.062768,
+        "act:wander": 0.055684,
+        "act:写作业": 0.056446,
+        "act:玩手机": 0.056723,
+        "cue:我又想玩手机又想写作业": 0.084517,
+        "tone:direct:0.58": 0.06933,
+        "tone:warm:0.58": 0.067548
+      },
+      "winner_target": "act:rest"
+    },
+    "token_state": {
+      "active_module_sources": [
+        "BodyStateAgent",
+        "CerebellarPredictor",
+        "DMNAgent",
+        "DesireAgent",
+        "EmotionAgent",
+        "EndogenousMotivationPool",
+        "HabitAgent",
+        "HippocampusAgent",
+        "IdentityRuntime",
+        "LongRunAnalyzer",
+        "PFCAgent",
+        "RelationshipAgent",
+        "Renderer",
+        "ResourceAgent",
+        "SalienceAgent",
+        "SkillExecutor",
+        "ThalamusAttentionAgent",
+        "UnconsciousAgent",
+        "ValueAgent"
+      ],
+      "delta_generation_policy": "propagate_only",
+      "generated_delta_sources": [],
+      "prefix_tokens": [
+        "我又想玩手机又想写作业，该先做啥？"
+      ],
+      "sequence_consistency_tag": "persistent_field",
+      "step_index": 146
+    }
+  },
+  "token_state": {
+    "active_module_sources": [
+      "BodyStateAgent",
+      "CerebellarPredictor",
+      "DMNAgent",
+      "DesireAgent",
+      "EmotionAgent",
+      "EndogenousMotivationPool",
+      "HabitAgent",
+      "HippocampusAgent",
+      "IdentityRuntime",
+      "LongRunAnalyzer",
+      "PFCAgent",
+      "RelationshipAgent",
+      "Renderer",
+      "ResourceAgent",
+      "SalienceAgent",
+      "SkillExecutor",
+      "ThalamusAttentionAgent",
+      "UnconsciousAgent",
+      "ValueAgent"
+    ],
+    "delta_generation_policy": "propagate_only",
+    "generated_delta_sources": [],
+    "prefix_tokens": [
+      "我又想玩手机又想写作业，该先做啥？"
+    ],
+    "sequence_consistency_tag": "persistent_field",
+    "step_index": 146
+  },
+  "cross_layer_coupling_verdict": {
+    "observed_pairs": [
+      "context->memory->context_route",
+      "memory->action->memory_prior",
+      "action->token->render_plan"
+    ],
+    "illegal_pairs": [],
+    "legal": true
+  },
+  "renderer_decision_integrity": {
+    "locked_action": "rest",
+    "render_plan_action": "rest",
+    "post_render_action": "rest",
+    "winner_target": "rest",
+    "locked_probability": 0.298896,
+    "gate_at_render": 1.0,
+    "auth_guard_action": "pass",
+    "decision_mutated": false,
+    "renderer_consumes_final_field": true,
+    "mutation_reasons": []
+  },
+  "memory_write_gate": {
+    "applied": true,
+    "cue": "我又想玩手机又想写作业",
+    "cue_quality": 0.0,
+    "episode_id": "ep-4cb1c4fd9e",
+    "interference": 0.0,
+    "interference_source": null,
+    "pollution_risk": 0.2734,
+    "reason": "applied",
+    "resource_pressure": 0.867,
+    "separation_id": "sep-949efcbe39",
+    "support_signal": 0.1285,
+    "suppressed": false
+  },
+  "failure_taxonomy": [],
+  "conflict_arbitration": {
+    "allowed_resamples": 0,
+    "circuit_breaker": {
+      "active": false,
+      "blocked_actions": [],
+      "hot_rounds_remaining": 0,
+      "recovery_rounds_remaining": 0,
+      "triggered": false
+    },
+    "components": {
+      "body_gap": 0.799,
+      "proposal_divergence": 0.5867,
+      "relation_risk_gap": 0.4289,
+      "value_gap": 0.7849,
+      "veto_tension": 0.2307
+    },
+    "compromise": {
+      "reason": "",
+      "template": null,
+      "triggered": false,
+      "winning_priority": null
+    },
+    "conflict_mode": "none",
+    "conflict_safe_mode_owned": false,
+    "critical_conflict": false,
+    "critical_conflict_streak": 0,
+    "deadlock_fuse_triggered": false,
+    "dominant_conflicts": [
+      "body_gap",
+      "value_gap",
+      "proposal_divergence"
+    ],
+    "hard_masked_targets": [
+      "connect"
+    ],
+    "passes": [
+      {
+        "assessment": {
+          "components": {
+            "body_gap": 0.799,
+            "proposal_divergence": 0.5867,
+            "relation_risk_gap": 0.4289,
+            "value_gap": 0.7849,
+            "veto_tension": 0.2307
+          },
+          "critical_conflict": false,
+          "dominant_conflicts": [
+            "body_gap",
+            "value_gap",
+            "proposal_divergence"
+          ],
+          "priority_signals": {
+            "body_safety": 0.8322,
+            "budget_overload": 0.824,
+            "immediate_desire": 0.2,
+            "relation_boundary": 0.4372,
+            "roaming": 0.2,
+            "task_goal": 0.9362
+          },
+          "score": 0.5787,
+          "total_score": 0.5787
+        },
+        "pass_index": 0,
+        "resample_requested": false,
+        "resolution": {
+          "action_scales": {},
+          "applied_template": null,
+          "blocked_actions": [],
+          "flag": false,
+          "post_error_adjustment": {
+            "blocked_actions": [],
+            "reason": "",
+            "safe_mode_delta": "unchanged",
+            "template": null,
+            "top_action_after": null,
+            "top_action_before": null,
+            "triggered": false,
+            "winning_priority": null
+          },
+          "reason": "below_conflict_threshold",
+          "repair_ledger_tail": [],
+          "repair_state_snapshot": {
+            "active": false,
+            "cooldown_rounds_remaining": 0,
+            "last_reason": "",
+            "last_template": null,
+            "last_transition_round": 0,
+            "last_winning_priority": null,
+            "stage": "idle"
+          },
+          "repair_transition": {},
+          "winning_priority": null
+        }
+      }
+    ],
+    "post_error_adjustment": {
+      "blocked_actions": [],
+      "reason": "",
+      "safe_mode_delta": "unchanged",
+      "template": null,
+      "top_action_after": "respond",
+      "top_action_before": "respond",
+      "triggered": false,
+      "winning_priority": null
+    },
+    "priority_signals": {
+      "body_safety": 0.8322,
+      "budget_overload": 0.824,
+      "immediate_desire": 0.2,
+      "relation_boundary": 0.4372,
+      "roaming": 0.2,
+      "task_goal": 0.9362
+    },
+    "repair_ledger_tail": [],
+    "repair_mode": null,
+    "repair_state_snapshot": {
+      "active": false,
+      "cooldown_rounds_remaining": 0,
+      "last_reason": "idle",
+      "last_template": null,
+      "last_transition_round": 146,
+      "last_winning_priority": null,
+      "stage": "idle"
+    },
+    "repair_transition": {
+      "changed": false,
+      "from_stage": "idle",
+      "reason": "idle",
+      "safe_mode_delta": "unchanged",
+      "to_stage": "idle"
+    },
+    "score": 0.5787,
+    "total_score": 0.5787,
+    "winner_peak_posterior": {
+      "clarify": 0.040622,
+      "do_homework": 0.016054,
+      "plan": 0.050604,
+      "play_phone": 0.016054,
+      "recall": 0.106382,
+      "respond": 0.543968,
+      "rest": 0.104532,
+      "short_reply": 0.092345,
+      "wander": 0.002265,
+      "写作业": 0.011728,
+      "玩手机": 0.015446
+    },
+    "winning_priority": "task_goal",
+    "winner_peak": "respond",
+    "compromise_template_prior": {},
+    "peak_clusters": [
+      {
+        "actions": [
+          "respond"
+        ],
+        "adjusted_mass": 0.543968,
+        "blocked": false,
+        "mutual_exclusion_with": [],
+        "peak_id": "peak_1",
+        "raw_mass": 0.543968
+      }
+    ],
+    "trace_reason": "conflict arbitration priority=task_goal winner_peak=respond score=0.58"
+  },
+  "action_probability_explanation": {
+    "target_action": "rest",
+    "winner_target": "rest",
+    "winner_posterior": {
+      "clarify": 0.034517,
+      "do_homework": 0.01363,
+      "plan": 0.017507,
+      "play_phone": 0.01363,
+      "respond": 0.519581,
+      "rest": 0.298896,
+      "short_reply": 0.0784,
+      "wander": 0.000767,
+      "写作业": 0.009957,
+      "玩手机": 0.013114
+    },
+    "winner_energy": 0.559404,
+    "target_final_energy": 0.559404,
+    "hard_masked": false,
+    "stacked_contributions": [
+      {
+        "module_name": "VitalityEngine",
+        "module_type": "vitality",
+        "direction": "support",
+        "delta_projected": 0.442456,
+        "delta_normalized": 1.330695,
+        "hard_masked": false,
+        "trace_reason": "vitality modulation from slow variables",
+        "projection_reason": "vitality modulation projected from slow variables"
+      },
+      {
+        "module_name": "PFCAgent",
+        "module_type": "executive",
+        "direction": "background",
+        "delta_projected": 0.35,
+        "delta_normalized": 1.25,
+        "hard_masked": false,
+        "trace_reason": "The user's cue indicates a conflict between playing on the phone and doing homework. Given a high burn_rate_ratio (1.0) and low_balance_ratio (0.959), the system is under energy pressure, favoring immediate gratification (play_phone) over delayed tasks. However, habit_strength for homework is low (0.1316), and recall_strength is moderate (0.3248), suggesting some memory of homework importance. The closeness (0.6558) and valence (0.0124) are neutral, not strongly pushing toward either action. With latency_pressure high (1.0) and queue_pressure low (0.0156), there's urgency to act but no backlog pressure. The safe_mode and focus on 'rest' indicate a tendency to avoid effort, leaning toward play_phone. Thus, play_phone is slightly preferred, but with moderate confidence due to the balanced conflict.",
+        "projection_reason": "executive prior projected from PFC model head"
+      },
+      {
+        "module_name": "ValueAgent",
+        "module_type": "value",
+        "direction": "background",
+        "delta_projected": 0.62,
+        "delta_normalized": 1.230369,
+        "hard_masked": false,
+        "trace_reason": "subjective value re-rank",
+        "projection_reason": "value bias projected from value head"
+      },
+      {
+        "module_name": "BodyStateAgent",
+        "module_type": "body",
+        "direction": "support",
+        "delta_projected": 0.30504,
+        "delta_normalized": 0.757863,
+        "hard_masked": false,
+        "trace_reason": "energy=0.14; top_action=rest",
+        "projection_reason": "homeostatic bias projected from body head"
+      },
+      {
+        "module_name": "OutputGate",
+        "module_type": "guard",
+        "direction": "support",
+        "delta_projected": 0.241469,
+        "delta_normalized": 0.636513,
+        "hard_masked": false,
+        "trace_reason": "output gate applied gate=0.0000",
+        "projection_reason": "output gate projected from final action suppression"
+      },
+      {
+        "module_name": "ConflictMonitorAgent",
+        "module_type": "conflict",
+        "direction": "background",
+        "delta_projected": 0.19085,
+        "delta_normalized": 0.616658,
+        "hard_masked": false,
+        "trace_reason": "conflict arbitration priority=task_goal winner_peak=respond score=0.58",
+        "projection_reason": "conflict arbitration projected from action scales and blocked actions"
+      },
+      {
+        "module_name": "RelationshipAgent",
+        "module_type": "relationship",
+        "direction": "background",
+        "delta_projected": 0.198048,
+        "delta_normalized": 0.565851,
+        "hard_masked": false,
+        "trace_reason": "closeness=0.66; top_action=connect",
+        "projection_reason": "relationship bias projected from relationship head"
+      },
+      {
+        "module_name": "HippocampusAgent",
+        "module_type": "memory",
+        "direction": "background",
+        "delta_projected": 0.171456,
+        "delta_normalized": 0.489874,
+        "hard_masked": false,
+        "trace_reason": "recall=0.32; top_action=recall",
+        "projection_reason": "memory recall bias projected from hippocampus head"
+      },
+      {
+        "module_name": "ResourceAgent",
+        "module_type": "resource",
+        "direction": "support",
+        "delta_projected": 0.163842,
+        "delta_normalized": 0.46812,
+        "hard_masked": false,
+        "trace_reason": "budget=0.04; top_action=short_reply",
+        "projection_reason": "resource bias projected from resource head"
+      },
+      {
+        "module_name": "EndogenousMotivationPool",
+        "module_type": "motivation",
+        "direction": "support",
+        "delta_projected": 0.132042,
+        "delta_normalized": 0.377263,
+        "hard_masked": false,
+        "trace_reason": "endogenous motivations inject first-class action bias",
+        "projection_reason": "motivation pool projected from endogenous drive state"
+      },
+      {
+        "module_name": "AuthenticityPolicy",
+        "module_type": "authenticity",
+        "direction": "background",
+        "delta_projected": 0.1,
+        "delta_normalized": 0.285714,
+        "hard_masked": false,
+        "trace_reason": "authenticity penalty guard=sampling_penalty grounding=0.14",
+        "projection_reason": "authenticity penalty projected from candidate penalties"
+      },
+      {
+        "module_name": "IdentityRuntime",
+        "module_type": "identity",
+        "direction": "background",
+        "delta_projected": 0.08,
+        "delta_normalized": 0.253968,
+        "hard_masked": false,
+        "trace_reason": "identity prior query=general disclosure=withhold",
+        "projection_reason": "identity prior projected from identity context"
+      },
+      {
+        "module_name": "HabitAgent",
+        "module_type": "habit",
+        "direction": "background",
+        "delta_projected": 0.088056,
+        "delta_normalized": 0.251589,
+        "hard_masked": false,
+        "trace_reason": "habit=0.20; top_action=respond",
+        "projection_reason": "habit bias projected from habit head"
+      },
+      {
+        "module_name": "LongRunAnalyzer",
+        "module_type": "longrun",
+        "direction": "support",
+        "delta_projected": 0.022142,
+        "delta_normalized": 0.070292,
+        "hard_masked": false,
+        "trace_reason": "long-run continuity prior consistency=0.80 volatility=0.79",
+        "projection_reason": "long-run prior projected from longitudinal continuity summary"
+      },
+      {
+        "module_name": "SkillExecutor",
+        "module_type": "tooling",
+        "direction": "support",
+        "delta_projected": 0.021434,
+        "delta_normalized": 0.056699,
+        "hard_masked": false,
+        "trace_reason": "active run tool context biases action field toward executable next steps",
+        "projection_reason": "tool affordance prior projected from active run context"
+      },
+      {
+        "module_name": "StochasticPolicy",
+        "module_type": "stochastic",
+        "direction": "suppress",
+        "delta_projected": -0.012917,
+        "delta_normalized": -0.041006,
+        "hard_masked": false,
+        "trace_reason": "stochastic mixing lambda=0.1137 channel=neutral",
+        "projection_reason": "stochastic action mixing projected from entropy-controlled noise"
+      }
+    ],
+    "competing_peaks": [
+      {
+        "action": "rest",
+        "final_energy": 0.559404,
+        "posterior": 0.298896
+      },
+      {
+        "action": "respond",
+        "final_energy": 1.11233,
+        "posterior": 0.519581
+      },
+      {
+        "action": "short_reply",
+        "final_energy": -0.778869,
+        "posterior": 0.0784
+      }
+    ]
+  },
+  "dream": null,
+  "state_snapshot": {
+    "mode": "safe",
+    "safe_mode": true,
+    "focus": "rest",
+    "budget_remaining": 0.04099999999999996
+  },
+  "storage": {
+    "read_source_default": "parquet",
+    "trace_sync_state": "healthy",
+    "parquet_live_ready": true,
+    "degraded_reason": null,
+    "last_sync_at": "2026-04-06T08:12:09Z",
+    "storage_state": "healthy",
+    "read_source": "parquet"
+  }

@@ -15,11 +15,12 @@ describe("resolveConsoleLayout", () => {
     expect(buildConsoleViewportPlan({ width: 140, height: 20, hasDetailDrawer: true, hasPendingApproval: true })).toEqual({
       layout: "split",
       detailPlacement: "side",
-      transcriptLines: 12,
-      sidebarLines: 12,
-      detailLines: 12,
+      transcriptLines: 11,
+      sidebarLines: 11,
+      detailLines: 11,
       compactSidebar: true,
-      sidebarWidth: 36
+      sidebarWidth: 28,
+      detailWidth: 34,
     });
   });
 
@@ -27,11 +28,12 @@ describe("resolveConsoleLayout", () => {
     expect(buildConsoleViewportPlan({ width: 140, height: 36, hasDetailDrawer: false, hasPendingApproval: false })).toEqual({
       layout: "split",
       detailPlacement: "side",
-      transcriptLines: 28,
-      sidebarLines: 28,
+      transcriptLines: 27,
+      sidebarLines: 27,
       detailLines: 0,
       compactSidebar: false,
-      sidebarWidth: 36
+      sidebarWidth: 28,
+      detailWidth: 34,
     });
   });
 
@@ -39,11 +41,12 @@ describe("resolveConsoleLayout", () => {
     expect(buildConsoleViewportPlan({ width: 90, height: 28, hasDetailDrawer: true, hasPendingApproval: false })).toEqual({
       layout: "stack",
       detailPlacement: "bottom",
-      transcriptLines: 9,
+      transcriptLines: 10,
       sidebarLines: 5,
       detailLines: 6,
       compactSidebar: false,
-      sidebarWidth: 90
+      sidebarWidth: 90,
+      detailWidth: 90,
     });
   });
 });

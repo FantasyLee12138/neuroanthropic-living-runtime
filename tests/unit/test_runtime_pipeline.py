@@ -69,8 +69,9 @@ def test_pipeline_telemetry_and_action_head_use_separate_orders(tmp_path):
     )
 
     proposal_stages = {item["stage"] for item in result.trace.proposal_summaries}
+    allowed_stages = set(ACTION_STAGE_BY_OWNER.values()) | {"motivation"}
     assert result.trace.pipeline_stages == list(PIPELINE_TELEMETRY_STAGES)
-    assert proposal_stages.issubset(set(ACTION_STAGE_BY_OWNER.values()))
+    assert proposal_stages.issubset(allowed_stages)
     assert "late_perspective" not in proposal_stages
     assert "renderer" not in proposal_stages
     assert "writeback" not in proposal_stages

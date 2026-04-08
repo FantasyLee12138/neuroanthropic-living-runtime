@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import MISSING, fields, is_dataclass
+from functools import lru_cache
 from types import UnionType
 from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
@@ -61,6 +62,13 @@ TYPE_REF_REGISTRY: dict[str, Any] = {
 
 
 UNION_ORIGINS = {Union, UnionType}
+
+
+@lru_cache(maxsize=None)
+def dataclass_contract_metadata(contract: type) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    return fields(contract), get_type_hints(contract)
+
+
 def _split_generic_args(expr: str) -> list[str]:
     parts: list[str] = []
     depth = 0
@@ -211,12 +219,12 @@ def coerce_contract(value: Any, contract: Any, *, path: str = "value") -> Any:
         if not isinstance(value, dict):
             raise ValueError(f"{path} expected {contract.__name__}")
         field_values: dict[str, Any] = {}
-        known_fields = {field.name: field for field in fields(contract)}
-        type_hints = get_type_hints(contract)
+        contract_fields, type_hints = dataclass_contract_metadata(contract)
+        known_fields = {field.name: field for field in contract_fields}
         extras = [key for key in value if key not in known_fields]
         if extras:
             raise ValueError(f"{path} unexpected keys: {', '.join(extras)}")
-        for field in fields(contract):
+        for field in contract_fields:
             field_contract = type_hints.get(field.name, field.type)
             if field.name in value:
                 field_values[field.name] = coerce_contract(value[field.name], field_contract, path=f"{path}.{field.name}")

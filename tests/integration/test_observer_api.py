@@ -1,17 +1,78 @@
 import inspect
 import json
+import socket
+import threading
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+import uvicorn
 
 from nalr.runtime.controller import RuntimeController
 from nalr.schemas.models import RoundEvent
+from nalr.terminal_bridge.protocol import build_outbound_event
 from services.observer.api.app import app as default_app
 from services.observer.api.app import create_app
+import services.observer.api.app as observer_app_module
 from nalr.terminal_bridge.handlers import TerminalEventHandler
 
 
 CONFIG_ROOT = Path(__file__).resolve().parents[2] / "config"
+
+
+def _free_tcp_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def _wait_until_ready(url: str, timeout_seconds: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=0.5) as response:
+                if response.status < 500:
+                    return
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+            last_error = exc
+            time.sleep(0.05)
+    if last_error is not None:
+        raise RuntimeError(f"observer app did not become ready: {last_error}") from last_error
+    raise RuntimeError("observer app did not become ready before timeout")
+
+
+def _start_uvicorn_server(app):
+    port = _free_tcp_port()
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, name=f"observer-test-{port}", daemon=True)
+    thread.start()
+    _wait_until_ready(f"http://127.0.0.1:{port}/dashboard")
+    return server, thread, port
+
+
+def _stop_uvicorn_server(server, thread) -> None:
+    server.should_exit = True
+    thread.join(timeout=10)
+
+
+def _fetch(url: str, *, timeout: float = 5.0) -> tuple[int, str]:
+    with urllib.request.urlopen(url, timeout=timeout) as response:
+        return int(response.status), response.read().decode("utf-8")
+
+
+def _post_json(url: str, payload: dict, *, timeout: float = 5.0) -> tuple[int, dict]:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return int(response.status), json.loads(response.read().decode("utf-8"))
 
 
 def test_observer_reads_state_and_trace(tmp_path):
@@ -48,6 +109,678 @@ def test_observer_reads_state_and_trace(tmp_path):
     assert recall_response.json()["cue"] == "coffee"
     assert recall_response.json()["found"] is True
     assert "NALR Observer" in dashboard_response.text
+
+
+def test_observer_service_status_surfaces_instance_metadata_in_runtime_payload(tmp_path):
+    client = TestClient(
+        create_app(
+            project_root=tmp_path,
+            config_root=CONFIG_ROOT,
+            service_metadata={
+                "instance_id": "observer-test-instance",
+                "pid": 4242,
+                "host": "127.0.0.1",
+                "port": 9876,
+                "url": "http://127.0.0.1:9876/dashboard",
+                "started_at": "2026-04-08T12:00:00+08:00",
+            },
+        )
+    )
+
+    service_response = client.get("/service/status")
+    runtime_response = client.post("/web/runtime/start", json={})
+
+    assert service_response.status_code == 200
+    service_payload = service_response.json()
+    assert service_payload["healthy"] is True
+    assert service_payload["instance_id"] == "observer-test-instance"
+    assert service_payload["pid"] == 4242
+    assert service_payload["url"] == "http://127.0.0.1:9876/dashboard"
+
+    assert runtime_response.status_code == 200
+    runtime_payload = runtime_response.json()
+    assert runtime_payload["service"]["instance_id"] == "observer-test-instance"
+    assert runtime_payload["service"]["healthy"] is True
+    assert runtime_payload["service"]["http_ready"] is True
+    assert "event_loop_alive" in runtime_payload["service"]
+    assert "last_http_ok_at" in runtime_payload["service"]
+
+
+def test_observer_service_status_exposes_runtime_diagnostics(tmp_path):
+    client = TestClient(
+        create_app(
+            project_root=tmp_path,
+            config_root=CONFIG_ROOT,
+            service_metadata={
+                "instance_id": "observer-test-instance",
+                "pid": 4242,
+                "host": "127.0.0.1",
+                "port": 9876,
+                "url": "http://127.0.0.1:9876/dashboard",
+                "started_at": "2026-04-08T12:00:00+08:00",
+            },
+        )
+    )
+
+    response = client.get("/service/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["healthy"] is True
+    assert payload["http_ready"] is True
+    assert payload["event_loop_alive"] is True
+    assert payload["last_probe_error"] == ""
+    assert payload["last_http_ok_at"]
+
+
+def test_observer_service_status_reports_active_turn_diagnostics(tmp_path, monkeypatch):
+    app = create_app(project_root=tmp_path, config_root=CONFIG_ROOT)
+    client = TestClient(app)
+    original_handle = TerminalEventHandler.handle
+    started = threading.Event()
+
+    client.post("/web/session/start", json={"session_id": "observer-main", "cwd": str(tmp_path)})
+
+    def slow_handle(self, event):
+        if event.get("type") == "user_turn" and event.get("session_id") == "observer-main":
+            started.set()
+            time.sleep(0.3)
+            return [build_outbound_event("assistant_final", session_id=event["session_id"], message="slow observer reply")]
+        return original_handle(self, event)
+
+    monkeypatch.setattr(TerminalEventHandler, "handle", slow_handle)
+
+    def dispatch_turn() -> None:
+        client.post("/web/session/event", json={"type": "user_turn", "session_id": "observer-main", "text": "继续"})
+
+    worker = threading.Thread(target=dispatch_turn, daemon=True)
+    worker.start()
+    assert started.wait(timeout=1.0)
+
+    deadline = time.monotonic() + 1.0
+    payload = None
+    while time.monotonic() < deadline:
+        response = client.get("/service/status")
+        assert response.status_code == 200
+        payload = response.json()
+        if payload["observer_turn_active"]:
+            break
+        time.sleep(0.02)
+
+    worker.join(timeout=1.0)
+    assert payload is not None
+    assert payload["healthy"] is True
+    assert payload["http_ready"] is True
+    assert payload["observer_turn_active"] is True
+    assert "observer-main" in payload["active_turn_sessions"]
+    assert "runtime_serial_active" in payload
+
+
+def test_dashboard_does_not_fallback_missing_permission_state_to_ask(tmp_path):
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+
+    dashboard_response = client.get("/dashboard")
+
+    assert dashboard_response.status_code == 200
+    assert 'permissionLabel(session.permission_mode || "ask")' not in dashboard_response.text
+    assert 'permission_mode: "ask"' not in dashboard_response.text
+    assert "接纳: 未附着" in dashboard_response.text
+    assert "当前无待确认操作" in dashboard_response.text
+
+
+def test_dashboard_connection_badge_uses_service_status_not_backend_online_flag(tmp_path):
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+
+    dashboard_response = client.get("/dashboard")
+
+    assert dashboard_response.status_code == 200
+    assert "const connected = Boolean((serviceStatusState || {}).http_ready);" in dashboard_response.text
+    assert "&& backendOnline" not in dashboard_response.text
+    assert "/console/probability-space?round_ref=" in dashboard_response.text
+
+
+def test_dashboard_bootstrap_uses_runtime_bootstrap_before_heavy_console_refresh(tmp_path):
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+
+    dashboard_response = client.get("/dashboard")
+
+    assert dashboard_response.status_code == 200
+    assert 'loadJson("/web/runtime/bootstrap")' in dashboard_response.text
+    assert 'await Promise.allSettled([refreshSessionState(), refreshConsole({ heavy: false }), refreshSettings()]);' not in dashboard_response.text
+
+
+def test_console_talk_does_not_block_dashboard_while_turn_executes(tmp_path, monkeypatch):
+    app = create_app(project_root=tmp_path, config_root=CONFIG_ROOT)
+    original_handle = TerminalEventHandler.handle
+    started = threading.Event()
+
+    def slow_handle(self, event):
+        if event.get("type") == "user_turn":
+            started.set()
+            time.sleep(0.4)
+            return [build_outbound_event("assistant_final", session_id=event["session_id"], message="slow reply")]
+        return original_handle(self, event)
+
+    monkeypatch.setattr(TerminalEventHandler, "handle", slow_handle)
+    server, thread, port = _start_uvicorn_server(app)
+    result: dict[str, object] = {}
+    try:
+        def run_talk() -> None:
+            status, payload = _post_json(
+                f"http://127.0.0.1:{port}/console/talk",
+                {"session_id": "slow-console", "cwd": str(tmp_path), "text": "你好"},
+                timeout=5.0,
+            )
+            result["status"] = status
+            result["payload"] = payload
+
+        worker = threading.Thread(target=run_talk, daemon=True)
+        worker.start()
+        assert started.wait(timeout=1.0)
+        begin = time.perf_counter()
+        dashboard_status, _ = _fetch(f"http://127.0.0.1:{port}/dashboard", timeout=1.0)
+        elapsed = time.perf_counter() - begin
+        worker.join(timeout=5.0)
+
+        assert dashboard_status == 200
+        assert elapsed < 0.2
+        assert result["status"] == 200
+        assert result["payload"]["assistant"] == "slow reply"
+    finally:
+        _stop_uvicorn_server(server, thread)
+
+
+def test_web_session_event_does_not_block_dashboard_while_turn_executes(tmp_path, monkeypatch):
+    app = create_app(project_root=tmp_path, config_root=CONFIG_ROOT)
+    original_handle = TerminalEventHandler.handle
+    started = threading.Event()
+    server, thread, port = _start_uvicorn_server(app)
+    try:
+        status, payload = _post_json(
+            f"http://127.0.0.1:{port}/web/session/start",
+            {"session_id": "slow-web", "cwd": str(tmp_path)},
+        )
+        assert status == 200
+        assert payload["session"]["session_id"] == "slow-web"
+
+        def slow_handle(self, event):
+            if event.get("type") == "user_turn":
+                started.set()
+                time.sleep(0.4)
+                return [build_outbound_event("assistant_final", session_id=event["session_id"], message="slow web reply")]
+            return original_handle(self, event)
+
+        monkeypatch.setattr(TerminalEventHandler, "handle", slow_handle)
+        result: dict[str, object] = {}
+
+        def run_turn() -> None:
+            turn_status, turn_payload = _post_json(
+                f"http://127.0.0.1:{port}/web/session/event",
+                {"type": "user_turn", "session_id": "slow-web", "text": "你好"},
+                timeout=5.0,
+            )
+            result["status"] = turn_status
+            result["payload"] = turn_payload
+
+        worker = threading.Thread(target=run_turn, daemon=True)
+        worker.start()
+        assert started.wait(timeout=1.0)
+        begin = time.perf_counter()
+        dashboard_status, _ = _fetch(f"http://127.0.0.1:{port}/dashboard", timeout=1.0)
+        elapsed = time.perf_counter() - begin
+        worker.join(timeout=0.5)
+
+        assert dashboard_status == 200
+        assert elapsed < 0.2
+        assert not worker.is_alive()
+        assert result["status"] == 200
+        assert result["payload"]["accepted"] is True
+    finally:
+        _stop_uvicorn_server(server, thread)
+
+
+def test_background_user_turn_does_not_block_console_endogenous_tick(tmp_path, monkeypatch):
+    app = create_app(project_root=tmp_path, config_root=CONFIG_ROOT)
+    original_handle = TerminalEventHandler.handle
+    original_tick_payload = observer_app_module.run_endogenous_tick_payload
+    started = threading.Event()
+
+    def slow_handle(self, event):
+        if event.get("type") == "user_turn":
+            started.set()
+            time.sleep(0.4)
+            return [build_outbound_event("assistant_final", session_id=event["session_id"], message="slow background reply")]
+        return original_handle(self, event)
+
+    def fast_tick_payload(controller, *, trigger="idle", mode=None):
+        return {"round_id": None, "cause_type": trigger, "mode": mode}
+
+    monkeypatch.setattr(TerminalEventHandler, "handle", slow_handle)
+    monkeypatch.setattr(observer_app_module, "run_endogenous_tick_payload", fast_tick_payload)
+    server, thread, port = _start_uvicorn_server(app)
+    try:
+        status, payload = _post_json(
+            f"http://127.0.0.1:{port}/web/session/start",
+            {"session_id": "observer-main", "cwd": str(tmp_path)},
+        )
+        assert status == 200
+        assert payload["session"]["session_id"] == "observer-main"
+
+        enqueue_status, enqueue_payload = _post_json(
+            f"http://127.0.0.1:{port}/web/session/event",
+            {"type": "user_turn", "session_id": "observer-main", "text": "继续"},
+            timeout=5.0,
+        )
+        assert enqueue_status == 200
+        assert enqueue_payload["accepted"] is True
+        assert enqueue_payload["queued"] is True
+        after_id = int(enqueue_payload.get("last_event_id") or 0)
+        assert started.wait(timeout=1.0)
+
+        begin = time.perf_counter()
+        tick_status, tick_payload = _post_json(
+            f"http://127.0.0.1:{port}/console/endogenous/tick",
+            {"trigger": "idle", "mode": "endogenous_light"},
+            timeout=1.5,
+        )
+        elapsed = time.perf_counter() - begin
+
+        assert tick_status == 200
+        assert elapsed < 0.2
+        assert tick_payload["tick"]["cause_type"] == "idle"
+        assert tick_payload["tick"]["skipped"] is True
+
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/web/session/events?session_id=observer-main&after_id={after_id}&once=true",
+            timeout=2.0,
+        ) as response:
+            event_lines = [line.decode("utf-8") for line in response.readlines() if line.startswith(b"data: ")]
+
+        assert event_lines
+        event_payloads = [json.loads(line[len("data: ") :]) for line in event_lines]
+        assert event_payloads[-1]["type"] == "assistant_final"
+        assert event_payloads[-1]["message"] == "slow background reply"
+    finally:
+        monkeypatch.setattr(observer_app_module, "run_endogenous_tick_payload", original_tick_payload)
+        _stop_uvicorn_server(server, thread)
+
+
+def test_console_endogenous_tick_does_not_block_dashboard_while_tick_executes(tmp_path, monkeypatch):
+    app = create_app(project_root=tmp_path, config_root=CONFIG_ROOT)
+    started = threading.Event()
+    original_tick_payload = observer_app_module.run_endogenous_tick_payload
+    original_console_refresh = RuntimeController.console_refresh_payload
+
+    def slow_tick_payload(controller, *, trigger="idle", mode=None):
+        started.set()
+        time.sleep(0.4)
+        return {"round_id": None, "cause_type": trigger, "mode": mode}
+
+    def fake_console_refresh_payload(self, round_id=None):
+        return {"state": {"current_round": {"round_id": round_id}}, "action_field": {}, "timeline": {"events": []}, "why_current": {}, "why_not": {}}
+
+    monkeypatch.setattr(observer_app_module, "run_endogenous_tick_payload", slow_tick_payload)
+    monkeypatch.setattr(RuntimeController, "console_refresh_payload", fake_console_refresh_payload)
+    server, thread, port = _start_uvicorn_server(app)
+    result: dict[str, object] = {}
+    try:
+        def run_tick() -> None:
+            status, payload = _post_json(
+                f"http://127.0.0.1:{port}/console/endogenous/tick",
+                {"trigger": "idle", "mode": "endogenous_light"},
+                timeout=5.0,
+            )
+            result["status"] = status
+            result["payload"] = payload
+
+        worker = threading.Thread(target=run_tick, daemon=True)
+        worker.start()
+        assert started.wait(timeout=1.0)
+        begin = time.perf_counter()
+        dashboard_status, _ = _fetch(f"http://127.0.0.1:{port}/dashboard", timeout=1.0)
+        elapsed = time.perf_counter() - begin
+        worker.join(timeout=5.0)
+
+        assert dashboard_status == 200
+        assert elapsed < 0.2
+        assert result["status"] == 200
+        assert result["payload"]["tick"]["cause_type"] == "idle"
+    finally:
+        monkeypatch.setattr(observer_app_module, "run_endogenous_tick_payload", original_tick_payload)
+        monkeypatch.setattr(RuntimeController, "console_refresh_payload", original_console_refresh)
+        _stop_uvicorn_server(server, thread)
+
+
+def test_web_session_state_does_not_block_dashboard_while_snapshot_executes(tmp_path, monkeypatch):
+    app = create_app(project_root=tmp_path, config_root=CONFIG_ROOT)
+    original_snapshot_session = TerminalEventHandler.snapshot_session
+    started = threading.Event()
+    server, thread, port = _start_uvicorn_server(app)
+    try:
+        status, payload = _post_json(
+            f"http://127.0.0.1:{port}/web/session/start",
+            {"session_id": "slow-snapshot", "cwd": str(tmp_path)},
+        )
+        assert status == 200
+        assert payload["session"]["session_id"] == "slow-snapshot"
+
+        def slow_snapshot_session(self, session_id):
+            if session_id == "slow-snapshot":
+                started.set()
+                time.sleep(0.4)
+            return original_snapshot_session(self, session_id)
+
+        monkeypatch.setattr(TerminalEventHandler, "snapshot_session", slow_snapshot_session)
+        result: dict[str, object] = {}
+
+        def run_session_state() -> None:
+            status_code, body = _fetch(
+                f"http://127.0.0.1:{port}/web/session/state?session_id=slow-snapshot",
+                timeout=5.0,
+            )
+            result["status"] = status_code
+            result["payload"] = json.loads(body)
+
+        worker = threading.Thread(target=run_session_state, daemon=True)
+        worker.start()
+        assert started.wait(timeout=1.0)
+        begin = time.perf_counter()
+        dashboard_status, _ = _fetch(f"http://127.0.0.1:{port}/dashboard", timeout=1.0)
+        elapsed = time.perf_counter() - begin
+        worker.join(timeout=5.0)
+
+        assert dashboard_status == 200
+        assert elapsed < 0.2
+        assert result["status"] == 200
+        assert result["payload"]["session"]["session_id"] == "slow-snapshot"
+    finally:
+        _stop_uvicorn_server(server, thread)
+
+
+def test_console_state_does_not_block_dashboard_while_console_snapshot_executes(tmp_path, monkeypatch):
+    app = create_app(project_root=tmp_path, config_root=CONFIG_ROOT)
+    original_console_state = RuntimeController.console_state
+    started = threading.Event()
+    server, thread, port = _start_uvicorn_server(app)
+    try:
+        def slow_console_state(self):
+            started.set()
+            time.sleep(0.4)
+            return original_console_state(self)
+
+        monkeypatch.setattr(RuntimeController, "console_state", slow_console_state)
+        result: dict[str, object] = {}
+
+        def run_console_state() -> None:
+            status_code, body = _fetch(
+                f"http://127.0.0.1:{port}/console/state",
+                timeout=5.0,
+            )
+            result["status"] = status_code
+            result["payload"] = json.loads(body)
+
+        worker = threading.Thread(target=run_console_state, daemon=True)
+        worker.start()
+        assert started.wait(timeout=1.0)
+        begin = time.perf_counter()
+        dashboard_status, _ = _fetch(f"http://127.0.0.1:{port}/dashboard", timeout=1.0)
+        elapsed = time.perf_counter() - begin
+        worker.join(timeout=5.0)
+
+        assert dashboard_status == 200
+        assert elapsed < 0.2
+        assert result["status"] == 200
+        assert "brain_state" in result["payload"]
+    finally:
+        _stop_uvicorn_server(server, thread)
+
+
+def test_observer_readonly_routes_do_not_wait_for_autonomy_step(tmp_path, monkeypatch):
+    monkeypatch.setenv("NALR_AUTONOMY_HEARTBEAT_SECONDS", "0.01")
+    app = create_app(project_root=tmp_path, config_root=CONFIG_ROOT)
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_autonomy_step(self):
+        started.set()
+        release.wait(timeout=2.0)
+        return None
+
+    monkeypatch.setattr(RuntimeController, "autonomy_step", blocking_autonomy_step)
+    server, thread, port = _start_uvicorn_server(app)
+    try:
+        status, payload = _post_json(f"http://127.0.0.1:{port}/web/runtime/start", {}, timeout=5.0)
+        assert status == 200
+        assert payload["autonomy"]["running"] is True
+        assert started.wait(timeout=1.0)
+
+        identity_status, identity_body = _fetch(f"http://127.0.0.1:{port}/identity", timeout=0.5)
+        console_status, console_body = _fetch(f"http://127.0.0.1:{port}/console/state", timeout=0.5)
+
+        assert identity_status == 200
+        assert console_status == 200
+        assert '"display_name"' in identity_body
+        assert '"current_round"' in console_body
+    finally:
+        release.set()
+        _stop_uvicorn_server(server, thread)
+
+
+def test_observer_exposes_thought_snapshot_endpoint(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(source="user", content="帮我想一下现在先做什么。", target="user", cue="先做什么"),
+        scenario="companion",
+        mode="interactive",
+    )
+    controller.flush_pending_io(raise_on_error=True)
+
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+    response = client.get("/thought/1")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["round_id"] == 1
+    assert "thought_summary" in payload
+    assert "action_field" in payload
+
+
+def test_observer_exposes_speak_and_monologue_snapshots(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(source="user", content="你好，跟我说说你现在的状态。", target="user", cue="状态"),
+        scenario="chat",
+        mode="interactive",
+    )
+    controller.flush_pending_io(raise_on_error=True)
+
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+    speak_response = client.get("/speak/1")
+    monologue_response = client.get("/monologue/1")
+
+    assert speak_response.status_code == 200
+    assert monologue_response.status_code == 200
+    speak_payload = speak_response.json()
+    monologue_payload = monologue_response.json()
+    assert speak_payload["channel"] == "speak"
+    assert speak_payload["delivery_mode"] == "speech"
+    assert "preview" in speak_payload
+    assert monologue_payload["channel"] == "monologue"
+    assert monologue_payload["delivery_mode"] == "monologue"
+    assert "preview" in monologue_payload
+
+
+def test_observer_exposes_monologue_runtime_endpoints(tmp_path):
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+
+    status_response = client.get("/monologue/status")
+    show_response = client.get("/monologue/show")
+
+    assert status_response.status_code == 200
+    assert show_response.status_code == 200
+    assert "generated_total" in status_response.json()
+    assert "fragments" in show_response.json()
+
+
+def test_observer_monologue_runtime_endpoints_do_not_generate_model_fragments_for_dashboard(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    bucket = controller._monologue_state_bucket(state)
+    bucket["settings"]["generator_mode"] = "model"
+    state.session_metadata["monologue_stream"] = bucket
+    controller._save_state(state, sync=True)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("dashboard monologue endpoints must not trigger model generation")
+
+    monkeypatch.setattr(RuntimeController, "_generate_monologue_fragments_via_model", fail_if_called)
+
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+    status_response = client.get("/monologue/status")
+    show_response = client.get("/monologue/show")
+
+    assert status_response.status_code == 200
+    assert show_response.status_code == 200
+    assert "generated_total" in status_response.json()
+    assert "fragments" in show_response.json()
+
+
+def test_observer_cold_start_attaches_default_autonomy_runner_and_surfaces_execution_truth(tmp_path):
+    with TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT)) as client:
+        response = client.get("/autonomy/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["enabled"] is True
+    assert payload["running"] is True
+    assert payload["loop_should_run"] is True
+    assert payload["runner_attached"] is True
+    assert payload["runner_alive"] is True
+    assert payload["runner_source"] == "observer_heartbeat"
+    assert "candidate_scores" not in payload
+    assert "decision_surface" not in payload
+
+
+def test_observer_autonomy_status_route_is_lightweight_and_skips_field_probe(tmp_path, monkeypatch):
+    def fail_probe(self):
+        raise AssertionError("/autonomy/status must use lightweight runtime status")
+
+    monkeypatch.setattr(RuntimeController, "_autonomy_action_field_probe", fail_probe)
+
+    with TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT)) as client:
+        response = client.get("/autonomy/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["enabled"] is True
+    assert "candidate_scores" not in payload
+    assert "decision_surface" not in payload
+
+
+def test_observer_service_status_reports_stalled_autonomy_runner(tmp_path, monkeypatch):
+    monkeypatch.setenv("NALR_AUTONOMY_HEARTBEAT_SECONDS", "0.05")
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_autonomy_step(self):
+        started.set()
+        release.wait(timeout=2.0)
+        return self.autonomy_status()
+
+    monkeypatch.setattr(RuntimeController, "autonomy_step", blocking_autonomy_step)
+    app = create_app(project_root=tmp_path, config_root=CONFIG_ROOT)
+    server, thread, port = _start_uvicorn_server(app)
+    try:
+        status, payload = _post_json(f"http://127.0.0.1:{port}/web/runtime/start", {}, timeout=5.0)
+        assert status == 200
+        assert payload["autonomy"]["running"] is True
+        assert started.wait(timeout=1.0)
+        time.sleep(0.25)
+
+        service_status, service_body = _fetch(f"http://127.0.0.1:{port}/service/status", timeout=1.0)
+        autonomy_status, autonomy_body = _fetch(f"http://127.0.0.1:{port}/autonomy/status", timeout=1.0)
+
+        assert service_status == 200
+        assert autonomy_status == 200
+        service_payload = json.loads(service_body)
+        autonomy_payload = json.loads(autonomy_body)
+        assert service_payload["autonomy_runner_alive"] is True
+        assert service_payload["autonomy_runner_stalled"] is True
+        assert autonomy_payload["runner_alive"] is True
+        assert autonomy_payload["stalled"] is True
+    finally:
+        release.set()
+        _stop_uvicorn_server(server, thread)
+
+
+def test_observer_why_no_change_surfaces_summary(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(source="user", content="你好", target="user", cue="你好"),
+        scenario="chat",
+        mode="interactive",
+    )
+    controller.flush_pending_io(raise_on_error=True)
+
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+    response = client.get("/diagnostics/why-no-change/1")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "summary" in payload
+    assert payload["summary"]
+
+
+def test_observer_observability_endpoints_return_empty_payloads_without_rounds(tmp_path):
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+
+    thought_response = client.get("/thought/last")
+    why_no_change_response = client.get("/diagnostics/why-no-change/last")
+
+    assert thought_response.status_code == 200
+    assert why_no_change_response.status_code == 200
+    assert thought_response.json()["message"] == "无决策记录"
+    assert why_no_change_response.json()["message"] == "无决策记录"
+
+
+def test_observer_runtime_start_syncs_autonomous_speak_into_web_session_events(tmp_path, monkeypatch):
+    def fake_autonomy_step(self):
+        session = self.terminal_sessions.read("observer-main")
+        session.transcript_lines.append(
+            {
+                "kind": "assistant",
+                "text": "我在这里。",
+                "recorded_at": "2026-04-08T09:30:00+00:00",
+            }
+        )
+        self.terminal_sessions.write(session)
+        state = self.load_runtime_state()
+        state.autonomy_policy.enabled = True
+        state.autonomy_loop.running = True
+        state.autonomy_loop.last_action_type = "respond"
+        state.autonomy_loop.last_action_summary = "autonomous speak emitted"
+        state.autonomy_loop.last_step_at = "2026-04-08T09:30:00+00:00"
+        self._save_state(state, sync=True)
+        return self.autonomy_status()
+
+    monkeypatch.setattr(RuntimeController, "autonomy_step", fake_autonomy_step)
+
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+
+    start_response = client.post("/web/runtime/start", json={})
+    step_response = client.post("/autonomy/step")
+    session_response = client.get("/web/session/state", params={"session_id": "observer-main"})
+
+    assert start_response.status_code == 200
+    assert step_response.status_code == 200
+    assert session_response.status_code == 200
+    payload = session_response.json()
+    assert payload["session"]["transcript_lines"][-1]["text"] == "我在这里。"
+
+    events_response = client.get("/web/session/events", params={"session_id": "observer-main", "once": True})
+    assert events_response.status_code == 200
+    assert "assistant_final" in events_response.text
+    assert "我在这里。" in events_response.text
 
 
 def test_observer_state_and_why_surface_tlh_runtime_fields(tmp_path):
@@ -129,6 +862,8 @@ def test_observer_exposes_model_status(tmp_path):
     assert payload["agent_bindings"]["SalienceAgent"] == "small_model"
     assert payload["agent_bindings"]["planner"] == "medium_model"
     assert "chat_fast" in payload["routes"]
+    assert payload["route_policies"]["chat_fast"]["latency_budget_ms"] == 700
+    assert payload["route_policies"]["task_run"]["hot_path"] == "supervisor_run"
 
 
 def test_observer_settings_can_override_newborn_unlocks_and_local_model(tmp_path):
@@ -178,6 +913,116 @@ def test_observer_settings_can_override_newborn_unlocks_and_local_model(tmp_path
     state_payload = reset_response.json()["state"]
     assert state_payload["organic_mode"]["instinct_first"] is True
     assert state_payload["subjective_state"]["spontaneous"] == 0.11
+
+
+def test_observer_settings_can_override_autonomy_command_permissions(tmp_path):
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+
+    update_response = client.post(
+        "/settings",
+        json={
+            "autonomy": {
+                "clear_safe_mode_on_start": True,
+                "allowed_commands": ["replay", "memory recall", "trace why"],
+                "blocked_commands": ["network", "git commit", "dream run"],
+            }
+        },
+    )
+
+    assert update_response.status_code == 200
+    settings_payload = update_response.json()
+    assert settings_payload["autonomy"]["allowed_commands"] == ["replay", "memory recall", "trace why"]
+    assert settings_payload["autonomy"]["blocked_commands"] == ["network", "git commit", "dream run"]
+
+    start_response = client.post("/web/runtime/start", json={})
+
+    assert start_response.status_code == 200
+    autonomy_payload = start_response.json()["autonomy"]
+    assert autonomy_payload["allowed_commands"] == ["replay", "memory recall", "trace why"]
+    assert autonomy_payload["blocked_commands"] == ["network", "git commit", "dream run"]
+
+
+def test_observer_settings_can_override_autonomy_boundaries_and_budget(tmp_path):
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+
+    update_response = client.post(
+        "/settings",
+        json={
+            "autonomy": {
+                "allowed_operator_levels": ["read_only"],
+                "network_enabled": True,
+                "external_io_enabled": True,
+                "allow_commit": True,
+                "max_rounds_per_hour": 12,
+                "max_tool_actions_per_hour": 7,
+                "failure_trip_threshold": 5,
+                "auto_safe_mode": False,
+                "quiet_hours": [1, 2, 3],
+            }
+        },
+    )
+
+    assert update_response.status_code == 200
+    settings_payload = update_response.json()
+    assert settings_payload["autonomy"]["allowed_operator_levels"] == ["read_only"]
+    assert settings_payload["autonomy"]["network_enabled"] is True
+    assert settings_payload["autonomy"]["external_io_enabled"] is True
+    assert settings_payload["autonomy"]["allow_commit"] is True
+    assert settings_payload["autonomy"]["max_rounds_per_hour"] == 12
+    assert settings_payload["autonomy"]["max_tool_actions_per_hour"] == 7
+    assert settings_payload["autonomy"]["failure_trip_threshold"] == 5
+    assert settings_payload["autonomy"]["auto_safe_mode"] is False
+    assert settings_payload["autonomy"]["quiet_hours"] == [1, 2, 3]
+
+    start_response = client.post("/web/runtime/start", json={})
+
+    assert start_response.status_code == 200
+    state_response = client.get("/state")
+    assert state_response.status_code == 200
+    autonomy_state = state_response.json()["autonomy_policy"]
+    budget_usage = start_response.json()["autonomy"]["budget_usage"]
+
+    assert autonomy_state["allowed_operator_levels"] == ["read_only"]
+    assert autonomy_state["network_enabled"] is True
+    assert autonomy_state["external_io_enabled"] is True
+    assert autonomy_state["allow_commit"] is True
+    assert autonomy_state["failure_trip_threshold"] == 5
+    assert autonomy_state["auto_safe_mode"] is False
+    assert autonomy_state["quiet_hours"] == [1, 2, 3]
+    assert budget_usage["max_rounds_per_hour"] == 12
+    assert budget_usage["max_tool_actions_per_hour"] == 7
+
+
+def test_observer_settings_allow_zero_autonomy_hourly_caps(tmp_path):
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+
+    update_response = client.post(
+        "/settings",
+        json={
+            "autonomy": {
+                "max_rounds_per_hour": 0,
+                "max_tool_actions_per_hour": 0,
+            }
+        },
+    )
+
+    assert update_response.status_code == 200
+    settings_payload = update_response.json()
+    assert settings_payload["autonomy"]["max_rounds_per_hour"] == 0
+    assert settings_payload["autonomy"]["max_tool_actions_per_hour"] == 0
+
+    start_response = client.post("/web/runtime/start", json={})
+
+    assert start_response.status_code == 200
+    state_response = client.get("/state")
+    assert state_response.status_code == 200
+    autonomy_state = state_response.json()["autonomy_policy"]
+    budget_usage = start_response.json()["autonomy"]["budget_usage"]
+
+    assert autonomy_state["max_rounds_per_hour"] == 0
+    assert autonomy_state["max_tool_actions_per_hour"] == 0
+    assert budget_usage["max_rounds_per_hour"] == 0
+    assert budget_usage["max_tool_actions_per_hour"] == 0
 
 
 def test_observer_exposes_terminal_session_mapping(tmp_path):
@@ -275,6 +1120,55 @@ def test_observer_exposes_dream_status_runs_and_metrics(tmp_path):
     assert metrics_response.json()["total_runs"] == 1
 
 
+def test_observer_exposes_dream_overview_with_latest_and_recent_runs(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="Remember tea for sleep.",
+            target="user",
+            cue="tea",
+            valence=0.2,
+        ),
+        scenario="companion",
+        mode="interactive",
+    )
+    controller.tick(
+        RoundEvent(
+            source="system",
+            content="Idle reshape around tea.",
+            target="user",
+            cue="tea",
+        ),
+        scenario="companion",
+        mode="idle",
+    )
+    controller.tick(
+        RoundEvent(
+            source="system",
+            content="Sleep reshape around tea.",
+            target="user",
+            cue="tea",
+        ),
+        scenario="companion",
+        mode="sleep",
+    )
+    controller.flush_pending_io(raise_on_error=True)
+
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+    response = client.get("/dream/overview")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"]["enabled"] is True
+    assert payload["metrics"]["total_runs"] == 2
+    assert payload["latest_run"]["dream_run_id"]
+    assert payload["latest_run"]["trigger"] in {"idle_light", "sleep_full"}
+    assert payload["latest_run"]["semantic_summary"]["evaluated_types"]
+    assert payload["recent_runs"]
+    assert len(payload["recent_runs"]) == 2
+
+
 def test_observer_exposes_console_routes_for_latest_runtime_state(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     controller.tick(
@@ -309,6 +1203,7 @@ def test_observer_exposes_console_routes_for_latest_runtime_state(tmp_path):
     assert "cognitive_snapshot" in state_payload
     assert "current_round" in state_payload
     assert "trace_ref" in state_payload["current_round"]
+    assert "route_type" in state_payload["current_round"]
 
     action_payload = console_action_field.json()
     assert "top_actions" in action_payload
@@ -397,6 +1292,12 @@ def test_dashboard_shell_surfaces_tlh_observer_sections(tmp_path):
     assert "概率与坍缩" in response.text
     assert "四维空间" in response.text
     assert "四层概率场" in response.text
+    assert "表达通道" in response.text
+    assert "对外说话" in response.text
+    assert "内部独白" in response.text
+    assert "运行体简介" in response.text
+    assert 'id="observe-dialog"' in response.text
+    assert 'id="system-clock"' in response.text
     assert "峰值焦点" in response.text
     assert "外显表达区" in response.text
     assert "解释系统" in response.text
@@ -404,6 +1305,8 @@ def test_dashboard_shell_surfaces_tlh_observer_sections(tmp_path):
     assert "自治状态" in response.text
     assert "最近自治动作" in response.text
     assert "权限边界与预算" in response.text
+    assert 'id="language-switch"' in response.text
+    assert 'data-mode=' not in response.text
 
 
 def test_dashboard_shell_surfaces_web_first_workspace_entry(tmp_path):
@@ -422,6 +1325,7 @@ def test_dashboard_shell_surfaces_web_first_workspace_entry(tmp_path):
     assert 'id="process-toggle"' in response.text
     assert "命令面板" not in response.text
     assert "Token" in response.text
+    assert "聊天输入只用于对话内容" in response.text
 
 
 def test_observer_console_talk_and_endogenous_tick_return_console_refresh_payload(tmp_path):
@@ -474,11 +1378,13 @@ def test_observer_exposes_autonomy_lifecycle_routes_and_console_payload(tmp_path
 
     assert start_response.json()["profile"] == "tool_level"
     assert status_response.json()["enabled"] is True
+    assert status_response.json()["runner_attached"] is True
     assert step_response.json()["last_action_type"]
     assert "autonomy" in refresh_response.json()
     assert refresh_response.json()["autonomy"]["kill_switch_available"] is True
     assert stop_response.json()["running"] is False
     assert stop_response.json()["stop_reason"] == "api_stop"
+    assert stop_response.json()["runner_alive"] is False
 
 
 def test_observer_web_session_api_streams_chat_events_and_session_state(tmp_path):
@@ -494,8 +1400,9 @@ def test_observer_web_session_api_streams_chat_events_and_session_state(tmp_path
     )
     assert turn_response.status_code == 200
     assert turn_response.json()["accepted"] is True
+    after_id = int(turn_response.json().get("last_event_id") or 0)
 
-    with client.stream("GET", "/web/session/events", params={"session_id": "sess-web", "once": True}) as stream_response:
+    with client.stream("GET", "/web/session/events", params={"session_id": "sess-web", "after_id": after_id, "once": True}) as stream_response:
         assert stream_response.status_code == 200
         event_lines = [line for line in stream_response.iter_lines() if line.startswith("data: ")]
 
@@ -535,8 +1442,9 @@ def test_observer_web_session_api_supports_approval_round_trip(tmp_path):
         json={"type": "user_turn", "session_id": "sess-approval", "text": "检查 worker.py 并规划下一步"},
     )
     assert turn_response.status_code == 200
+    after_id = int(turn_response.json().get("last_event_id") or 0)
 
-    with client.stream("GET", "/web/session/events", params={"session_id": "sess-approval", "once": True}) as stream_response:
+    with client.stream("GET", "/web/session/events", params={"session_id": "sess-approval", "after_id": after_id, "once": True}) as stream_response:
         assert stream_response.status_code == 200
         event_lines = [line for line in stream_response.iter_lines() if line.startswith("data: ")]
 
@@ -686,13 +1594,82 @@ def test_observer_runtime_start_and_pause_use_single_session_entrypoint(tmp_path
     assert start_payload["session"]["session"]["session_id"] == "observer-main"
     assert start_payload["session"]["session"]["permission_mode"] == "acceptEdits"
     assert start_payload["autonomy"]["running"] is True
-    assert start_payload["autonomy"]["last_step_at"]
     assert "recent_actions" in start_payload
+    assert start_payload["session"]["console"]
+    assert start_payload["session"]["workbench"]["cards"]
+
+    session_state_response = client.get("/web/session/state", params={"session_id": "observer-main"})
+
+    assert session_state_response.status_code == 200
+    session_state_payload = session_state_response.json()
+    assert session_state_payload["console"]
+    assert session_state_payload["console"]["state"]
+    assert session_state_payload["workbench"]["cards"]
 
     pause_response = client.post("/web/runtime/pause", json={})
 
     assert pause_response.status_code == 200
     assert pause_response.json()["autonomy"]["running"] is False
+
+
+def test_observer_runtime_bootstrap_reuses_existing_observer_main_session(tmp_path):
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+
+    start_response = client.post("/web/runtime/start", json={})
+    bootstrap_response = client.get("/web/runtime/bootstrap")
+
+    assert start_response.status_code == 200
+    assert bootstrap_response.status_code == 200
+    payload = bootstrap_response.json()
+    assert payload["session_attached"] is True
+    assert payload["session"]["session"]["session_id"] == "observer-main"
+    assert payload["session"]["session"]["permission_mode"] == "acceptEdits"
+    assert payload["service"]["http_ready"] is True
+
+
+def test_observer_runtime_resume_resumes_paused_run(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    run_payload = controller.start_run("inspect runtime")
+    controller.pause_run(run_payload["run_id"])
+
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+
+    resume_response = client.post("/web/runtime/resume", json={})
+
+    assert resume_response.status_code == 200
+    current_run = client.get("/runs/current")
+    assert current_run.status_code == 200
+    assert current_run.json()["status"] == "running"
+
+
+def test_observer_runtime_wake_switches_back_to_interactive_mode(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.mode = "sleep"
+    controller._save_state(state, sync=True)
+
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+
+    wake_response = client.post("/web/runtime/wake", json={})
+
+    assert wake_response.status_code == 200
+    refreshed_state = client.get("/state")
+    assert refreshed_state.status_code == 200
+    assert refreshed_state.json()["mode"] == "interactive"
+
+
+def test_observer_runtime_start_does_not_call_autonomy_step_inline(tmp_path, monkeypatch):
+    def fail_autonomy_step(self):
+        raise AssertionError("autonomy_step should not run inline during /web/runtime/start")
+
+    monkeypatch.setattr(RuntimeController, "autonomy_step", fail_autonomy_step)
+
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+
+    start_response = client.post("/web/runtime/start", json={})
+
+    assert start_response.status_code == 200
+    assert start_response.json()["autonomy"]["running"] is True
 
 
 def test_observer_runtime_start_clears_stale_safe_mode_and_enters_running(tmp_path):
@@ -738,6 +1715,17 @@ def test_observer_runtime_start_rehydrates_budget_before_first_autonomy_step(tmp
     assert refreshed_state["resource_state"]["resource_mode"] != "starvation"
 
 
+def test_observer_runtime_start_blocks_self_run_path_for_workbench_session(tmp_path):
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+
+    start_response = client.post("/web/runtime/start", json={})
+
+    assert start_response.status_code == 200
+    payload = start_response.json()
+    assert payload["autonomy"]["running"] is True
+    assert "self_run" in payload["autonomy"]["blocked_commands"]
+
+
 def test_observer_persona_reset_wipes_histories_and_returns_empty_safe_payloads(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     controller.tick(
@@ -774,7 +1762,9 @@ def test_observer_persona_reset_wipes_histories_and_returns_empty_safe_payloads(
     assert state_payload["subjective_state"]["meaning_made"] == []
     assert state_payload["organic_mode"]["instinct_first"] is False
     assert state_payload["autonomy_loop"]["recent_actions"] == []
-    assert reset_payload["autonomy"]["running"] is False
+    assert reset_payload["autonomy"]["running"] is True
+    assert reset_payload["autonomy"]["runner_attached"] is True
+    assert state_payload["session_metadata"].get("autonomy_user_disabled") is not True
     assert reset_payload["recent_actions"] == []
     assert reset_payload["explainability"]["why"]["message"] == "无决策记录"
     assert reset_payload["explainability"]["trace"]["message"] == "无决策记录"
@@ -820,6 +1810,70 @@ def test_observer_console_lightweight_routes_surface_recent_actions_and_probabil
     assert probability_space_payload["plots"]
     assert [item["label"] for item in probability_space_payload["plots"]] == ["E-F", "E-S", "E-M", "F-S"]
     assert probability_space_payload["layers"][0]["label"] == "情境层"
+    assert probability_space_payload["layers"][0]["peaks"]
+    assert "peak_score" in probability_space_payload["layers"][0]
+    assert probability_space_payload["space_3d"]["axes"] == {"x": "E", "y": "F", "z": "S", "intensity": "M"}
+    assert "current_point" in probability_space_payload["space_3d"]
+
+
+def test_console_probability_space_uses_latest_trace_snapshot_axes(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(source="user", content="你好，告诉我你现在倾向做什么。", target="user", cue="倾向"),
+        scenario="chat",
+        mode="interactive",
+    )
+    controller.flush_pending_io(raise_on_error=True)
+    trace = controller.trace_round(1)
+    expected_axes = dict(trace["state_snapshot"]["instinct_field"]["axis_values"])
+
+    state = controller.load_runtime_state()
+    state.instinct_field.axis_values = {"E": 0.01, "F": 0.02, "S": 0.03, "M": 0.04}
+    controller._save_state(state, sync=True)
+
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+    response = client.get("/console/probability-space")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source_round_id"] == 1
+    assert payload["space_3d"]["current_point"] == {
+        "x": round(float(expected_axes["E"]), 4),
+        "y": round(float(expected_axes["F"]), 4),
+        "z": round(float(expected_axes["S"]), 4),
+        "intensity": round(float(expected_axes["M"]), 4),
+    }
+
+
+def test_console_probability_space_accepts_round_ref_for_consistent_snapshot(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(source="user", content="第一轮，先记住茶。", target="user", cue="茶"),
+        scenario="chat",
+        mode="interactive",
+    )
+    controller.tick(
+        RoundEvent(source="user", content="第二轮，再看看现在更倾向什么。", target="user", cue="倾向"),
+        scenario="chat",
+        mode="interactive",
+    )
+    controller.flush_pending_io(raise_on_error=True)
+
+    round_one_trace = controller.trace_round(1)
+    expected_axes = dict(round_one_trace["state_snapshot"]["instinct_field"]["axis_values"])
+
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+    response = client.get("/console/probability-space", params={"round_ref": 1})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source_round_id"] == 1
+    assert payload["space_3d"]["current_point"] == {
+        "x": round(float(expected_axes["E"]), 4),
+        "y": round(float(expected_axes["F"]), 4),
+        "z": round(float(expected_axes["S"]), 4),
+        "intensity": round(float(expected_axes["M"]), 4),
+    }
 
 
 def test_observer_exposes_endogenous_status_tick_and_what_changed(tmp_path):

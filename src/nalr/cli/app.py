@@ -46,6 +46,10 @@ safe_app = typer.Typer()
 budget_app = typer.Typer()
 explain_app = typer.Typer()
 dream_app = typer.Typer()
+endogenous_app = typer.Typer()
+initiative_app = typer.Typer()
+monologue_app = typer.Typer()
+thought_app = typer.Typer()
 why_app = typer.Typer()
 what_app = typer.Typer()
 eval_app = typer.Typer()
@@ -73,6 +77,10 @@ app.add_typer(safe_app, name="safe")
 app.add_typer(budget_app, name="budget")
 app.add_typer(explain_app, name="explain")
 app.add_typer(dream_app, name="dream")
+app.add_typer(endogenous_app, name="endogenous")
+app.add_typer(initiative_app, name="initiative")
+app.add_typer(monologue_app, name="monologue")
+app.add_typer(thought_app, name="thought")
 app.add_typer(why_app, name="why")
 app.add_typer(what_app, name="what")
 app.add_typer(eval_app, name="eval")
@@ -488,10 +496,20 @@ def replay_round(round_id: int, seed: int | None = None) -> None:
     emit(get_cil().execute(f"replay round {round_id}{suffix}"))
 
 
+@replay_app.command("motivation")
+def replay_motivation(round_id: Annotated[int, typer.Argument()] = 0) -> None:
+    emit_json_trace(str(round_id) if round_id else "last", get_controller().replay_motivation)
+
+
 @why_app.command("this")
 def why_this(round_id: Annotated[int, typer.Argument()] = 0) -> None:
     suffix = f" {round_id}" if round_id else ""
     emit(get_cil().execute(f"why this{suffix}"))
+
+
+@why_app.command("motivation")
+def why_motivation(round_id: Annotated[int, typer.Argument()] = 0) -> None:
+    emit_json_trace(str(round_id) if round_id else "last", get_controller().why_motivation)
 
 
 @why_app.command("not")
@@ -505,9 +523,66 @@ def what_changed(window: Annotated[int, typer.Argument()] = 5) -> None:
     emit(get_cil().execute(f"what changed {window}"))
 
 
+@endogenous_app.command("tick")
+def endogenous_tick(
+    trigger: str = typer.Option("idle", "--trigger"),
+    mode: str | None = typer.Option(None, "--mode"),
+) -> None:
+    emit(get_cil().endogenous_tick(trigger=trigger, mode=mode))
+
+
+@endogenous_app.command("status")
+def endogenous_status() -> None:
+    emit(get_cil().endogenous_status())
+
+
+@initiative_app.command("status")
+def initiative_status() -> None:
+    emit(get_cil().execute("initiative status"))
+
+
+@initiative_app.command("distribution")
+def initiative_distribution() -> None:
+    emit(get_cil().execute("initiative distribution"))
+
+
+@initiative_app.command("trigger")
+def initiative_trigger(
+    trigger: str = typer.Option("idle", "--trigger"),
+    mode: str | None = typer.Option(None, "--mode"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    command = f"initiative trigger {trigger}"
+    if mode:
+        command = f"{command} {mode}"
+    if force:
+        command = f"{command} force"
+    emit(get_cil().execute(command))
+
+
+@monologue_app.command("status")
+def monologue_status() -> None:
+    emit(get_cil().execute("monologue status"))
+
+
+@monologue_app.command("show")
+def monologue_show(limit: int = typer.Argument(12)) -> None:
+    emit(get_cil().execute(f"monologue show {limit}"))
+
+
+@thought_app.command("show")
+def thought_show(round_ref: str = typer.Argument("last")) -> None:
+    emit(get_cil().execute(f"thought show {round_ref}"))
+
+
 @eval_app.command("longrun")
 def eval_longrun(rounds: Annotated[int, typer.Argument()] = 1000) -> None:
     emit(get_cil().execute(f"eval longrun {rounds}"))
+
+
+@eval_app.command("acceptance-report")
+def eval_acceptance_report(window: int = typer.Option(20, "--window")) -> None:
+    emit(get_controller().acceptance_report(window=window))
 
 
 @suppress_app.command("dmn")

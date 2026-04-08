@@ -26,29 +26,61 @@ class EndogenousTickScheduler:
         relation_risk = float(relation_state.get("relationship_risk", 0.0) or 0.0)
         activation = float(pool_state.endogenous_activation_score or 0.0)
         no_external_target = 1.0 if not context.get("cue") else 0.0
+        subjective = getattr(state, "subjective_state", None)
+        body_state = getattr(state, "body_state", None)
+        organic_mode = getattr(state, "organic_mode", None)
+        spontaneous = _clip(float(getattr(subjective, "spontaneous", 0.0) or 0.0))
+        reject_all = _clip(float(getattr(subjective, "reject_all", 0.0) or 0.0))
+        meaning_density = _clip(len(list(getattr(subjective, "meaning_made", []) or [])) * 0.2)
+        fatigue = _clip(float(getattr(state, "fatigue", getattr(body_state, "fatigue", 0.0)) or 0.0))
+        fragments = _clip(float(getattr(state, "memory_fragments", getattr(body_state, "memory_fragments", 0.0)) or 0.0))
+        continuity = _clip(float(getattr(state, "self_continuity", getattr(body_state, "self_continuity", 1.0)) or 0.0))
+        continuity_drop = round(1.0 - continuity, 6)
+        organic_gain = 1.0
+        if organic_mode is not None and bool(getattr(organic_mode, "enabled", False)):
+            organic_gain += max(
+                0.0,
+                (
+                    float(getattr(organic_mode, "body_weight", 1.0) or 1.0)
+                    + float(getattr(organic_mode, "subjective_weight", 1.0) or 1.0)
+                )
+                / 2.0
+                - 1.0,
+            ) * 0.18
+        subjective_pressure = _clip(
+            (
+                spontaneous * 0.22
+                + reject_all * 0.24
+                + meaning_density * 0.16
+                + fatigue * 0.15
+                + fragments * 0.13
+                + continuity_drop * 0.1
+            )
+            * organic_gain
+        )
 
         trigger_specs = [
             (
                 "field_imbalance",
-                _clip(focus_lock / 6.0 + affect_residue * 0.8),
+                _clip(focus_lock / 6.0 + affect_residue * 0.8 + subjective_pressure * 0.28),
                 "endogenous_regulation" if affect_residue >= 0.16 else "endogenous_light",
                 "focus lock or affect residue remains elevated",
             ),
             (
                 "motivation_sum_high",
-                activation,
+                _clip(activation + subjective_pressure * 0.18),
                 "endogenous_light",
                 "motivation pool activation exceeds internal trigger threshold",
             ),
             (
                 "silent_but_active",
-                _clip(no_external_target * 0.25 + activation * 0.8 + memory_activation * 0.3),
+                _clip(no_external_target * 0.25 + activation * 0.8 + memory_activation * 0.3 + subjective_pressure * 0.42),
                 "endogenous_replay",
                 "no fresh external cue but endogenous activation stays live",
             ),
             (
                 "endogenous_wake",
-                _clip(memory_activation * 0.55 + relation_risk * 0.45 + affect_residue * 0.4),
+                _clip(memory_activation * 0.55 + relation_risk * 0.45 + affect_residue * 0.4 + subjective_pressure * 0.24),
                 "endogenous_replay" if memory_activation >= relation_risk else "endogenous_regulation",
                 "memory burst or relation pressure reactivates internal processing",
             ),
@@ -65,6 +97,13 @@ class EndogenousTickScheduler:
                 "memory_activation": memory_activation,
                 "relationship_risk": relation_risk,
                 "motivation_activation": activation,
+                "subjective_pressure": subjective_pressure,
+                "spontaneous": spontaneous,
+                "reject_all": reject_all,
+                "meaning_density": meaning_density,
+                "fatigue": fatigue,
+                "memory_fragments": fragments,
+                "continuity_drop": continuity_drop,
             },
             selected_mode=selected_mode,
             audit_reason=reason,

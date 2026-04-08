@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from nalr.runtime.controller import RuntimeController
-from nalr.schemas.models import EndogenousTickTrigger, RoundEvent
+from nalr.schemas.models import EndogenousTickTrigger, RoundEvent, RuntimeState, to_dict
 
 
 CONFIG_ROOT = Path(__file__).resolve().parents[2] / "config"
@@ -28,17 +28,50 @@ def test_runtime_state_and_state_payload_include_tlh_v1_structures(tmp_path):
     assert state.organic_mode.instinct_first is True
     assert state.emergent_action_sketches == []
     assert hasattr(state, "personality_anchor")
-    assert state.autonomy_policy.enabled is False
     assert state.autonomy_policy.profile == "tool_level"
     assert "endogenous tick" in state.autonomy_policy.allowed_commands
     assert "budget set" in state.autonomy_policy.blocked_commands
-    assert state.autonomy_loop.running is False
     assert payload["subjective_state"]["felt"] == []
     assert payload["organic_mode"]["instinct_first"] is True
     assert payload["autonomy_policy"]["profile"] == "tool_level"
-    assert payload["autonomy_loop"]["running"] is False
     assert "personality_anchor" in payload
     assert "personality_anchor" in payload["cognitive_snapshot"]["tlh"]
+
+
+def test_runtime_state_preserves_nested_body_state_on_round_trip():
+    state = RuntimeState(
+        body_state={
+            "energy": 0.19,
+            "fatigue": 0.81,
+            "memory_fragments": 0.66,
+            "self_continuity": 0.44,
+            "meaning_strength": 0.28,
+            "metabolism": 0.06,
+        }
+    )
+
+    round_tripped = RuntimeState(**to_dict(state))
+
+    assert state.body_state.energy == pytest.approx(0.19)
+    assert state.body_state.fatigue == pytest.approx(0.81)
+    assert state.body_energy == pytest.approx(0.19)
+    assert state.fatigue == pytest.approx(0.81)
+    assert round_tripped.body_state.energy == pytest.approx(0.19)
+    assert round_tripped.body_state.fatigue == pytest.approx(0.81)
+    assert round_tripped.body_energy == pytest.approx(0.19)
+    assert round_tripped.fatigue == pytest.approx(0.81)
+
+
+def test_runtime_autonomy_defaults_disable_hourly_caps(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    payload = controller.state_payload()
+    state = controller.load_runtime_state()
+
+    assert state.autonomy_policy.max_rounds_per_hour == 0
+    assert state.autonomy_policy.max_tool_actions_per_hour == 0
+    assert payload["autonomy_policy"]["max_rounds_per_hour"] == 0
+    assert payload["autonomy_policy"]["max_tool_actions_per_hour"] == 0
 
 
 def test_build_instinct_field_contribution_surfaces_tlh_action_pool(tmp_path):

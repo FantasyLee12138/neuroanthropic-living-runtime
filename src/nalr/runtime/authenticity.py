@@ -30,31 +30,41 @@ class AuthenticityPolicy:
         penalties = {action: 0.0 for action in distribution}
         has_non_interactive = any(item.get("source") in {"idle", "sleep"} for item in shaping_events)
         cue_active = bool(memory_cue) or float(slow_variables.get("memory_activation", 0.0) or 0.0) >= 0.15
+        body_energy = float(slow_variables.get("body_energy", 0.5) or 0.5)
+        stress_load = _clip(
+            0.35 * float(slow_variables.get("affect_residue", 0.0) or 0.0)
+            + 0.30 * float(slow_variables.get("resource_scarcity", 0.0) or 0.0)
+            + 0.20 * float(slow_variables.get("relationship_drift", 0.0) or 0.0)
+            + 0.15 * max(0.0, 0.55 - body_energy),
+            0.0,
+            1.0,
+        )
+        penalty_scale = _clip(0.90 - stress_load * 0.55, 0.30, 0.90)
 
         if query_kind in {"self_identity", "provider_identity"}:
             for action in distribution:
                 if action not in {"respond", "clarify", "short_reply"}:
-                    penalties[action] += 0.18
+                    penalties[action] += 0.14 * penalty_scale
                 if action == "wander":
-                    penalties[action] += 0.16
+                    penalties[action] += 0.12 * penalty_scale
         elif query_kind == "answer_explanation":
             for action in distribution:
                 if action not in {"respond", "recall", "clarify", "short_reply"}:
-                    penalties[action] += 0.14
+                    penalties[action] += 0.10 * penalty_scale
                 if cue_active and action not in {"recall", "respond", "short_reply"}:
-                    penalties[action] += 0.08
+                    penalties[action] += 0.06 * min(1.0, penalty_scale + 0.10)
                 if has_non_interactive and action == "wander":
-                    penalties[action] += 0.08
+                    penalties[action] += 0.05 * penalty_scale
         if disclosure_intent == "withhold":
             for action in distribution:
                 if action in {"connect", "wander"}:
-                    penalties[action] += 0.10
+                    penalties[action] += 0.08 * penalty_scale
         elif disclosure_intent == "provider_origin":
             for action in distribution:
                 if action in {"connect", "wander"}:
-                    penalties[action] += 0.06
+                    penalties[action] += 0.04 * penalty_scale
         elif disclosure_intent == "relational_self_disclosure":
-            penalties["short_reply"] = penalties.get("short_reply", 0.0) + 0.08
+            penalties["short_reply"] = penalties.get("short_reply", 0.0) + 0.05 * penalty_scale
 
         adjusted = {}
         sampling_penalty_applied = 0.0

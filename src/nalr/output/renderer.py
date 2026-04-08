@@ -102,6 +102,16 @@ def _action_line(plan: RenderPlan) -> str:
         return "我先接住你的感受，再继续往下说。"
     if plan.action == "rest":
         return "我先把强度收一点，再继续回应。"
+    if plan.action == "absorb":
+        return "我先把这些线索吸收一下，再决定要不要往外说。"
+    if plan.action == "self_run":
+        return ""
+    if plan.action == "monologue":
+        return "我先把这股想法在心里说完整，再决定要不要真正开口。"
+    if plan.action == "nothing":
+        return ""
+    if plan.action == "die":
+        return "我先承认这里出现了自主结束生命的倾向。"
     if plan.action == "short_reply":
         return "我先给你一个更短更直接的答复。"
     if plan.action == "wander":
@@ -216,6 +226,8 @@ def _answer_explanation_line(plan: RenderPlan) -> str:
 
 
 def fallback_render_text(plan: RenderPlan) -> str:
+    if plan.action in {"nothing", "self_run"}:
+        return ""
     identity = _identity_line(plan)
     if identity:
         return identity
@@ -229,9 +241,19 @@ def fallback_render_text(plan: RenderPlan) -> str:
 
     summary = _clean_summary(plan.event_summary)
     resource_scarcity = float(plan.message_plan.get("slow_variables", {}).get("resource_scarcity", 0.0) or 0.0)
-    context_text = f"你刚才提到“{summary}”。 " if summary else ""
+    if summary:
+        if plan.delivery_mode == "monologue":
+            context_text = f"我脑子里还挂着“{summary}”。 "
+        else:
+            context_text = f"你刚才提到“{summary}”。 "
+    else:
+        context_text = ""
     parts = [part for part in (_opening_from_expression(plan), _action_line(plan), _safety_line(plan)) if part]
     if plan.action == "short_reply" or resource_scarcity >= 0.75:
         parts = parts[:2]
     text = f"{context_text}{' '.join(parts)}".strip()
-    return text or "我会沿着这轮留下来的感觉继续说下去。"
+    if not text:
+        text = "我会沿着这轮留下来的感觉继续说下去。"
+    if plan.delivery_mode == "monologue" and text:
+        return text if text.startswith("【独白】") else f"【独白】{text}"
+    return text

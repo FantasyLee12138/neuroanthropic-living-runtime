@@ -352,6 +352,9 @@ BehaviorPlausibilityGuard 不做最终拍板，而是生成 guard_penalty
 Sampling Layer
 将所有 Δ 和 mask 融合到 p_final
 再采样或解码
+随机熵不再依赖外部 QRNG 服务
+统一由本机 `QuantumEntropyPool -> MacOSSystemEntropyProvider -> os.urandom()` 提供
+trace 中保留 `entropy_ref / entropy_refs_by_node` 用于说明本地系统随机源的批次与字节区间
 Trace Layer
 写入每个模块的 delta contribution
 observer 可显示贡献热图，而不是只显示“谁先后执行过”

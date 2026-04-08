@@ -27,18 +27,23 @@ class VitalityEngine:
         else:
             shaping_events = [memory_store.apply_noninteractive_proposal(proposal)]
         previous_focus = state.focus
+        previous_fatigue = float(state.fatigue)
         resource_scarcity = float(state.resource_state.get("scarcity_index", _clip(1.0 - state.budget_remaining)))
 
         if requested_mode == "idle":
             state.focus = "wander" if state.focus != "rest" else state.focus
             state.mood = round(_clip(state.mood * 0.97 + (0.52 - state.affect_residue * 0.08) * 0.03), 4)
             state.body_energy = round(_clip(state.body_energy + 0.01), 4)
+            embodied_fatigue = _clip((1.0 - state.body_energy) * 0.78 + state.affect_residue * 0.18 + resource_scarcity * 0.04)
+            state.fatigue = round(_clip(previous_fatigue * 0.80 + embodied_fatigue * 0.20 - 0.035), 4)
             shaping_detail = "memory_rebalance+habit_decay+salience_replay"
         else:
             state.focus = "rest"
             state.mood = round(_clip(state.mood * 0.90 + 0.55 * 0.10 - state.affect_residue * 0.03), 4)
             state.body_energy = round(_clip(state.body_energy + 0.05), 4)
             state.affect_residue = round(_clip(state.affect_residue * 0.82), 4)
+            embodied_fatigue = _clip((1.0 - state.body_energy) * 0.72 + state.affect_residue * 0.24 + resource_scarcity * 0.04)
+            state.fatigue = round(_clip(previous_fatigue * 0.68 + embodied_fatigue * 0.32 - 0.09), 4)
             shaping_detail = "memory_consolidation+habit_consolidation+affect_falloff"
 
         shaping_events.append(
@@ -49,6 +54,8 @@ class VitalityEngine:
                 "focus_to": state.focus,
                 "mood_level": round(state.mood, 4),
                 "body_energy": round(state.body_energy, 4),
+                "fatigue_from": round(previous_fatigue, 4),
+                "fatigue_to": round(state.fatigue, 4),
                 "resource_scarcity": round(resource_scarcity, 4),
                 "shaping_detail": shaping_detail,
             }

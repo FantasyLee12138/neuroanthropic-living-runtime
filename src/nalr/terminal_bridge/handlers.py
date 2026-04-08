@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from collections.abc import Iterable
 from typing import Any
 
 from nalr.runtime.controller import RuntimeController
 from nalr.runtime.metadata import utc_now_iso
-from nalr.schemas.models import to_dict
+from nalr.schemas.models import RoundEvent, to_dict
 from nalr.terminal_bridge.protocol import ProtocolError, build_outbound_event, validate_inbound_event
 from nalr.terminal_bridge.session import TerminalSessionState, TerminalSessionStore
 
@@ -21,6 +22,11 @@ class TerminalEventHandler:
     def handle(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         return list(self.handle_stream(payload))
 
+    def snapshot_session(self, session_id: str) -> dict[str, Any]:
+        session = self._load_session(session_id)
+        run_id = session.active_run_id or session.last_run_id
+        return self._sidebar_snapshot(session, run_id=run_id)
+
     def handle_stream(self, payload: dict[str, Any]) -> Iterable[dict[str, Any]]:
         event = validate_inbound_event(payload)
         event_type = event["type"]
@@ -31,7 +37,7 @@ class TerminalEventHandler:
                 persist_current=bool(event.get("persist_current", True)),
             )
         if event_type == "user_turn":
-            return self._user_turn_stream(event["session_id"], event["text"])
+            return iter(self._user_turn_stream(event["session_id"], event["text"]))
         if event_type == "control_command":
             return self._control_command(event["session_id"], event["command"], event.get("value"))
         if event_type == "approve":
@@ -47,7 +53,7 @@ class TerminalEventHandler:
     def _load_session(self, session_id: str) -> TerminalSessionState:
         return self.session_store.read(session_id)
 
-    def _start_session(self, session_id: str, cwd: str, *, persist_current: bool = True) -> list[dict[str, Any]]:
+    def _start_session(self, session_id: str, cwd: str, *, persist_current: bool = True) -> Iterable[dict[str, Any]]:
         try:
             state = self.session_store.read(session_id)
             if state.status in {"active", "detached"}:
@@ -58,15 +64,15 @@ class TerminalEventHandler:
         except FileNotFoundError:
             state = TerminalSessionState(session_id=session_id, cwd=cwd, status="active")
         self.session_store.write(state, mark_current=persist_current)
-        return [
-            build_outbound_event("session_started", session=to_dict(state)),
-            self._build_sidebar_snapshot_event(state),
-        ]
+        yield build_outbound_event("session_started", session=to_dict(state))
+        yield self._build_sidebar_snapshot_event(state)
 
-    def _append_transcript(self, session: TerminalSessionState, kind: str, text: str) -> None:
+    def _append_transcript(self, session: TerminalSessionState, kind: str, text: str, **metadata: Any) -> None:
         if not text:
             return
-        session.transcript_lines.append({"kind": kind, "text": text.strip()})
+        entry = {"kind": kind, "text": text.strip()}
+        entry.update({key: value for key, value in metadata.items() if value is not None})
+        session.transcript_lines.append(entry)
 
     def _append_tool_timeline(
         self,
@@ -77,6 +83,8 @@ class TerminalEventHandler:
         tool: str,
         summary: str,
         status: str | None,
+        round_id: int | None = None,
+        trace_ref: str | None = None,
     ) -> None:
         session.tool_timeline.append(
             {
@@ -85,7 +93,245 @@ class TerminalEventHandler:
                 "tool": tool,
                 "summary": summary,
                 "status": status,
+                "roundId": round_id,
+                "traceRef": trace_ref,
             }
+        )
+
+    def _permission_policy(self, permission_mode: str) -> dict[str, Any]:
+        if permission_mode == "acceptEdits":
+            return {"allow_commit": True, "operator_level": "soft_intervene"}
+        if permission_mode == "ask":
+            return {"allow_commit": False, "operator_level": "debug_control"}
+        return {"allow_commit": False, "operator_level": "read_only"}
+
+    def _linkage_fields(self, *payloads: dict[str, Any] | None) -> dict[str, Any]:
+        def _round_id(value: Any) -> int | None:
+            if isinstance(value, bool):
+                return None
+            if isinstance(value, int):
+                return value
+            if isinstance(value, str) and value.strip():
+                try:
+                    return int(value)
+                except ValueError:
+                    return None
+            return None
+
+        def _trace_ref(value: Any) -> str | None:
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            return None
+
+        def _search(payload: dict[str, Any] | None, depth: int = 0) -> dict[str, Any]:
+            if not isinstance(payload, dict) or depth > 2:
+                return {}
+            round_id = _round_id(payload.get("round_id") or payload.get("roundId"))
+            trace_ref = _trace_ref(payload.get("trace_ref") or payload.get("traceRef"))
+            if round_id is not None or trace_ref is not None:
+                result: dict[str, Any] = {}
+                if round_id is not None:
+                    result["round_id"] = round_id
+                if trace_ref is not None:
+                    result["trace_ref"] = trace_ref
+                return result
+            for nested_key in ("run", "result", "status", "why", "explain", "payload", "trace", "storage", "session"):
+                nested = payload.get(nested_key)
+                if isinstance(nested, dict):
+                    found = _search(nested, depth + 1)
+                    if found:
+                        return found
+            return {}
+
+        for payload in payloads:
+            found = _search(payload)
+            if found:
+                return found
+        return {}
+
+    def _apply_event_to_session(self, session: TerminalSessionState, event: dict[str, Any]) -> None:
+        event_type = str(event.get("type") or "")
+        if event_type == "tool_call":
+            linkage = self._linkage_fields(event)
+            self._append_tool_timeline(
+                session,
+                "call",
+                call_id=str(event.get("call_id") or ""),
+                tool=str(event.get("tool") or "unknown"),
+                summary=str(event.get("summary") or event.get("status") or ""),
+                status=event.get("status") if event.get("status") is None else str(event.get("status")),
+                round_id=linkage.get("round_id"),
+                trace_ref=linkage.get("trace_ref"),
+            )
+            self._append_transcript(session, "system", f"Tool: {event.get('tool') or 'unknown'}")
+            return
+        if event_type == "approval_request":
+            linkage = self._linkage_fields(event)
+            pending = [item for item in session.approvals_pending if item.get("call_id") != event.get("call_id")]
+            pending.append(
+                {
+                    "call_id": event.get("call_id"),
+                    "tool": event.get("tool"),
+                    "args": event.get("args"),
+                    "risk_level": event.get("risk_level"),
+                    "summary": event.get("summary"),
+                    "action_preview": event.get("action_preview"),
+                    "mode": event.get("mode"),
+                    "status": event.get("status"),
+                    "run_id": event.get("run_id"),
+                    "choices": event.get("choices", []),
+                    "round_id": linkage.get("round_id"),
+                    "trace_ref": linkage.get("trace_ref"),
+                }
+            )
+            session.approvals_pending = pending
+            self._append_tool_timeline(
+                session,
+                "approval",
+                call_id=str(event.get("call_id") or ""),
+                tool=str(event.get("tool") or "unknown"),
+                summary=str(event.get("summary") or ""),
+                status=str(event.get("status") or "pending"),
+                round_id=linkage.get("round_id"),
+                trace_ref=linkage.get("trace_ref"),
+            )
+            self._append_transcript(session, "system", f"Approval: {event.get('tool') or 'unknown'} - {event.get('summary') or ''}")
+            return
+        if event_type == "tool_result":
+            linkage = self._linkage_fields(event)
+            session.approvals_pending = [item for item in session.approvals_pending if item.get("call_id") != event.get("call_id")]
+            self._append_tool_timeline(
+                session,
+                "result",
+                call_id=str(event.get("call_id") or ""),
+                tool=str((event.get("result") or {}).get("tool_name") or "unknown"),
+                summary=str((event.get("result") or {}).get("summary") or ""),
+                status=(event.get("result") or {}).get("status") if (event.get("result") or {}).get("status") is None else str((event.get("result") or {}).get("status")),
+                round_id=linkage.get("round_id"),
+                trace_ref=linkage.get("trace_ref"),
+            )
+            self._append_transcript(session, "system", f"Result: {(event.get('result') or {}).get('tool_name') or 'unknown'}")
+            return
+        if event_type == "assistant_final":
+            self._append_transcript(session, "assistant", str(event.get("message") or ""))
+
+    def _gated_tool_result_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        result = dict(event.get("result") or {})
+        result.setdefault("status", "rejected")
+        result.setdefault("summary", "tool execution rejected")
+        result["rejected"] = True
+        return build_outbound_event(
+            "tool_result",
+            session_id=event.get("session_id"),
+            call_id=event.get("call_id"),
+            result=result,
+            **self._linkage_fields(event, result),
+        )
+
+    def _persistable_deferred_events(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        sanitized = deepcopy(events)
+        for event in sanitized:
+            if not isinstance(event, dict) or event.get("type") != "sidebar_snapshot":
+                continue
+            session_payload = event.get("session")
+            if isinstance(session_payload, dict):
+                approvals = session_payload.get("approvals_pending")
+                if isinstance(approvals, list):
+                    session_payload["approvals_pending"] = [
+                        {k: v for k, v in item.items() if k != "deferred_events"} if isinstance(item, dict) else item
+                        for item in approvals
+                    ]
+            approvals_payload = event.get("approvals")
+            if isinstance(approvals_payload, dict):
+                pending = approvals_payload.get("pending")
+                if isinstance(pending, list):
+                    approvals_payload["pending"] = [
+                        {k: v for k, v in item.items() if k != "deferred_events"} if isinstance(item, dict) else item
+                        for item in pending
+                    ]
+        return sanitized
+
+    def _endogenous_summary(self, payload: dict[str, Any]) -> str:
+        trigger = payload.get("trigger") if isinstance(payload.get("trigger"), dict) else {}
+        micro_intent = payload.get("micro_intent") if isinstance(payload.get("micro_intent"), dict) else {}
+        return "\n".join(
+            [
+                f"内源触发：round {payload.get('round_id', '?')}",
+                f"触发器：{trigger.get('trigger_type') or payload.get('trigger_type') or 'unknown'}",
+                f"模式：{payload.get('selected_mode') or trigger.get('selected_mode') or 'unknown'}",
+                f"当前意图：{micro_intent.get('name') or 'latent'}",
+                f"边界动作：{payload.get('boundary_action') or 'unknown'}",
+            ]
+        )
+
+    def _replay_summary(self, payload: dict[str, Any]) -> str:
+        return "\n".join(
+            [
+                f"重放：round {payload.get('round_id', '?')}",
+                f"原动作：{payload.get('original_action') or 'unknown'}",
+                f"重放动作：{payload.get('replayed_action') or 'unknown'}",
+                f"seed：{payload.get('seed', 0)}",
+            ]
+        )
+
+    def _replay_motivation_summary(self, payload: dict[str, Any]) -> str:
+        motivation_pool = payload.get("motivation_pool") if isinstance(payload.get("motivation_pool"), dict) else {}
+        feedback = payload.get("motivation_feedback") if isinstance(payload.get("motivation_feedback"), dict) else {}
+        return "\n".join(
+            [
+                f"动机重放：round {payload.get('round_id', '?')}",
+                f"sampled={payload.get('sampled_action') or 'unknown'}",
+                f"激活数：{len(motivation_pool.get('active_motivations', []) or [])}",
+                f"反馈：{feedback.get('reward_signal', feedback.get('summary', '暂无'))}",
+            ]
+        )
+
+    def _why_motivation_summary(self, payload: dict[str, Any]) -> str:
+        motivation_pool = payload.get("motivation_pool") if isinstance(payload.get("motivation_pool"), dict) else {}
+        feedback = payload.get("motivation_feedback") if isinstance(payload.get("motivation_feedback"), dict) else {}
+        return "\n".join(
+            [
+                f"动机原因：round {payload.get('round_id', '?')}",
+                f"sampled={payload.get('sampled_action') or 'unknown'}",
+                f"cause={payload.get('cause_type') or 'unknown'}",
+                f"active={len(motivation_pool.get('active_motivations', []) or [])}",
+                f"feedback={feedback.get('reward_signal', feedback.get('summary', '暂无'))}",
+            ]
+        )
+
+    def _why_not_summary(self, payload: dict[str, Any]) -> str:
+        blocked = payload.get("blocked_by", []) or []
+        candidates = ", ".join(str(item) for item in blocked[:4]) if blocked else "none"
+        return "\n".join(
+            [
+                f"为什么不是：round {payload.get('round_id', '?')}",
+                f"action={payload.get('action') or 'unknown'}",
+                f"selected={payload.get('selected_action') or 'unknown'}",
+                f"blocked_by={candidates}",
+            ]
+        )
+
+    def _what_changed_summary(self, payload: dict[str, Any]) -> str:
+        action_counts = dict(payload.get("action_counts") or {})
+        mode_counts = dict(payload.get("mode_counts") or {})
+        action_text = ", ".join(f"{name}:{count}" for name, count in list(action_counts.items())[:4]) or "none"
+        mode_text = ", ".join(f"{name}:{count}" for name, count in list(mode_counts.items())[:4]) or "none"
+        return "\n".join(
+            [
+                f"变化窗口：{payload.get('window', 0)}",
+                f"动作：{action_text}",
+                f"模式：{mode_text}",
+                f"budget_delta={payload.get('budget_delta', 0.0)}",
+            ]
+        )
+
+    def _eval_summary(self, payload: dict[str, Any]) -> str:
+        return "\n".join(
+            [
+                f"长跑评估：generated_rounds={payload.get('generated_rounds', 0)}",
+                f"task_success_rate={payload.get('task_success_rate', 0.0)}",
+                f"safe_mode_rate={payload.get('safe_mode_rate', 0.0)}",
+            ]
         )
 
     def _approval_choices(self) -> list[dict[str, str]]:
@@ -114,27 +360,81 @@ class TerminalEventHandler:
         ]
         return {"primary": primary, "secondary": secondary}
 
+    def _ensure_chat_sidebar_round(
+        self,
+        *,
+        text: str,
+        target: str,
+        mode: str,
+        previous_round_count: int,
+    ) -> int | None:
+        current_round_count = int(self.controller.load_runtime_state().round_count or 0)
+        if current_round_count > previous_round_count:
+            return current_round_count
+        result = self.controller.tick(
+            RoundEvent(source="user", content=text, target=target),
+            scenario="chat",
+            mode=mode,
+        )
+        return int(result.round_id)
+
     def _user_turn_stream(self, session_id: str, text: str) -> Iterable[dict[str, Any]]:
         session = self._load_session(session_id)
-        self._append_transcript(session, "user", text.strip())
+        normalized_text = text.strip()
+        initiative_feedback = self.controller.record_initiative_feedback(normalized_text, session_id=session_id)
+        self._append_transcript(
+            session,
+            "user",
+            normalized_text,
+            initiative_response_to=initiative_feedback.get("initiative_response_to") if initiative_feedback.get("recorded") else None,
+        )
+        events: list[dict[str, Any]] = []
+        deferred_events: list[dict[str, Any]] = []
+        gated_call_id: str | None = None
+        policy = self._permission_policy(session.permission_mode)
+        previous_round_count = int(self.controller.load_runtime_state().round_count or 0)
         plan = self.controller.plan_turn(
-            text.strip(),
+            normalized_text,
             target="user",
             mode="interactive",
-            operator_level="read_only",
+            operator_level=policy["operator_level"],
+            defer_bootstrap_tool=session.permission_mode == "ask",
         )
+        active_run_id = session.active_run_id or session.last_run_id
+        if getattr(plan, "route", "") == "direct_chat" and active_run_id:
+            try:
+                active_run = self.controller.run_status(active_run_id)
+            except FileNotFoundError:
+                active_run = None
+            if isinstance(active_run, dict) and str(active_run.get("status") or "") in {"running", "paused"}:
+                plan.route = "task_run"
+                plan.scenario = "task"
+                plan.task_bootstrap = self.controller.prepare_task_bootstrap(
+                    normalized_text,
+                    allow_commit=policy["allow_commit"],
+                    operator_level=policy["operator_level"],
+                    defer_bootstrap_tool=session.permission_mode == "ask",
+                )
         if getattr(plan, "route", "") == "fast_chat":
             deltas, execution = self.controller.stream_fast_chat_turn(plan)
             message = execution["assistant_final"] if isinstance(execution, dict) else execution.assistant_final
             self._append_transcript(session, "assistant", message)
             self.session_store.write(session)
+            self._ensure_chat_sidebar_round(
+                text=normalized_text,
+                target=getattr(plan, "target", "user"),
+                mode=getattr(plan, "mode", "interactive"),
+                previous_round_count=previous_round_count,
+            )
             for delta in deltas:
-                yield build_outbound_event("assistant_token", session_id=session_id, delta=delta, message=message)
-            yield build_outbound_event("assistant_final", session_id=session_id, message=message)
-            return
+                events.append(build_outbound_event("assistant_token", session_id=session_id, delta=delta, message=message))
+            events.append(self._build_sidebar_snapshot_event(session, run_id=session.active_run_id or session.last_run_id))
+            events.append(build_outbound_event("assistant_final", session_id=session_id, message=message))
+            return events
         execution = self.controller.execute_turn(
             plan,
-            operator_level="read_only",
+            allow_commit=policy["allow_commit"],
+            operator_level=policy["operator_level"],
             replace_active=True,
             interrupt_reason="interrupted_by_user",
         )
@@ -148,19 +448,24 @@ class TerminalEventHandler:
                 deltas = [message]
             self._append_transcript(session, "assistant", message)
             self.session_store.write(session)
+            self._ensure_chat_sidebar_round(
+                text=normalized_text,
+                target=getattr(plan, "target", "user"),
+                mode=getattr(plan, "mode", "interactive"),
+                previous_round_count=previous_round_count,
+            )
             for delta in deltas:
-                yield build_outbound_event(
+                events.append(
+                    build_outbound_event(
                     "assistant_token",
                     session_id=session_id,
                     delta=delta,
                     message=message,
                 )
-            yield build_outbound_event(
-                "assistant_final",
-                session_id=session_id,
-                message=message,
-            )
-            return
+                )
+            events.append(self._build_sidebar_snapshot_event(session, run_id=session.active_run_id or session.last_run_id))
+            events.append(build_outbound_event("assistant_final", session_id=session_id, message=message))
+            return events
 
         run = execution["run"] if isinstance(execution, dict) else execution.run
         explain = execution["explain"] if isinstance(execution, dict) else execution.explain
@@ -172,22 +477,44 @@ class TerminalEventHandler:
         session.status = "active"
         self._append_transcript(session, "assistant", task_message)
         self.session_store.write(session)
-        yield build_outbound_event("run_status", session_id=session_id, run=run)
-        yield build_outbound_event("assistant_token", session_id=session_id, delta=task_message)
+        events.append(
+            build_outbound_event(
+                "run_status",
+                session_id=session_id,
+                run=run,
+                **self._linkage_fields(run, explain),
+            )
+        )
+        events.append(
+            build_outbound_event(
+                "assistant_token",
+                session_id=session_id,
+                delta=task_message,
+                message=task_message,
+                **self._linkage_fields(run, explain),
+            )
+        )
         pending_approvals = [item for item in session.approvals_pending if item.get("status") == "pending"]
         session.approvals_pending = pending_approvals
         for step in steps:
-            self._append_transcript(session, "system", f"Step: {step.get('title') or step.get('step_id') or 'unknown'}")
-            self.session_store.write(session)
-            yield build_outbound_event("step_update", session_id=session_id, step=step)
+            step_event = build_outbound_event(
+                "step_update",
+                session_id=session_id,
+                step=step,
+                **self._linkage_fields(run, explain, step),
+            )
+            if gated_call_id is None:
+                self._append_transcript(session, "system", f"Step: {step.get('title') or step.get('step_id') or 'unknown'}")
+                self.session_store.write(session)
+                events.append(step_event)
+            else:
+                deferred_events.append(step_event)
         for index, tool in enumerate(tools):
             call_id = f"{run['run_id']}:tool:{index}"
             tool_name = str(tool.get("tool_name") or "unknown")
             summary = tool.get("summary") or tool.get("status") or ""
-            self._append_tool_timeline(session, "call", call_id=call_id, tool=tool_name, summary=summary, status=tool.get("status"))
-            self._append_transcript(session, "system", f"Tool: {tool_name}{f' - {summary}' if summary else ''}")
-            self.session_store.write(session)
-            yield build_outbound_event(
+            linkage = self._linkage_fields(run, tool)
+            tool_call_event = build_outbound_event(
                 "tool_call",
                 session_id=session_id,
                 call_id=call_id,
@@ -196,7 +523,25 @@ class TerminalEventHandler:
                 args=tool.get("input") or {},
                 summary=summary,
                 status=tool.get("status"),
+                **self._linkage_fields(run, tool),
             )
+            if gated_call_id is None:
+                self._append_tool_timeline(
+                    session,
+                    "call",
+                    call_id=call_id,
+                    tool=tool_name,
+                    summary=summary,
+                    status=tool.get("status"),
+                    round_id=linkage.get("round_id"),
+                    trace_ref=linkage.get("trace_ref"),
+                )
+                self._append_transcript(session, "system", f"Tool: {tool_name}{f' - {summary}' if summary else ''}")
+                self.session_store.write(session)
+                events.append(tool_call_event)
+            else:
+                deferred_events.append(tool_call_event)
+
             if session.permission_mode == "ask":
                 approval_payload = {
                     "call_id": call_id,
@@ -212,20 +557,13 @@ class TerminalEventHandler:
                     "actions": ["approve", "reject"],
                     "choices": self._approval_choices(),
                     "requested_at": utc_now_iso(),
+                    "deferred_events": [],
+                    "round_id": linkage.get("round_id"),
+                    "trace_ref": linkage.get("trace_ref"),
                 }
                 pending_approvals.append(approval_payload)
                 session.approvals_pending = pending_approvals
-                self._append_tool_timeline(
-                    session,
-                    "approval",
-                    call_id=call_id,
-                    tool=tool_name,
-                    summary=str(approval_payload["summary"]),
-                    status=str(approval_payload["status"]),
-                )
-                self._append_transcript(session, "system", f"Approval: {tool_name} - {approval_payload['summary']}")
-                self.session_store.write(session)
-                yield build_outbound_event(
+                approval_event = build_outbound_event(
                     "approval_request",
                     session_id=session_id,
                     call_id=call_id,
@@ -240,28 +578,97 @@ class TerminalEventHandler:
                     actions=approval_payload["actions"],
                     choices=self._approval_choices(),
                     approved=None,
+                    **self._linkage_fields(run, tool, approval_payload),
                 )
-            self._append_tool_timeline(
-                session,
-                "result",
-                call_id=call_id,
-                tool=tool_name,
-                summary=tool.get("output_excerpt") or summary,
-                status=tool.get("status"),
-            )
-            self._append_transcript(session, "system", f"Result: {tool_name}")
-            self.session_store.write(session)
-            yield build_outbound_event("tool_result", session_id=session_id, call_id=call_id, result=tool)
+                if gated_call_id is None:
+                    gated_call_id = call_id
+                    self._append_tool_timeline(
+                        session,
+                        "approval",
+                        call_id=call_id,
+                        tool=tool_name,
+                        summary=str(approval_payload["summary"]),
+                        status=str(approval_payload["status"]),
+                        round_id=linkage.get("round_id"),
+                        trace_ref=linkage.get("trace_ref"),
+                    )
+                    self._append_transcript(session, "system", f"Approval: {tool_name} - {approval_payload['summary']}")
+                    self.session_store.write(session)
+                    events.append(approval_event)
+                else:
+                    deferred_events.append(approval_event)
 
-        self.session_store.write(session)
-        yield self._build_sidebar_snapshot_event(session, run_id=run["run_id"], run=run, explain=explain, steps=steps, tools=tools)
-        yield build_outbound_event(
+            result_event = None
+            if str(tool.get("status") or "") != "awaiting_approval":
+                result_event = build_outbound_event(
+                    "tool_result",
+                    session_id=session_id,
+                    call_id=call_id,
+                    result=tool,
+                    **linkage,
+                )
+            if session.permission_mode == "ask":
+                approval_item = next((item for item in session.approvals_pending if item.get("call_id") == call_id), None)
+                if approval_item is not None and result_event is not None:
+                    approval_item["deferred_events"] = self._persistable_deferred_events([result_event])
+                if result_event is not None and gated_call_id is None:
+                    self._append_tool_timeline(
+                        session,
+                        "result",
+                        call_id=call_id,
+                        tool=tool_name,
+                        summary=tool.get("output_excerpt") or summary,
+                        status=tool.get("status"),
+                        round_id=linkage.get("round_id"),
+                        trace_ref=linkage.get("trace_ref"),
+                    )
+                    self._append_transcript(session, "system", f"Result: {tool_name}")
+                    self.session_store.write(session)
+                    events.append(result_event)
+                elif result_event is not None:
+                    deferred_events.append(result_event)
+            else:
+                self._append_tool_timeline(
+                    session,
+                    "result",
+                    call_id=call_id,
+                    tool=tool_name,
+                    summary=tool.get("output_excerpt") or summary,
+                    status=tool.get("status"),
+                    round_id=linkage.get("round_id"),
+                    trace_ref=linkage.get("trace_ref"),
+                )
+                self._append_transcript(session, "system", f"Result: {tool_name}")
+                self.session_store.write(session)
+                events.append(result_event)
+
+        snapshot_event = self._build_sidebar_snapshot_event(session, run_id=run["run_id"], run=run, explain=explain, steps=steps, tools=tools)
+        final_event = build_outbound_event(
             "assistant_final",
             session_id=session_id,
             run_id=run["run_id"],
             message=(execution["assistant_final"] if isinstance(execution, dict) else execution.assistant_final),
             payload=explain,
+            **self._linkage_fields(run, explain, snapshot_event),
         )
+        if gated_call_id is not None:
+            gate_item = next((item for item in session.approvals_pending if item.get("call_id") == gated_call_id), None)
+            if gate_item is not None:
+                gate_item["deferred_events"] = self._persistable_deferred_events(deferred_events)
+                gate_item["deferred_final"] = {
+                    "run_id": run["run_id"],
+                    "message": execution["assistant_final"] if isinstance(execution, dict) else execution.assistant_final,
+                    "payload": explain,
+                    **self._linkage_fields(run, explain, snapshot_event),
+                }
+            self.session_store.write(session)
+            events.append(snapshot_event)
+            return events
+
+        self.session_store.write(session)
+        events.append(snapshot_event)
+        events.append(final_event)
+        return events
 
     def _control_command(self, session_id: str, command: str, value: str | None = None) -> list[dict[str, Any]]:
         session = self._load_session(session_id)
@@ -381,15 +788,224 @@ class TerminalEventHandler:
                     payload=payload,
                 ),
             ]
+        if command_name == "endogenous":
+            tokens = [part for part in str(value_text or "").split() if part]
+            trigger = tokens[0] if tokens else "idle"
+            mode = tokens[1] if len(tokens) > 1 else None
+            payload = self.controller.run_endogenous_tick(trigger=trigger, mode=mode)
+            return [
+                self._build_sidebar_snapshot_event(session, run_id=run_id),
+                build_outbound_event(
+                    "assistant_final",
+                    session_id=session_id,
+                    run_id=run_id,
+                    message=self._endogenous_summary(payload),
+                    payload=payload,
+                    **self._linkage_fields(payload),
+                ),
+            ]
+        if command_name == "initiative":
+            tokens = [part for part in str(value_text or "").split() if part]
+            subcommand = tokens[0] if tokens else "status"
+            if subcommand == "status":
+                payload = self.controller.initiative_status()
+                message = "initiative status"
+            elif subcommand == "distribution":
+                payload = self.controller.initiative_distribution()
+                message = "initiative distribution"
+            elif subcommand == "trigger":
+                trigger_tokens = [part for part in tokens[1:] if part != "force"]
+                trigger = trigger_tokens[0] if trigger_tokens else "idle"
+                mode = trigger_tokens[1] if len(trigger_tokens) > 1 else None
+                force = any(part == "force" for part in tokens[1:])
+                payload = self.controller.initiative_trigger_now(trigger=trigger, mode=mode, force=force)
+                message = "initiative trigger"
+            elif subcommand == "why":
+                round_ref = tokens[1] if len(tokens) > 1 else "last"
+                payload = self.controller.initiative_why(round_ref)
+                message = "initiative why"
+            else:
+                return [build_outbound_event("error", session_id=session_id, message="Usage: /initiative status|distribution|trigger [trigger] [mode]|why [round]")]
+            return [
+                self._build_sidebar_snapshot_event(session, run_id=run_id),
+                build_outbound_event(
+                    "assistant_final",
+                    session_id=session_id,
+                    run_id=run_id,
+                    message=message,
+                    payload=payload,
+                    **self._linkage_fields(payload if isinstance(payload, dict) else None),
+                ),
+            ]
+        if command_name == "monologue":
+            tokens = [part for part in str(value_text or "").split() if part]
+            subcommand = tokens[0] if tokens else "status"
+            if subcommand == "status":
+                payload = self.controller.monologue_status()
+                message = "monologue status"
+            elif subcommand == "show":
+                limit = int(tokens[1]) if len(tokens) > 1 else 12
+                payload = self.controller.monologue_show(limit=limit)
+                message = "monologue show"
+            else:
+                return [build_outbound_event("error", session_id=session_id, message="Usage: /monologue status|show [limit]")]
+            return [
+                self._build_sidebar_snapshot_event(session, run_id=run_id),
+                build_outbound_event(
+                    "assistant_final",
+                    session_id=session_id,
+                    run_id=run_id,
+                    message=message,
+                    payload=payload,
+                    **self._linkage_fields(payload if isinstance(payload, dict) else None),
+                ),
+            ]
+        if command_name == "thought":
+            round_ref = str(value_text or "last").strip() or "last"
+            payload = self.controller.thought_snapshot(round_ref)
+            return [
+                self._build_sidebar_snapshot_event(session, run_id=run_id),
+                build_outbound_event(
+                    "assistant_final",
+                    session_id=session_id,
+                    run_id=run_id,
+                    message="thought snapshot",
+                    payload=payload,
+                    **self._linkage_fields(payload),
+                ),
+            ]
+        if command_name == "why-motivation":
+            payload = self.controller.why_motivation(value_text or "last")
+            return [
+                self._build_sidebar_snapshot_event(session, run_id=run_id),
+                build_outbound_event(
+                    "assistant_final",
+                    session_id=session_id,
+                    run_id=run_id,
+                    message=self._why_motivation_summary(payload),
+                    payload=payload,
+                    **self._linkage_fields(payload),
+                ),
+            ]
+        if command_name == "replay-motivation":
+            try:
+                round_ref = self.controller.resolve_round_ref(value_text or "last")
+            except (FileNotFoundError, ValueError) as exc:
+                return [build_outbound_event("error", session_id=session_id, message=str(exc))]
+            payload = self.controller.replay_motivation(round_ref)
+            return [
+                self._build_sidebar_snapshot_event(session, run_id=run_id),
+                build_outbound_event(
+                    "assistant_final",
+                    session_id=session_id,
+                    run_id=run_id,
+                    message=self._replay_motivation_summary(payload),
+                    payload=payload,
+                    **self._linkage_fields(payload),
+                ),
+            ]
+        if command_name == "replay":
+            tokens = [part for part in str(value_text or "").split() if part]
+            round_ref = tokens[0] if tokens else "last"
+            seed = int(tokens[1]) if len(tokens) > 1 and tokens[1].lstrip("-").isdigit() else 0
+            try:
+                round_id = self.controller.resolve_round_ref(round_ref)
+            except (FileNotFoundError, ValueError) as exc:
+                return [build_outbound_event("error", session_id=session_id, message=str(exc))]
+            payload = self.controller.replay(round_id, seed=seed)
+            return [
+                self._build_sidebar_snapshot_event(session, run_id=run_id),
+                build_outbound_event(
+                    "assistant_final",
+                    session_id=session_id,
+                    run_id=run_id,
+                    message=self._replay_summary(payload),
+                    payload=payload,
+                    **self._linkage_fields(payload),
+                ),
+            ]
+        if command_name == "why-not":
+            tokens = [part for part in str(value_text or "").split() if part]
+            if not tokens:
+                return [build_outbound_event("error", session_id=session_id, message="Usage: /why-not <action> [round] or /why-not <round> <action>")]
+            round_ref: int | str = "last"
+            action = " ".join(tokens)
+            if len(tokens) >= 2 and (tokens[0] == "last" or tokens[0].lstrip("-").isdigit()):
+                round_ref = tokens[0]
+                action = " ".join(tokens[1:]).strip()
+            if not action:
+                return [build_outbound_event("error", session_id=session_id, message="Usage: /why-not <action> [round] or /why-not <round> <action>")]
+            try:
+                round_id = self.controller.resolve_round_ref(round_ref)
+            except (FileNotFoundError, ValueError) as exc:
+                return [build_outbound_event("error", session_id=session_id, message=str(exc))]
+            payload = self.controller.why_not(round_id, action)
+            return [
+                self._build_sidebar_snapshot_event(session, run_id=run_id),
+                build_outbound_event(
+                    "assistant_final",
+                    session_id=session_id,
+                    run_id=run_id,
+                    message=self._why_not_summary(payload),
+                    payload=payload,
+                    **self._linkage_fields(payload),
+                ),
+            ]
+        if command_name == "what-changed":
+            if value_text is None:
+                window = 5
+            else:
+                try:
+                    window = max(1, int(value_text))
+                except ValueError:
+                    return [build_outbound_event("error", session_id=session_id, message="Usage: /what-changed [window]")]
+            payload = self.controller.what_changed(window=window)
+            return [
+                self._build_sidebar_snapshot_event(session, run_id=run_id),
+                build_outbound_event(
+                    "assistant_final",
+                    session_id=session_id,
+                    run_id=run_id,
+                    message=self._what_changed_summary(payload),
+                    payload=payload,
+                    **self._linkage_fields(payload),
+                ),
+            ]
+        if command_name == "eval":
+            if value_text is None:
+                rounds = 1000
+            else:
+                try:
+                    rounds = max(1, int(value_text))
+                except ValueError:
+                    return [build_outbound_event("error", session_id=session_id, message="Usage: /eval [rounds]")]
+            payload = self.controller.eval_longrun(rounds=rounds)
+            return [
+                self._build_sidebar_snapshot_event(session, run_id=run_id),
+                build_outbound_event(
+                    "assistant_final",
+                    session_id=session_id,
+                    run_id=run_id,
+                    message=self._eval_summary(payload),
+                    payload=payload,
+                    **self._linkage_fields(payload),
+                ),
+            ]
         if not run_id:
             return [build_outbound_event("error", session_id=session_id, message="no active run for this terminal session")]
 
         if command_name == "status":
             run = self.controller.run_status(run_id)
             return [
-                build_outbound_event("run_status", session_id=session_id, run=run),
+                build_outbound_event("run_status", session_id=session_id, run=run, **self._linkage_fields(run)),
                 self._build_sidebar_snapshot_event(session, run_id=run_id),
-                build_outbound_event("assistant_final", session_id=session_id, run_id=run_id, message=self._status_summary(run)),
+                build_outbound_event(
+                    "assistant_final",
+                    session_id=session_id,
+                    run_id=run_id,
+                    message=self._status_summary(run),
+                    **self._linkage_fields(run),
+                ),
             ]
         if command_name == "why":
             explain = self.controller.explain_run(run_id)
@@ -401,11 +1017,12 @@ class TerminalEventHandler:
                     run_id=run_id,
                     message=self._why_summary(explain),
                     payload=explain,
+                    **self._linkage_fields(explain),
                 ),
             ]
         if command_name == "steps":
             steps = self.controller.run_steps(run_id)["steps"]
-            events = [build_outbound_event("step_update", session_id=session_id, step=step) for step in steps]
+            events = [build_outbound_event("step_update", session_id=session_id, step=step, **self._linkage_fields(step)) for step in steps]
             events.append(self._build_sidebar_snapshot_event(session, run_id=run_id))
             events.append(
                 build_outbound_event(
@@ -413,12 +1030,22 @@ class TerminalEventHandler:
                     session_id=session_id,
                     run_id=run_id,
                     message=self._steps_summary(steps),
+                    **self._linkage_fields(steps[-1] if steps else None),
                 )
             )
             return events
         if command_name == "tools":
             tools = self.controller.run_tools(run_id)["tools"]
-            events = [build_outbound_event("tool_result", session_id=session_id, call_id=f"{run_id}:tool:{index}", result=tool) for index, tool in enumerate(tools)]
+            events = [
+                build_outbound_event(
+                    "tool_result",
+                    session_id=session_id,
+                    call_id=f"{run_id}:tool:{index}",
+                    result=tool,
+                    **self._linkage_fields(tool),
+                )
+                for index, tool in enumerate(tools)
+            ]
             events.append(self._build_sidebar_snapshot_event(session, run_id=run_id))
             events.append(
                 build_outbound_event(
@@ -426,29 +1053,48 @@ class TerminalEventHandler:
                     session_id=session_id,
                     run_id=run_id,
                     message=self._tools_summary(tools),
+                    **self._linkage_fields(tools[-1] if tools else None),
                 )
             )
             return events
         if command_name == "pause":
             run = self.controller.pause_run(run_id)
             return [
-                build_outbound_event("run_status", session_id=session_id, run=run),
+                build_outbound_event("run_status", session_id=session_id, run=run, **self._linkage_fields(run)),
                 self._build_sidebar_snapshot_event(session, run_id=run_id),
-                build_outbound_event("assistant_final", session_id=session_id, run_id=run_id, message="已暂停当前任务。"),
+                build_outbound_event(
+                    "assistant_final",
+                    session_id=session_id,
+                    run_id=run_id,
+                    message="已暂停当前任务。",
+                    **self._linkage_fields(run),
+                ),
             ]
         if command_name == "resume":
             run = self.controller.resume_run(run_id)
             return [
-                build_outbound_event("run_status", session_id=session_id, run=run),
+                build_outbound_event("run_status", session_id=session_id, run=run, **self._linkage_fields(run)),
                 self._build_sidebar_snapshot_event(session, run_id=run_id),
-                build_outbound_event("assistant_final", session_id=session_id, run_id=run_id, message="已恢复当前任务。"),
+                build_outbound_event(
+                    "assistant_final",
+                    session_id=session_id,
+                    run_id=run_id,
+                    message="已恢复当前任务。",
+                    **self._linkage_fields(run),
+                ),
             ]
         if command_name == "abort":
             run = self.controller.abort_run(run_id, reason="operator_requested")
             return [
-                build_outbound_event("run_status", session_id=session_id, run=run),
+                build_outbound_event("run_status", session_id=session_id, run=run, **self._linkage_fields(run)),
                 self._build_sidebar_snapshot_event(session, run_id=run_id),
-                build_outbound_event("assistant_final", session_id=session_id, run_id=run_id, message="已中止当前任务。"),
+                build_outbound_event(
+                    "assistant_final",
+                    session_id=session_id,
+                    run_id=run_id,
+                    message="已中止当前任务。",
+                    **self._linkage_fields(run),
+                ),
             ]
         return [build_outbound_event("error", session_id=session_id, message=f"unsupported control command: {command_name}")]
 
@@ -471,18 +1117,75 @@ class TerminalEventHandler:
                 "status": "approved" if approved else "rejected",
                 "approved": approved,
                 "responded_at": utc_now_iso(),
+                "deferred_events": [],
+                "deferred_final": None,
+                "round_id": None,
+                "trace_ref": None,
             }
-            session.approvals_pending.append(updated_approval)
-        self.session_store.write(session)
-        return [
-            self._build_sidebar_snapshot_event(session, run_id=session.active_run_id or session.last_run_id),
-            build_outbound_event(
+        deferred_events = list(updated_approval.get("deferred_events", []) or [])
+        resolved_payload = None
+        if updated_approval.get("run_id"):
+            resolved_payload = self.controller.resolve_run_tool_approval(
+                str(updated_approval["run_id"]),
+                call_id,
+                approved=approved,
+            )
+            tool_result_event = build_outbound_event(
+                "tool_result",
+                session_id=session_id,
+                call_id=call_id,
+                result=resolved_payload["tool"],
+                **self._linkage_fields(resolved_payload["tool"], resolved_payload["run"]),
+            )
+            deferred_events = [tool_result_event, *deferred_events] if approved else [tool_result_event]
+        elif not approved:
+            deferred_events = [
+                self._gated_tool_result_event(
+                    {
+                        "session_id": session_id,
+                        "call_id": call_id,
+                        "round_id": updated_approval.get("round_id"),
+                        "trace_ref": updated_approval.get("trace_ref"),
+                        "result": {
+                            "tool_name": updated_approval.get("tool") or "unknown",
+                            "summary": updated_approval.get("summary") or "tool execution rejected",
+                            "status": "rejected",
+                        },
+                    }
+                )
+            ]
+        for event in deferred_events:
+            self._apply_event_to_session(session, event)
+        session.approvals_pending = [item for item in session.approvals_pending if item.get("call_id") != call_id]
+        final_event = None
+        if approved and isinstance(updated_approval.get("deferred_final"), dict):
+            deferred_final = dict(updated_approval["deferred_final"])
+            if isinstance(resolved_payload, dict):
+                deferred_final.update(self._linkage_fields(resolved_payload.get("run"), resolved_payload.get("tool")))
+            final_event = build_outbound_event(
                 "assistant_final",
                 session_id=session_id,
-                message=f"approval {call_id} recorded as {'approved' if approved else 'rejected'}",
-                payload={"approval": updated_approval},
+                run_id=deferred_final.get("run_id"),
+                message=str(deferred_final.get("message") or ""),
+                payload=deferred_final.get("payload"),
+                **self._linkage_fields(deferred_final),
             )
-        ]
+            self._apply_event_to_session(session, final_event)
+        self.session_store.write(session)
+        events = [self._build_sidebar_snapshot_event(session, run_id=session.active_run_id or session.last_run_id)]
+        events.extend(deferred_events)
+        if final_event is not None:
+            events.append(final_event)
+        if not approved:
+            events.append(
+                build_outbound_event(
+                    "assistant_final",
+                    session_id=session_id,
+                    message=f"approval {call_id} recorded as rejected",
+                    payload={"approval": updated_approval, "run": resolved_payload.get("run") if isinstance(resolved_payload, dict) else None},
+                )
+            )
+        return events
 
     def _close_session(self, session_id: str, *, detach: bool = False, transcript_mode: str | None = None) -> list[dict[str, Any]]:
         session = self._load_session(session_id)
@@ -697,6 +1400,7 @@ class TerminalEventHandler:
             run_payload=run,
         )
         model_status = self.controller.model_status()
+        linkage = self._linkage_fields(run, explain, steps[-1] if steps else None, tools[-1] if tools else None)
         goal_summary = str((explain or {}).get("goal_summary") or (run or {}).get("goal_summary") or (run or {}).get("goal") or "暂无")
         current_step_title = str(current_step.get("title") or "暂无")
         reason_summary = str(current_step.get("expected_observation") or current_step.get("detail") or "先收集当前任务最直接的上下文。")
@@ -729,9 +1433,12 @@ class TerminalEventHandler:
                 "pending_count": len(pending),
                 "pending": pending,
             },
+            "controlled_learning": self._controlled_learning_snapshot(runtime_state),
             "ui_actions": self._ui_actions(session, run, pending_count=len(pending)),
             "model_status": model_status,
             "statusline": self._build_statusline(session, run_id=run_id, run=run),
+            "console": self.controller.console_refresh_payload(linkage.get("round_id")),
+            **linkage,
         }
 
     def _build_statusline(
@@ -749,6 +1456,7 @@ class TerminalEventHandler:
             "run_status": str((run or {}).get("status") or session.status or "idle"),
             "session_id": session.session_id,
             "run_id": str(run_id or ""),
+            **self._linkage_fields(run),
         }
 
     def _model_label(self) -> str:
@@ -762,6 +1470,25 @@ class TerminalEventHandler:
             f"medium:{medium.get('model') or 'off'} "
             f"large:{large.get('model') or 'off'}"
         )
+
+    def _controlled_learning_snapshot(self, runtime_state) -> dict[str, Any]:
+        policy = runtime_state.autonomy_policy
+        return {
+            "learning_mode": str(policy.learning_mode or "guided-learn"),
+            "network_enabled": bool(policy.network_enabled),
+            "external_io_enabled": bool(policy.external_io_enabled),
+            "trace_external_learning": bool(policy.trace_external_learning),
+            "allowed_network_domains": list(policy.allowed_network_domains or []),
+            "writable_roots": list(policy.writable_roots or []),
+            "knowledge_roots": list(policy.knowledge_roots or []),
+            "learning_log_dir": str(policy.learning_log_dir or ""),
+            "max_rounds_per_hour": int(policy.max_rounds_per_hour or 0),
+            "max_tool_actions_per_hour": int(policy.max_tool_actions_per_hour or 0),
+            "failure_trip_threshold": int(policy.failure_trip_threshold or 0),
+            "auto_safe_mode": bool(policy.auto_safe_mode),
+            "safe_mode": bool(runtime_state.safe_mode),
+            "budget_remaining": round(float(runtime_state.budget_remaining or 0.0), 4),
+        }
 
     def _build_sidebar_snapshot_event(
         self,

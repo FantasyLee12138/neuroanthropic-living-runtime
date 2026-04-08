@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import re
 import shutil
+import threading
 
 from nalr.runtime.async_io import AsyncIOWorker
 from nalr.runtime.dynamics import smooth_decay_rate, smooth_habit_recovery, smooth_interference_penalty
@@ -221,6 +222,13 @@ class MemoryStore:
         self._recall_cache: dict[tuple[str, tuple[str, ...]], dict] = {}
         self._path_mtimes: dict[Path, int] = {}
         self._dirty_paths: set[Path] = set()
+        self._pending_snapshot_paths: set[Path] = set()
+        self._pending_raw_event_rows: list[dict] = []
+        self._pending_list_payloads: dict[Path, list[dict]] = {}
+        self._pending_jsonl_entries: dict[Path, list[dict]] = {}
+        self._list_write_versions: dict[Path, int] = {}
+        self._jsonl_write_versions: dict[Path, int] = {}
+        self._pending_sync_lock = threading.RLock()
         for path in (
             self.episodic_path,
             self.episodic_warm_path,
@@ -254,7 +262,16 @@ class MemoryStore:
             payload = self._default_storage_status()
             self._write_storage_status(payload)
             return payload
-        payload = json.loads(self.storage_status_path.read_text(encoding="utf-8"))
+        try:
+            payload = json.loads(self.storage_status_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = self._default_storage_status()
+            self._write_storage_status(payload)
+            return payload
+        if not isinstance(payload, dict):
+            payload = self._default_storage_status()
+            self._write_storage_status(payload)
+            return payload
         payload.setdefault("read_source_default", "parquet")
         payload.setdefault("storage_state", "healthy")
         payload["parquet_live_ready"] = all(path.exists() for path in self._snapshot_targets.values())
@@ -543,15 +560,16 @@ class MemoryStore:
         return payload
 
     def _load_jsonl_from_disk(self, path: Path) -> list[dict]:
+        rows: list[dict] = []
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                rows.append(ensure_recorded_fields(json.loads(line)))
+        if rows:
+            return rows
         if path == self.raw_events_path and any(self.raw_parquet_dir.rglob("*.parquet")):
             return self._read_parquet_dataset(self.raw_parquet_dir)
-        if not path.exists():
-            return []
-        rows = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            rows.append(ensure_recorded_fields(json.loads(line)))
         return rows
 
     def _read_list(self, path: Path) -> list[dict]:
@@ -630,14 +648,24 @@ class MemoryStore:
         self._list_cache[path] = snapshot
         self._dirty_paths.add(path)
         self._invalidate_recall_cache()
+        with self._pending_sync_lock:
+            if path in self._snapshot_targets:
+                self._pending_snapshot_paths.add(path)
+            self._pending_list_payloads[path] = snapshot
+            version = int(self._list_write_versions.get(path, 0) or 0) + 1
+            self._list_write_versions[path] = version
 
         def write() -> None:
-            snapshot_path = self._snapshot_targets.get(path)
-            if snapshot_path is not None:
-                self._rewrite_snapshot(snapshot_path, snapshot)
-            self._write_text_atomic(path, json.dumps(snapshot, ensure_ascii=False, indent=2))
+            with self._pending_sync_lock:
+                if self._list_write_versions.get(path) != version:
+                    return
+                latest_payload = copy.deepcopy(self._pending_list_payloads.get(path, snapshot))
+            self._write_text_atomic(path, json.dumps(latest_payload, ensure_ascii=False, indent=2))
             self._path_mtimes[path] = self._mtime_ns(path)
-            self._dirty_paths.discard(path)
+            with self._pending_sync_lock:
+                if self._list_write_versions.get(path) == version:
+                    self._pending_list_payloads.pop(path, None)
+                    self._dirty_paths.discard(path)
             self._mark_storage(state="healthy")
 
         self._io_worker.submit(write, on_error=lambda exc: self._mark_storage(state="degraded", reason=str(exc)))
@@ -647,14 +675,28 @@ class MemoryStore:
         self._jsonl_cache.setdefault(path, self._load_jsonl_from_disk(path)).append(entry)
         self._dirty_paths.add(path)
         self._invalidate_recall_cache()
+        with self._pending_sync_lock:
+            if path == self.raw_events_path:
+                self._pending_raw_event_rows.append(entry)
+            self._pending_jsonl_entries.setdefault(path, []).append(entry)
+            version = int(self._jsonl_write_versions.get(path, 0) or 0) + 1
+            self._jsonl_write_versions[path] = version
 
         def write() -> None:
-            if path == self.raw_events_path:
-                self._append_payload_dataset(self.raw_parquet_dir, entry, recorded_date=entry.get("recorded_date", "legacy"))
+            with self._pending_sync_lock:
+                if self._jsonl_write_versions.get(path) != version:
+                    return
+                batch = list(self._pending_jsonl_entries.get(path, []))
+            if not batch:
+                return
             with path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                for row in batch:
+                    handle.write(json.dumps(row, ensure_ascii=False) + "\n")
             self._path_mtimes[path] = self._mtime_ns(path)
-            self._dirty_paths.discard(path)
+            with self._pending_sync_lock:
+                if self._jsonl_write_versions.get(path) == version:
+                    self._pending_jsonl_entries.pop(path, None)
+                    self._dirty_paths.discard(path)
             self._mark_storage(state="healthy")
 
         self._io_worker.submit(write, on_error=lambda exc: self._mark_storage(state="degraded", reason=str(exc)))
@@ -1719,3 +1761,39 @@ class MemoryStore:
 
     def flush(self, *, raise_on_error: bool = False) -> None:
         self._io_worker.flush(raise_on_error=raise_on_error)
+        snapshot_paths: list[Path] = []
+        raw_rows: list[dict] = []
+        try:
+            with self._pending_sync_lock:
+                snapshot_paths = list(self._pending_snapshot_paths)
+                self._pending_snapshot_paths.clear()
+                raw_rows = list(self._pending_raw_event_rows)
+                self._pending_raw_event_rows.clear()
+            for path in snapshot_paths:
+                snapshot_path = self._snapshot_targets.get(path)
+                if snapshot_path is None:
+                    continue
+                payload = copy.deepcopy(self._list_cache.get(path, []))
+                self._rewrite_snapshot(snapshot_path, payload)
+            if raw_rows:
+                append_dataset(
+                    self.raw_parquet_dir,
+                    [
+                        {
+                            "recorded_date": str(row.get("recorded_date") or "legacy"),
+                            "payload_json": json.dumps(row, ensure_ascii=False, sort_keys=True),
+                        }
+                        for row in raw_rows
+                    ],
+                    schema={"recorded_date": "VARCHAR", "payload_json": "VARCHAR"},
+                    partition_keys=("recorded_date",),
+                )
+            if snapshot_paths or raw_rows:
+                self._mark_storage(state="healthy")
+        except Exception as exc:
+            with self._pending_sync_lock:
+                self._pending_snapshot_paths.update(snapshot_paths)
+                self._pending_raw_event_rows[:0] = raw_rows
+            self._mark_storage(state="degraded", reason=str(exc))
+            if raise_on_error:
+                raise

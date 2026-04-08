@@ -4,6 +4,7 @@ from nalr.providers.router import (
     FakeBackend,
     DeepSeekBackend,
     DoubaoBackend,
+    OpenAICompatibleBackend,
     ModelRequest,
     ModelRouteConfig,
     ModelRouter,
@@ -195,6 +196,43 @@ def test_deepseek_backend_uses_route_specific_api_key_env(monkeypatch):
 
     assert response.payload["text"] == "ok"
     assert response.usage["prompt_tokens"] == 12
+
+
+def test_openai_compatible_backend_allows_missing_api_key_for_local_endpoint():
+    stub_client = _StubClient(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"text":"local ok"}',
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        }
+    )
+    backend = OpenAICompatibleBackend(client_factory=lambda **_: stub_client)
+
+    response = backend.generate(
+        route=ModelRouteConfig(
+            name="local_model",
+            backend="openai_compatible",
+            model="qwen-local",
+            timeout_ms=500,
+            retries=0,
+            enabled=True,
+            base_url="http://127.0.0.1:11434/v1",
+            api_key_env="LOCAL_MODEL_API_KEY",
+        ),
+        request=ModelRequest(
+            system_prompt="You are a local model.",
+            user_prompt="Return JSON only.",
+            response_schema={"text": "str"},
+        ),
+    )
+
+    assert response.payload["text"] == "local ok"
+    assert stub_client.post_calls[0]["path"] == "/chat/completions"
 
 
 def test_doubao_backend_shapes_openai_responses_request():

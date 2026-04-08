@@ -309,6 +309,7 @@ class TraceStore:
             self._write_trace_sync_status(self._default_trace_sync_status())
         self._migrate_legacy_if_needed()
         self._io_worker = AsyncIOWorker("nalr-trace-io")
+        self._legacy_round_parquet_rewrite_pending: bool | None = None
         self._round_cache = {int(payload["round_id"]): payload for payload in self._load_round_records()}
         self._run_cache = {str(payload["run_id"]): payload for payload in self._load_run_records()}
         self._step_cache = self._load_payload_dataset(self.step_trace_dir) or self._read_jsonl(self.step_jsonl_path)
@@ -317,11 +318,60 @@ class TraceStore:
         self._command_cache = self._load_payload_dataset(self.command_canonical_dir) or self._read_jsonl(self.commands_jsonl_path)
         self._repair_cache = self._load_payload_dataset(self.repair_ledger_dir) or self._read_jsonl(self.repair_jsonl_path)
         self._trace_sync_status_cache = json.loads(self.trace_sync_status_path.read_text(encoding="utf-8"))
+        self._signal_view_cache_limit = 100
+        self._signal_view_cache: dict[int, dict] = {}
+        self.prewarm_recent_views(limit=min(self._signal_view_cache_limit, max(len(self._round_cache), 20)))
+
+    def _round_signal_view(self, payload: dict) -> dict:
+        action_field = dict((dict(payload.get("probability_field", {}) or {}).get("action", {}) or {}))
+        appraisal = dict(payload.get("appraisal_snapshot", {}) or {})
+        vitality = dict(payload.get("vitality_snapshot", {}) or {})
+        conflict = dict(payload.get("conflict_arbitration", {}) or {})
+        initiative = dict(payload.get("initiative", {}) or {})
+        return {
+            "round_id": int(payload.get("round_id", 0) or 0),
+            "recorded_at": payload.get("recorded_at"),
+            "appraisal_snapshot": {
+                "semantic_valence": float(appraisal.get("semantic_valence", 0.0) or 0.0),
+                "relation_charge": float(appraisal.get("relation_charge", 0.0) or 0.0),
+            },
+            "vitality_snapshot": {
+                "relationship_closeness": float(vitality.get("relationship_closeness", 0.5) or 0.5),
+                "body_energy": float(vitality.get("body_energy", payload.get("body_energy", 0.0)) or 0.0),
+            },
+            "u_base": dict(dict(payload.get("action_bookkeeping", {}) or {}).get("u_base", {}) or {}),
+            "u_shifted": dict(dict(payload.get("action_bookkeeping", {}) or {}).get("u_shifted", {}) or {}),
+            "p_final": dict(action_field.get("winner_posterior", {}) or dict(payload.get("candidate_distribution", {}) or {})),
+            "conflict_mode": str(conflict.get("conflict_mode") or ""),
+            "winner_posterior": dict(action_field.get("winner_posterior", {}) or {}),
+            "initiative": {
+                "top_intent": str(initiative.get("top_intent") or ""),
+                "suppression_reason": str(initiative.get("suppression_reason") or ""),
+                "should_send": bool(initiative.get("should_send", False)),
+            },
+        }
+
+    def prewarm_recent_views(self, *, limit: int = 20) -> dict[str, int]:
+        effective_limit = max(0, min(int(limit), self._signal_view_cache_limit))
+        if effective_limit == 0:
+            self._signal_view_cache = {}
+            return {"round_count": 0}
+        rounds = self.recent_rounds(limit=effective_limit)
+        self._signal_view_cache = {
+            int(payload.get("round_id", 0) or 0): self._round_signal_view(payload)
+            for payload in rounds
+            if int(payload.get("round_id", 0) or 0) > 0
+        }
+        return {"round_count": len(self._signal_view_cache)}
 
     def _load_round_records(self) -> list[dict]:
         parquet_rows = self._raw_round_payloads_from_parquet()
         if parquet_rows:
+            self._legacy_round_parquet_rewrite_pending = any(
+                self._round_payload_requires_rewrite(payload) for payload in parquet_rows
+            ) or "distribution_state_json" in self._dataset_columns(self.round_trace_dir)
             return [rewrite_round_payload(payload) for payload in parquet_rows]
+        self._legacy_round_parquet_rewrite_pending = False
         return [
             rewrite_round_payload(ensure_recorded_fields(json.loads(path.read_text(encoding="utf-8")), recorded_at=_mtime_iso(path)))
             for path in sorted(self.rounds_dir.glob("round_*.json"))
@@ -477,6 +527,7 @@ class TraceStore:
             "round_trace_row_count": 0,
         }
         if not rewrite_needed:
+            self._legacy_round_parquet_rewrite_pending = False
             return summary
 
         canonical_payloads = [rewrite_round_payload(payload) for payload in raw_payloads]
@@ -500,14 +551,17 @@ class TraceStore:
         if hasattr(self, "_round_cache"):
             self._round_cache = {int(payload["round_id"]): copy.deepcopy(payload) for payload in canonical_payloads}
 
+        self._legacy_round_parquet_rewrite_pending = False
         summary["rewritten"] = True
         summary["round_trace_row_count"] = len(round_trace_rows)
         return summary
 
     def _legacy_round_parquet_pending_rewrite(self) -> bool:
-        if any(self._round_payload_requires_rewrite(payload) for payload in self._raw_round_payloads_from_parquet()):
-            return True
-        return "distribution_state_json" in self._dataset_columns(self.round_trace_dir)
+        if self._legacy_round_parquet_rewrite_pending is None:
+            self._legacy_round_parquet_rewrite_pending = any(
+                self._round_payload_requires_rewrite(payload) for payload in self._raw_round_payloads_from_parquet()
+            ) or "distribution_state_json" in self._dataset_columns(self.round_trace_dir)
+        return self._legacy_round_parquet_rewrite_pending
 
     def _round_canonical_rows(self, payload: dict) -> list[dict]:
         return [
@@ -739,29 +793,35 @@ class TraceStore:
             recorded_at=trace.recorded_at,
             )
         )
-        self._round_cache[int(payload["round_id"])] = copy.deepcopy(payload)
-        self._skill_cache.extend(copy.deepcopy(payload.get("skill_traces", [])))
-        if payload.get("skill_traces", []):
+        skill_rows = list(payload.get("skill_traces", []))
+        round_payload = dict(payload)
+        round_payload.pop("skill_traces", None)
+        self._round_cache[int(round_payload["round_id"])] = round_payload
+        self._signal_view_cache[int(round_payload["round_id"])] = self._round_signal_view(round_payload)
+        if len(self._signal_view_cache) > self._signal_view_cache_limit:
+            for stale_round_id in sorted(self._signal_view_cache)[:-self._signal_view_cache_limit]:
+                self._signal_view_cache.pop(stale_round_id, None)
+        self._skill_cache.extend(skill_rows)
+        if skill_rows:
             with self.skill_jsonl_path.open("a", encoding="utf-8") as handle:
-                for row in payload["skill_traces"]:
+                for row in skill_rows:
                     handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
         def write() -> None:
-            self.rewrite_legacy_round_parquet_history()
             path = self.rounds_dir / f"round_{trace.round_id}.json"
-            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            path.write_text(json.dumps(round_payload, ensure_ascii=False, indent=2), encoding="utf-8")
             with self.rounds_jsonl_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                handle.write(json.dumps(round_payload, ensure_ascii=False) + "\n")
             self._append_dataset_rows(
                 self.round_canonical_dir,
-                self._round_canonical_rows(payload),
+                self._round_canonical_rows(round_payload),
                 schema=ROUND_CANONICAL_SCHEMA,
                 partition_keys=("recorded_date", "round_id"),
             )
-            round_trace_rows = self._round_trace_rows(payload)
+            round_trace_rows = self._round_trace_rows(round_payload)
             if round_trace_rows:
                 self._append_dataset_rows(self.round_trace_dir, round_trace_rows, schema=ROUND_TRACE_SCHEMA)
-            skill_canonical_rows, skill_trace_rows = self._skill_rows(payload.get("skill_traces", []))
+            skill_canonical_rows, skill_trace_rows = self._skill_rows(skill_rows)
             if skill_canonical_rows:
                 self._append_dataset_rows(self.skill_canonical_dir, skill_canonical_rows, schema=SKILL_CANONICAL_SCHEMA)
                 self._append_dataset_rows(self.skill_trace_dir, skill_trace_rows, schema=SKILL_TRACE_SCHEMA)
@@ -821,6 +881,27 @@ class TraceStore:
                 payload = ensure_recorded_fields(payload, recorded_at=_mtime_iso(path))
             traces.append(payload)
         return traces
+
+    def recent_rounds(self, *, limit: int = 20) -> list[dict]:
+        effective_limit = max(int(limit), 0)
+        if effective_limit == 0:
+            return []
+        if self._round_cache:
+            keys = sorted(self._round_cache)[-effective_limit:]
+            return [copy.deepcopy(self._round_cache[key]) for key in keys]
+        return self.list_rounds()[-effective_limit:]
+
+    def recent_round_signal_views(self, *, limit: int = 20) -> list[dict]:
+        effective_limit = max(int(limit), 0)
+        if effective_limit == 0:
+            return []
+        if self._signal_view_cache and effective_limit <= len(self._signal_view_cache):
+            keys = sorted(self._signal_view_cache)[-effective_limit:]
+            return [copy.deepcopy(self._signal_view_cache[key]) for key in keys]
+        if self._round_cache:
+            keys = sorted(self._round_cache)[-effective_limit:]
+            return [self._round_signal_view(self._round_cache[key]) for key in keys]
+        return [self._round_signal_view(row) for row in self.list_rounds()[-effective_limit:]]
 
     def list_commands(self) -> list[dict]:
         return [copy.deepcopy(item) for item in self._command_cache]
@@ -1109,6 +1190,33 @@ class TraceStore:
                 return parquet_rows
         return self._read_jsonl(self.skill_jsonl_path)
 
+    def recent_skill_traces(self, *, limit: int = 20) -> list[dict]:
+        effective_limit = max(int(limit), 0)
+        if effective_limit == 0:
+            return []
+        if self._skill_cache:
+            return copy.deepcopy(self._skill_cache[-effective_limit:])
+        return self.list_skill_traces()[-effective_limit:]
+
+    def latest_round_projection_seed(self) -> dict[str, object]:
+        if self._round_cache:
+            latest_round_id = max(self._round_cache)
+            latest = self._round_cache[latest_round_id]
+            return {
+                "round_id": latest_round_id,
+                "long_run_projection": copy.deepcopy(dict(latest.get("long_run_projection", {}) or {})),
+                "authenticity": copy.deepcopy(dict(latest.get("authenticity", {}) or {})),
+            }
+        rounds = self.list_rounds()
+        if not rounds:
+            return {}
+        latest = rounds[-1]
+        return {
+            "round_id": latest.get("round_id"),
+            "long_run_projection": copy.deepcopy(dict(latest.get("long_run_projection", {}) or {})),
+            "authenticity": copy.deepcopy(dict(latest.get("authenticity", {}) or {})),
+        }
+
     def list_command_traces(self) -> list[dict]:
         if self._command_cache:
             return copy.deepcopy(self._command_cache)
@@ -1196,6 +1304,8 @@ class TraceStore:
         payload["parquet_live_ready"] = parquet_live_ready if payload["storage_state"] == "healthy" else False
         payload.setdefault("degraded_reason", None)
         payload.setdefault("last_sync_at", None)
+        payload["signal_view_cache_size"] = len(self._signal_view_cache)
+        payload["signal_view_cache_limit"] = self._signal_view_cache_limit
         self._trace_sync_status_cache = payload
         return payload
 

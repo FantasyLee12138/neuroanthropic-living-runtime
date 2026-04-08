@@ -132,8 +132,10 @@ def build_render_plan(
     shaping_events: list[dict[str, Any]] | None = None,
     repair_expression: dict[str, Any] | None = None,
 ) -> RenderPlan:
+    delivery_mode = "monologue" if sampled_action == "monologue" else "speech"
     message_plan = {
         "intent": sampled_action,
+        "delivery_mode": delivery_mode,
         "opening_style": "direct" if expression.directness_level >= 0.65 else "buffered",
         "warmth": expression.warmth_level,
         "repair": expression.repair_tendency,
@@ -148,6 +150,7 @@ def build_render_plan(
     return RenderPlan(
         action=sampled_action,
         expression=expression,
+        delivery_mode=delivery_mode,
         safety_constraints=safety_constraints,
         message_plan=message_plan,
         event_summary=event_summary,

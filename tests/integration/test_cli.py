@@ -157,6 +157,58 @@ def test_cli_chat_json_and_trace_views_support_last_round(tmp_path, monkeypatch)
     assert '"round_id": 1' in why_result.stdout
 
 
+def test_cli_trace_why_supports_latest_round_alias(tmp_path, monkeypatch):
+    monkeypatch.setenv("NALR_HOME", str(tmp_path / ".alive"))
+    monkeypatch.setenv("NALR_CONFIG_DIR", str(Path(__file__).resolve().parents[2] / "config"))
+
+    RUNNER.invoke(
+        app,
+        [
+            "chat",
+            "帮我记住晚饭想吃面，并规划今晚。",
+            "--json",
+        ],
+    )
+    why_result = RUNNER.invoke(app, ["trace", "why", "latest"])
+
+    assert why_result.exit_code == 0
+    assert '"round_id": 1' in why_result.stdout
+
+
+def test_cli_thought_show_and_forced_initiative_trigger(tmp_path, monkeypatch):
+    monkeypatch.setenv("NALR_HOME", str(tmp_path / ".alive"))
+    monkeypatch.setenv("NALR_CONFIG_DIR", str(Path(__file__).resolve().parents[2] / "config"))
+
+    RUNNER.invoke(
+        app,
+        [
+            "chat",
+            "帮我继续判断现在最该先做什么。",
+            "--scenario",
+            "companion",
+            "--json",
+        ],
+    )
+    thought_result = RUNNER.invoke(app, ["thought", "show", "last"])
+    trigger_result = RUNNER.invoke(app, ["initiative", "trigger", "--trigger", "idle", "--force"])
+
+    assert thought_result.exit_code == 0
+    assert trigger_result.exit_code == 0
+    assert '"thought_summary"' in thought_result.stdout
+    assert '"forced": true' in trigger_result.stdout
+
+
+def test_cli_monologue_show_returns_hidden_stream_sample(tmp_path, monkeypatch):
+    monkeypatch.setenv("NALR_HOME", str(tmp_path / ".alive"))
+    monkeypatch.setenv("NALR_CONFIG_DIR", str(Path(__file__).resolve().parents[2] / "config"))
+
+    result = RUNNER.invoke(app, ["monologue", "show", "3"])
+
+    assert result.exit_code == 0
+    assert '"hidden": true' in result.stdout
+    assert '"fragments"' in result.stdout
+
+
 def test_cli_supports_memory_recall_habit_reset_relation_nudge_and_budget_set(tmp_path, monkeypatch):
     monkeypatch.setenv("NALR_HOME", str(tmp_path / ".alive"))
     monkeypatch.setenv("NALR_CONFIG_DIR", str(Path(__file__).resolve().parents[2] / "config"))
@@ -356,6 +408,30 @@ def test_cli_supports_trace_compact_and_counterfactual_commands(tmp_path, monkey
     assert '"window": 1' in changed_result.stdout
     assert longrun_result.exit_code == 0
     assert '"generated_rounds": 3' in longrun_result.stdout
+
+
+def test_cli_exposes_endogenous_tick_status_and_motivation_views(tmp_path, monkeypatch):
+    monkeypatch.setenv("NALR_HOME", str(tmp_path / ".alive"))
+    monkeypatch.setenv("NALR_CONFIG_DIR", str(Path(__file__).resolve().parents[2] / "config"))
+
+    tick_result = RUNNER.invoke(app, ["endogenous", "tick", "--trigger", "idle"])
+    status_result = RUNNER.invoke(app, ["endogenous", "status"])
+    why_motivation_result = RUNNER.invoke(app, ["why", "motivation", "1"])
+    replay_motivation_result = RUNNER.invoke(app, ["replay", "motivation", "1"])
+
+    assert tick_result.exit_code == 0
+    tick_payload = json.loads(tick_result.stdout)
+    status_payload = json.loads(status_result.stdout)
+    why_motivation_payload = json.loads(why_motivation_result.stdout)
+    replay_motivation_payload = json.loads(replay_motivation_result.stdout)
+
+    assert tick_payload["cause_type"] == "endogenous"
+    assert status_payload["latest_trigger"]["trigger_type"] == "idle"
+    assert status_payload["latest_endogenous_round_id"] == 1
+    assert why_motivation_payload["cause_type"] == "endogenous"
+    assert "storage" in why_motivation_payload
+    assert "endogenous_tick_reason" in replay_motivation_payload
+    assert "storage" in replay_motivation_payload
 
 
 def test_cli_probability_trace_views_surface_probability_field_observability(tmp_path, monkeypatch):

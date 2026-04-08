@@ -78,58 +78,77 @@ class EndogenousMotivationPool:
         scarcity = float(slow_variables.get("resource_scarcity", 0.0) or 0.0)
         continuity = float(long_run_projection.get("self_consistency_score", 0.5) or 0.5)
         focus_lock = float(state.focus_lock_count or 0.0)
+        emotion_state = getattr(state, "emotion_state", None)
+        desire_state = getattr(state, "desire_state", None)
+        emotion_arousal = float(getattr(emotion_state, "arousal", 0.0) or 0.0)
+        emotion_residue = float(getattr(emotion_state, "residue", affect_residue) or affect_residue)
+        latent_drives = dict(getattr(desire_state, "latent_drives", {}) or {})
+        comfort_drive = float(latent_drives.get("comfort", 0.0) or 0.0)
+        meaning_drive = float(latent_drives.get("meaning", 0.0) or 0.0)
+        relation_drive = float(latent_drives.get("relation", 0.0) or 0.0)
+        exploration_drive = float(latent_drives.get("exploration", 0.0) or 0.0)
+        completion_drive = float(latent_drives.get("completion", 0.0) or 0.0)
 
         active: list[EndogenousMotivationSignal] = []
         active_candidates = (
             self._signal(
                 motivation_type="memory_exploration",
-                raw_drive=_clip((0.62 - recall_strength) * 0.9 + memory_activation * 0.15 + interference * 0.35),
+                raw_drive=_clip((0.62 - recall_strength) * 0.8 + memory_activation * 0.15 + interference * 0.3 + meaning_drive * 0.12 + exploration_drive * 0.1),
                 source_features={
                     "recall_strength": recall_strength,
                     "memory_activation": memory_activation,
                     "interference": interference,
+                    "meaning_drive": meaning_drive,
+                    "exploration_drive": exploration_drive,
                 },
                 state_tags=["memory", "exploration"],
                 audit_reason="memory prior weak or interference remains elevated",
             ),
             self._signal(
                 motivation_type="behavior_exploration",
-                raw_drive=_clip(focus_lock / 6.0 + max(0.0, 0.58 - continuity) * 0.55),
+                raw_drive=_clip(focus_lock / 6.0 + max(0.0, 0.58 - continuity) * 0.45 + exploration_drive * 0.2 + emotion_arousal * 0.08),
                 source_features={
                     "focus_lock_count": focus_lock,
                     "self_consistency_score": continuity,
+                    "exploration_drive": exploration_drive,
+                    "emotion_arousal": emotion_arousal,
                 },
                 state_tags=["action", "variation"],
                 audit_reason="action field shows lock-in or low novelty tolerance",
             ),
             self._signal(
                 motivation_type="affect_regulation",
-                raw_drive=_clip(max(0.0, 0.52 - float(state.body_energy)) * 0.7 + affect_residue * 0.8 + scarcity * 0.35),
+                raw_drive=_clip(max(0.0, 0.52 - float(state.body_energy)) * 0.55 + affect_residue * 0.55 + emotion_residue * 0.18 + scarcity * 0.2 + comfort_drive * 0.22),
                 source_features={
                     "body_energy": float(state.body_energy),
                     "affect_residue": affect_residue,
                     "resource_scarcity": scarcity,
+                    "comfort_drive": comfort_drive,
+                    "emotion_residue": emotion_residue,
                 },
                 state_tags=["affect", "repair"],
                 audit_reason="vitality indicates recovery pressure",
             ),
             self._signal(
                 motivation_type="relation_calibration",
-                raw_drive=_clip(float(relation_state.get("relationship_risk", 0.0) or 0.0) * 0.75 + (1.0 - closeness) * 0.25),
+                raw_drive=_clip(float(relation_state.get("relationship_risk", 0.0) or 0.0) * 0.6 + (1.0 - closeness) * 0.18 + relation_drive * 0.22),
                 source_features={
                     "relationship_risk": float(relation_state.get("relationship_risk", 0.0) or 0.0),
                     "closeness": closeness,
+                    "relation_drive": relation_drive,
                 },
                 state_tags=["relation", "boundary"],
                 audit_reason="relation risk remains elevated and needs calibration",
             ),
             self._signal(
                 motivation_type="internal_replay",
-                raw_drive=_clip(interference * 0.65 + affect_residue * 0.4 + relation_drift * 0.45),
+                raw_drive=_clip(interference * 0.45 + affect_residue * 0.25 + relation_drift * 0.25 + meaning_drive * 0.12 + completion_drive * 0.1 + max(0.0, 0.5 - continuity) * 0.14),
                 source_features={
                     "interference": interference,
                     "affect_residue": affect_residue,
                     "relationship_drift": relation_drift,
+                    "meaning_drive": meaning_drive,
+                    "completion_drive": completion_drive,
                 },
                 state_tags=["replay", "internal"],
                 audit_reason="residual conflict and replay pressure stay active",

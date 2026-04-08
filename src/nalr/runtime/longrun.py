@@ -42,6 +42,46 @@ class LongRunAnalyzer:
                 summary[key] = value
         return summary
 
+    def _personality_anchor_summary(
+        self,
+        *,
+        personality_anchor: dict[str, Any],
+        top_drivers: list[dict[str, Any]],
+        rounds_window: int = 12,
+    ) -> dict[str, Any]:
+        rounds = self.trace_store.list_rounds()[-rounds_window:]
+        driver_counts: dict[str, float] = {}
+        for trace in rounds:
+            for driver in list(trace.get("top_drivers", []) or [])[:3]:
+                if not isinstance(driver, dict):
+                    continue
+                action_name = str(driver.get("action_name") or "").strip()
+                score = abs(float(driver.get("score", 0.0) or 0.0))
+                if not action_name or score <= 0.0:
+                    continue
+                driver_counts[action_name] = round(driver_counts.get(action_name, 0.0) + score, 6)
+        for driver in top_drivers[:3]:
+            if not isinstance(driver, dict):
+                continue
+            action_name = str(driver.get("action_name") or "").strip()
+            score = abs(float(driver.get("score", 0.0) or 0.0))
+            if not action_name or score <= 0.0:
+                continue
+            driver_counts[action_name] = round(driver_counts.get(action_name, 0.0) + score, 6)
+        dominant_actions = [
+            action
+            for action, _ in sorted(driver_counts.items(), key=lambda item: (item[1], item[0]), reverse=True)[:4]
+        ]
+        return {
+            "axis_baseline": dict(personality_anchor.get("axis_baseline", {}) or {}),
+            "stability": round(float(personality_anchor.get("stability", 0.0) or 0.0), 4),
+            "anchor_alignment": round(float(personality_anchor.get("alignment", 0.0) or 0.0), 4),
+            "anchor_drift": round(float(personality_anchor.get("drift", 0.0) or 0.0), 4),
+            "evidence_anchors": list(personality_anchor.get("evidence_anchors", []) or []),
+            "dominant_actions": dominant_actions,
+            "driver_signature": "|".join(dominant_actions[:3]),
+        }
+
     def build_round_projection(
         self,
         *,
@@ -50,6 +90,8 @@ class LongRunAnalyzer:
         authenticity: dict[str, Any],
         identity_evolution: dict[str, Any],
         shaping_events: list[dict[str, Any]],
+        personality_anchor: dict[str, Any] | None = None,
+        top_drivers: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         penalty = float(authenticity.get("provider_leak_penalty", 0.0)) + float(authenticity.get("false_self_claim_penalty", 0.0))
         continuity_score = _clip(float(authenticity.get("self_grounding_score", 0.0)) - penalty * 0.25, 0.0, 1.0)
@@ -58,13 +100,19 @@ class LongRunAnalyzer:
             float(vitality_snapshot.get("relationship_drift", 0.0)),
             float(vitality_snapshot.get("resource_scarcity", 0.0)),
         )
-        return {
+        projection = {
             "continuity_window": min(max(round_id, 1), 8),
             "self_consistency_score": round(continuity_score, 4),
             "volatility_signal": round(volatility_signal, 4),
             "non_interactive_shift": len([item for item in shaping_events if item.get("non_interactive")]),
             "rename_reason": identity_evolution.get("rename_reason", ""),
         }
+        if personality_anchor:
+            projection["personality_anchor_summary"] = self._personality_anchor_summary(
+                personality_anchor=personality_anchor,
+                top_drivers=list(top_drivers or []),
+            )
+        return projection
 
     def build_online_projection(
         self,
@@ -73,21 +121,44 @@ class LongRunAnalyzer:
         slow_variables: dict[str, Any],
         shaping_events: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        history = self.metrics_summary()
-        continuity_score = _clip(float(history.get("self_consistency_score", 0.5) or 0.0), 0.0, 1.0)
+        latest_seed_getter = getattr(self.trace_store, "latest_round_projection_seed", None)
+        latest_seed = latest_seed_getter() if callable(latest_seed_getter) else {}
+        if not latest_seed:
+            rounds = self.trace_store.list_rounds()
+            if rounds:
+                latest = rounds[-1]
+                latest_seed = {
+                    "long_run_projection": dict(latest.get("long_run_projection", {}) or {}),
+                    "authenticity": dict(latest.get("authenticity", {}) or {}),
+                }
+        if latest_seed:
+            latest_projection = dict(latest_seed.get("long_run_projection", {}) or {})
+            if "self_consistency_score" in latest_projection:
+                continuity_score = _clip(float(latest_projection.get("self_consistency_score", 0.5) or 0.0), 0.0, 1.0)
+            else:
+                latest_authenticity = dict(latest_seed.get("authenticity", {}) or {})
+                continuity_score = _clip(float(latest_authenticity.get("self_grounding_score", 0.5) or 0.0), 0.0, 1.0)
+        else:
+            history = self.metrics_summary()
+            continuity_score = _clip(float(history.get("self_consistency_score", 0.5) or 0.0), 0.0, 1.0)
         volatility_signal = max(
             float(slow_variables.get("affect_residue", 0.0) or 0.0),
             float(slow_variables.get("relationship_drift", 0.0) or 0.0),
             float(slow_variables.get("resource_scarcity", 0.0) or 0.0),
             float(slow_variables.get("memory_activation", 0.0) or 0.0) * 0.6,
         )
-        return {
+        projection = {
             "continuity_window": min(max(round_id, 1), 8),
             "self_consistency_score": round(continuity_score, 4),
             "volatility_signal": round(_clip(volatility_signal, 0.0, 1.0), 4),
             "non_interactive_shift": len([item for item in shaping_events if item.get("non_interactive")]),
             "rename_reason": "",
         }
+        if latest_seed:
+            latest_projection = dict(latest_seed.get("long_run_projection", {}) or {})
+            if latest_projection.get("personality_anchor_summary"):
+                projection["personality_anchor_summary"] = dict(latest_projection.get("personality_anchor_summary", {}) or {})
+        return projection
 
     def build_long_run_prior_contribution(self, projection: dict[str, Any]) -> ProbabilisticContribution:
         self_consistency_score = float(projection.get("self_consistency_score", 0.0) or 0.0)
