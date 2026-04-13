@@ -73,7 +73,8 @@
       a,
       button,
       input,
-      textarea {
+      textarea,
+      select {
         font: inherit;
       }
 
@@ -781,7 +782,8 @@
       }
 
       textarea,
-      input {
+      input,
+      select {
         width: 100%;
         border-radius: 16px;
         border: 1px solid var(--line);
@@ -795,6 +797,10 @@
         min-height: 120px;
         resize: vertical;
         line-height: 1.7;
+      }
+
+      select {
+        min-height: 52px;
       }
 
       .composer-row,
@@ -857,6 +863,70 @@
 
       .workbench-card h3 {
         margin-bottom: 8px;
+      }
+
+      .control-workbench-grid {
+        display: grid;
+        gap: 12px;
+      }
+
+      .control-form-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .control-form-grid .field-stack {
+        gap: 5px;
+      }
+
+      .control-form-grid .field-stack textarea {
+        min-height: 104px;
+      }
+
+      .control-item-list {
+        display: grid;
+        gap: 10px;
+      }
+
+      .control-item {
+        display: grid;
+        gap: 8px;
+        padding: 12px 14px;
+        border-radius: 16px;
+        border: 1px solid rgba(210, 210, 215, 0.84);
+        background: rgba(255, 255, 255, 0.7);
+      }
+
+      .control-item-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        align-items: flex-start;
+        flex-wrap: wrap;
+      }
+
+      .control-item-actions,
+      .control-item-badges {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+
+      .control-item-actions .ghost-button,
+      .control-item-actions .soft-button,
+      .control-item-actions .danger-button {
+        min-height: 34px;
+        padding: 7px 12px;
+      }
+
+      .control-status {
+        padding: 10px 12px;
+        border-radius: 14px;
+        border: 1px solid rgba(0, 113, 227, 0.14);
+        background: rgba(0, 113, 227, 0.08);
+        color: var(--ink);
       }
 
       .workbench-card ul {
@@ -2194,6 +2264,9 @@
                   <button class="tab-button" data-workbench-tab="instinct">四维空间</button>
                   <button class="tab-button" data-workbench-tab="probability" id="focus-instinct">概率层概览</button>
                   <button class="tab-button" data-workbench-tab="why-not">为什么不是</button>
+                  <button class="tab-button" data-workbench-tab="chain">认知链路</button>
+                  <button class="tab-button" data-workbench-tab="controls">层级配置</button>
+                  <button class="tab-button" data-workbench-tab="fuses">应急熔断</button>
                 </div>
               </div>
               <div class="aside-panel" id="workbench-panel"></div>
@@ -2736,6 +2809,7 @@
       let spaceViewMode = "2d";
       let sessionState = null;
       let consoleState = null;
+      let controlsState = null;
       let serviceStatusState = null;
       let autonomyState = null;
       let identityState = null;
@@ -2751,6 +2825,15 @@
       let monologueStatusState = null;
       let monologueShowState = null;
       let dreamOverviewState = null;
+      let cognitiveChainState = null;
+      let cognitiveReplayState = null;
+      let cognitiveMetricsState = null;
+      let feedbackMetricsState = null;
+      let controlsSurfaceState = null;
+      let proposalsSurfaceState = null;
+      let alertsRulesState = null;
+      let alertsHistoryState = null;
+      let dashboardsSurfaceState = null;
       let clockTimer = null;
       let consolePollTimer = null;
       let observeState = { path: "", title: "" };
@@ -2858,6 +2941,42 @@
         if (typeof value === "boolean") return value ? "是" : "否";
         if (typeof value === "string") return value.trim() || fallback;
         return fallback;
+      }
+
+      function safeJsonStringify(value, fallback = "{}") {
+        try {
+          return JSON.stringify(value ?? {}, null, 2);
+        } catch (error) {
+          return fallback;
+        }
+      }
+
+      function jsonPreview(value, fallback = "暂无") {
+        if (value === null || value === undefined) return fallback;
+        if (typeof value === "string") return value.trim() || fallback;
+        if (typeof value === "number" || typeof value === "boolean") return String(value);
+        if (Array.isArray(value)) return value.length ? safeJsonStringify(value, "[]") : fallback;
+        if (typeof value === "object") return Object.keys(value).length ? safeJsonStringify(value) : fallback;
+        return fallback;
+      }
+
+      function workbenchRoundId() {
+        return Number(((((consoleState || {}).state || {}).current_round || {}).round_id) || 0) || 0;
+      }
+
+      function proposalStatusLabel(status) {
+        const value = String(status || "").trim() || "pending";
+        if (currentLanguage !== "zh") return englishize(value);
+        return {
+          pending: "待审批",
+          applied: "已应用",
+          rejected: "已拒绝",
+          promoted: "已固化",
+        }[value] || value;
+      }
+
+      function compactMetricLines(payload = {}) {
+        return Object.entries(payload || {}).map(([key, value]) => `${humanizeLabel(key)}=${prettify(value, "0.00")}`);
       }
 
       function hourlyCapText(value) {
@@ -4062,6 +4181,290 @@
         el("runtime-wake").disabled = mode === "interactive";
       }
 
+      async function refreshCognitiveControlSurfaces(roundId) {
+        const requests = [
+          loadJson("/metrics/cognitive"),
+          loadJson("/metrics/feedback"),
+          loadJson("/controls/current"),
+          loadJson("/controls/proposals"),
+          loadJson("/alerts/rules"),
+          loadJson("/alerts/history"),
+          loadJson("/dashboards/current"),
+        ];
+        if (roundId) {
+          requests.unshift(loadJson(`/trace/layer-chain/${encodeURIComponent(roundId)}`));
+        }
+        const results = await Promise.allSettled(requests);
+        let cursor = 0;
+        if (roundId) {
+          cognitiveChainState = results[cursor].status === "fulfilled" ? results[cursor].value : null;
+          cursor += 1;
+        } else {
+          cognitiveChainState = null;
+        }
+        cognitiveMetricsState = results[cursor].status === "fulfilled" ? results[cursor].value : null;
+        cursor += 1;
+        feedbackMetricsState = results[cursor].status === "fulfilled" ? results[cursor].value : null;
+        cursor += 1;
+        controlsSurfaceState = results[cursor].status === "fulfilled" ? results[cursor].value : null;
+        cursor += 1;
+        proposalsSurfaceState = results[cursor].status === "fulfilled" ? results[cursor].value : null;
+        cursor += 1;
+        alertsRulesState = results[cursor].status === "fulfilled" ? results[cursor].value : null;
+        cursor += 1;
+        alertsHistoryState = results[cursor].status === "fulfilled" ? results[cursor].value : null;
+        cursor += 1;
+        dashboardsSurfaceState = results[cursor].status === "fulfilled" ? results[cursor].value : null;
+      }
+
+      function renderChainWorkbench(card = {}) {
+        const roundId = workbenchRoundId();
+        const chain = Array.isArray((cognitiveChainState || {}).cognitive_chain) ? cognitiveChainState.cognitive_chain : [];
+        const cognitiveLines = compactMetricLines(cognitiveMetricsState || {});
+        const feedbackLines = compactMetricLines(feedbackMetricsState || {});
+        return `
+          <section class="workbench-card">
+            <h3>${escapeHtml(card.title || "认知链路")}</h3>
+            <div class="muted">${escapeHtml(card.summary || "读取同一 round trace 的六层链路快照。")}</div>
+            <div style="margin-top: 10px; line-height: 1.7;">${escapeHtml(card.explanation || "回放严格基于 trace snapshot，不二次推理。")}</div>
+            <div class="trace-list" style="margin-top: 12px;">
+              <div class="timeline-item">
+                <strong>${escapeHtml(currentLanguage === "zh" ? "认知指标" : "Cognitive metrics")}</strong>
+                <div class="muted">${escapeHtml(cognitiveLines.join(" · ") || "暂无")}</div>
+              </div>
+              <div class="timeline-item">
+                <strong>${escapeHtml(currentLanguage === "zh" ? "反馈指标" : "Feedback metrics")}</strong>
+                <div class="muted">${escapeHtml(feedbackLines.join(" · ") || "暂无")}</div>
+              </div>
+            </div>
+            <div class="trace-list" style="margin-top: 12px;">
+              ${chain.length ? chain.map((item) => `
+                <div class="timeline-item">
+                  <div class="inline-row" style="justify-content: space-between; align-items: flex-start;">
+                    <div style="flex: 1 1 280px;">
+                      <strong>${escapeHtml(humanizeLabel(item.layer || ""))}</strong>
+                      <div class="muted">${escapeHtml(jsonPreview(item.transform_summary, "暂无摘要"))}</div>
+                    </div>
+                    <button class="soft-button" data-replay-layer="${escapeHtml(item.layer || "")}" ${roundId ? "" : "disabled"}>${escapeHtml(currentLanguage === "zh" ? "回放本层" : "Replay layer")}</button>
+                  </div>
+                  <div class="muted" style="margin-top: 8px;">input：${escapeHtml(jsonPreview(item.input_vector))}</div>
+                  <div class="muted">output：${escapeHtml(jsonPreview(item.output_vector))}</div>
+                  <div class="muted">delta：${escapeHtml(jsonPreview(item.state_delta))}</div>
+                </div>
+              `).join("") : `<div class="empty-state">${escapeHtml(currentLanguage === "zh" ? "当前轮次还没有认知链路快照。" : "No layer-chain snapshot for the current round yet.")}</div>`}
+            </div>
+          </section>
+        `;
+      }
+
+      function renderControlsWorkbench(card = {}) {
+        const controls = controlsSurfaceState || {};
+        const layerControls = (controls.layer_controls || {});
+        const proposals = Array.isArray((proposalsSurfaceState || {}).proposals) ? proposalsSurfaceState.proposals : (controls.proposals || []);
+        const dashboards = Array.isArray((dashboardsSurfaceState || {}).dashboards) ? dashboardsSurfaceState.dashboards : (controls.dashboards || []);
+        const alerts = Array.isArray(((alertsRulesState || {}).rules)) ? alertsRulesState.rules : (((controls.alerts || {}).rules) || []);
+        return `
+          <section class="workbench-card">
+            <h3>${escapeHtml(card.title || "层级配置")}</h3>
+            <div class="muted">${escapeHtml(card.summary || "创建 proposal，经 approval-first apply/promote 生效。")}</div>
+            <div style="margin-top: 10px; line-height: 1.7;">${escapeHtml(card.explanation || "前端只编辑 runtime schema 的投影，不维护私有控制真相面。")}</div>
+            <div style="margin-top: 12px;">
+              <strong>${escapeHtml(currentLanguage === "zh" ? "新建控制提案" : "Create control proposal")}</strong>
+              <div class="inline-row" style="margin-top: 10px;">
+                <input id="control-proposal-title" placeholder="${escapeHtml(currentLanguage === "zh" ? "提案标题" : "Proposal title")}" value="Layer control proposal" />
+                <select id="control-proposal-target">
+                  <option value="runtime">runtime</option>
+                  <option value="perception">perception</option>
+                  <option value="memory">memory</option>
+                  <option value="cognition">cognition</option>
+                  <option value="decision">decision</option>
+                  <option value="execution">execution</option>
+                  <option value="feedback">feedback</option>
+                  <option value="behavior_policies">behavior_policies</option>
+                </select>
+              </div>
+              <textarea id="control-proposal-patch" spellcheck="false">${escapeHtml(safeJsonStringify({ decision: layerControls.decision || {}, behavior_policies: (layerControls.behavior_policies || {}) }, "{}"))}</textarea>
+              <div class="inline-row" style="margin-top: 10px;">
+                <button class="primary-button" id="control-proposal-create">${escapeHtml(currentLanguage === "zh" ? "创建提案" : "Create proposal")}</button>
+                <button class="ghost-button" id="control-proposal-fill">${escapeHtml(currentLanguage === "zh" ? "填入当前配置" : "Fill current config")}</button>
+              </div>
+            </div>
+            <div class="trace-list" style="margin-top: 12px;">
+              <div class="timeline-item">
+                <strong>${escapeHtml(currentLanguage === "zh" ? "运行时控制基线" : "Runtime control baseline")}</strong>
+                <div class="muted">${escapeHtml(Object.keys(layerControls).join(" · ") || "暂无")}</div>
+              </div>
+              <div class="timeline-item">
+                <strong>${escapeHtml(currentLanguage === "zh" ? "看板 DSL 面板" : "Dashboard DSL panels")}</strong>
+                <div class="muted">${escapeHtml(dashboards.map((item) => item.title || item.dashboard_id || "panel").join(" · ") || "暂无")}</div>
+              </div>
+              <div class="timeline-item">
+                <strong>${escapeHtml(currentLanguage === "zh" ? "告警规则" : "Alert rules")}</strong>
+                <div class="muted">${escapeHtml(alerts.map((item) => item.rule_id || item.metric || "rule").join(" · ") || "暂无")}</div>
+              </div>
+            </div>
+            <div class="trace-list" style="margin-top: 12px;">
+              ${proposals.length ? proposals.map((proposal) => `
+                <div class="timeline-item">
+                  <strong>${escapeHtml(proposal.title || proposal.proposal_id || "proposal")}</strong>
+                  <div class="muted">${escapeHtml((proposal.target || "runtime"))} · ${escapeHtml(proposalStatusLabel(proposal.status))}</div>
+                  <div class="muted" style="margin-top: 6px;">patch：${escapeHtml(jsonPreview(proposal.patch))}</div>
+                  <div class="inline-row" style="margin-top: 10px;">
+                    <button class="soft-button" data-control-apply="${escapeHtml(proposal.proposal_id || "")}" ${String(proposal.status || "") !== "pending" ? "disabled" : ""}>${escapeHtml(currentLanguage === "zh" ? "批准并应用" : "Approve and apply")}</button>
+                    <button class="danger-button" data-control-reject="${escapeHtml(proposal.proposal_id || "")}" ${String(proposal.status || "") !== "pending" ? "disabled" : ""}>${escapeHtml(currentLanguage === "zh" ? "拒绝" : "Reject")}</button>
+                    <button class="ghost-button" data-control-promote="${escapeHtml(proposal.proposal_id || "")}" ${String(proposal.status || "") !== "applied" ? "disabled" : ""}>${escapeHtml(currentLanguage === "zh" ? "固化到 runtime.yaml" : "Promote to runtime.yaml")}</button>
+                  </div>
+                </div>
+              `).join("") : `<div class="empty-state">${escapeHtml(currentLanguage === "zh" ? "当前没有待处理 control proposal。" : "No control proposals yet.")}</div>`}
+            </div>
+          </section>
+        `;
+      }
+
+      function renderFusesWorkbench(card = {}) {
+        const controls = controlsSurfaceState || {};
+        const fuses = controls.layer_fuses || {};
+        const alertsHistory = Array.isArray((alertsHistoryState || {}).history) ? alertsHistoryState.history : (((controls.alerts || {}).history) || []);
+        return `
+          <section class="workbench-card">
+            <h3>${escapeHtml(card.title || "应急熔断")}</h3>
+            <div class="muted">${escapeHtml(card.summary || "所有熔断与恢复都必须写 trace。")}</div>
+            <div style="margin-top: 10px; line-height: 1.7;">${escapeHtml(card.explanation || "这里直接调用 canonical fuse API，并在刷新后回读同一运行时状态。")}</div>
+            <div class="trace-list" style="margin-top: 12px;">
+              ${Object.entries(fuses).length ? Object.entries(fuses).map(([layer, spec]) => `
+                <div class="timeline-item">
+                  <strong>${escapeHtml(humanizeLabel(layer))}</strong>
+                  <div class="muted">${escapeHtml(`mode=${spec.mode || "normal"} · throttle=${prettify(spec.throttle, "1.00")} · muted=${prettify(Boolean(spec.muted))}`)}</div>
+                  <div class="inline-row" style="margin-top: 10px;">
+                    <select id="fuse-mode-${escapeHtml(layer)}">
+                      <option value="normal" ${(spec.mode || "normal") === "normal" ? "selected" : ""}>normal</option>
+                      <option value="degraded" ${(spec.mode || "") === "degraded" ? "selected" : ""}>degraded</option>
+                      <option value="muted" ${(spec.mode || "") === "muted" ? "selected" : ""}>muted</option>
+                    </select>
+                    <input id="fuse-throttle-${escapeHtml(layer)}" type="number" min="0" max="1" step="0.05" value="${escapeHtml(String(spec.throttle ?? 1.0))}" />
+                  </div>
+                  <div class="toggle-row" style="margin-top: 10px;">
+                    <div class="toggle-copy">
+                      <strong>${escapeHtml(currentLanguage === "zh" ? "静默" : "Muted")}</strong>
+                      <span class="muted">${escapeHtml(currentLanguage === "zh" ? "勾选后本层进入静默熔断。" : "Silence this layer when engaged.")}</span>
+                    </div>
+                    <input id="fuse-muted-${escapeHtml(layer)}" type="checkbox" ${spec.muted ? "checked" : ""} />
+                  </div>
+                  <input id="fuse-reason-${escapeHtml(layer)}" placeholder="${escapeHtml(currentLanguage === "zh" ? "熔断原因，会写入 trace" : "Fuse reason written to trace")}" value="observer_manual_adjustment" style="margin-top: 10px;" />
+                  <div class="inline-row" style="margin-top: 10px;">
+                    <button class="danger-button" data-fuse-engage="${escapeHtml(layer)}">${escapeHtml(currentLanguage === "zh" ? "执行熔断" : "Engage fuse")}</button>
+                    <button class="ghost-button" data-fuse-restore="${escapeHtml(layer)}">${escapeHtml(currentLanguage === "zh" ? "一键恢复" : "Restore")}</button>
+                  </div>
+                </div>
+              `).join("") : `<div class="empty-state">${escapeHtml(currentLanguage === "zh" ? "当前没有层级熔断配置。" : "No layer fuse config yet.")}</div>`}
+            </div>
+            <div class="trace-list" style="margin-top: 12px;">
+              ${alertsHistory.length ? alertsHistory.slice(-5).reverse().map((item) => `
+                <div class="timeline-item">
+                  <strong>${escapeHtml(item.rule_id || item.metric || "alert")}</strong>
+                  <div class="muted">${escapeHtml(`${item.metric || "metric"} ${item.operator || ""} ${prettify(item.threshold, "0.00")} · observed=${prettify(item.observed, "0.00")}`)}</div>
+                  <div class="muted">${escapeHtml(`${item.recorded_at || ""} · suggested=${item.suggested_layer || "n/a"}`)}</div>
+                </div>
+              `).join("") : `<div class="empty-state">${escapeHtml(currentLanguage === "zh" ? "当前没有告警历史。" : "No alert history yet.")}</div>`}
+            </div>
+          </section>
+        `;
+      }
+
+      async function replayLayerSnapshot(layer) {
+        const roundId = workbenchRoundId();
+        if (!roundId || !layer) return;
+        cognitiveReplayState = await loadJson(`/replay/layer/${encodeURIComponent(roundId)}/${encodeURIComponent(layer)}`);
+        const snapshot = (cognitiveReplayState || {}).snapshot || {};
+        await openObserveDialog(`/replay/layer/${encodeURIComponent(roundId)}/${encodeURIComponent(layer)}`, `${humanizeLabel(layer)} · replay`);
+        el("observe-content").innerHTML = `
+          <div><strong>${escapeHtml(currentLanguage === "zh" ? "输入向量" : "Input vector")}</strong></div>
+          <pre>${escapeHtml(safeJsonStringify(snapshot.input_vector, "{}"))}</pre>
+          <div><strong>${escapeHtml(currentLanguage === "zh" ? "加工摘要" : "Transform summary")}</strong></div>
+          <pre>${escapeHtml(safeJsonStringify(snapshot.transform_summary, "{}"))}</pre>
+          <div><strong>${escapeHtml(currentLanguage === "zh" ? "输出向量" : "Output vector")}</strong></div>
+          <pre>${escapeHtml(safeJsonStringify(snapshot.output_vector, "{}"))}</pre>
+          <div><strong>${escapeHtml(currentLanguage === "zh" ? "状态变化" : "State delta")}</strong></div>
+          <pre>${escapeHtml(safeJsonStringify(snapshot.state_delta, "{}"))}</pre>
+        `;
+      }
+
+      function parseControlPatchInput() {
+        const raw = String((el("control-proposal-patch") || {}).value || "").trim();
+        if (!raw) return {};
+        return JSON.parse(raw);
+      }
+
+      async function submitControlProposal() {
+        const title = String((el("control-proposal-title") || {}).value || "").trim() || "Layer control proposal";
+        const target = String((el("control-proposal-target") || {}).value || "runtime").trim() || "runtime";
+        const patch = parseControlPatchInput();
+        await postJson("/controls/proposals", { title, target, patch });
+        await refreshConsole({ heavy: true });
+      }
+
+      async function applyControlProposalAction(proposalId, approved) {
+        if (!proposalId) return;
+        await postJson(`/controls/proposals/${encodeURIComponent(proposalId)}/apply`, { approved });
+        await refreshConsole({ heavy: true });
+      }
+
+      async function promoteControlProposalAction(proposalId) {
+        if (!proposalId) return;
+        await postJson(`/controls/proposals/${encodeURIComponent(proposalId)}/promote`, {});
+        await refreshConsole({ heavy: true });
+      }
+
+      async function engageLayerFuseAction(layer) {
+        if (!layer) return;
+        const mode = String((el(`fuse-mode-${layer}`) || {}).value || "normal").trim() || "normal";
+        const throttle = Number((el(`fuse-throttle-${layer}`) || {}).value || 1);
+        const muted = Boolean((el(`fuse-muted-${layer}`) || {}).checked);
+        const reason = String((el(`fuse-reason-${layer}`) || {}).value || "").trim() || "observer_manual_adjustment";
+        await postJson(`/controls/fuses/${encodeURIComponent(layer)}`, { mode, throttle, muted, reason });
+        await refreshConsole({ heavy: true });
+      }
+
+      async function restoreLayerFuseAction(layer) {
+        if (!layer) return;
+        const reason = String((el(`fuse-reason-${layer}`) || {}).value || "").trim() || "observer_restore";
+        await postJson(`/controls/fuses/${encodeURIComponent(layer)}/restore`, { reason });
+        await refreshConsole({ heavy: true });
+      }
+
+      function bindWorkbenchControlActions() {
+        for (const button of document.querySelectorAll("[data-replay-layer]")) {
+          button.addEventListener("click", () => replayLayerSnapshot(button.dataset.replayLayer || "").catch(console.error));
+        }
+        const createButton = el("control-proposal-create");
+        if (createButton) {
+          createButton.addEventListener("click", () => submitControlProposal().catch(console.error));
+        }
+        const fillButton = el("control-proposal-fill");
+        if (fillButton) {
+          fillButton.addEventListener("click", () => {
+            if (el("control-proposal-patch")) {
+              el("control-proposal-patch").value = safeJsonStringify((controlsSurfaceState || {}).layer_controls || {}, "{}");
+            }
+          });
+        }
+        for (const button of document.querySelectorAll("[data-control-apply]")) {
+          button.addEventListener("click", () => applyControlProposalAction(button.dataset.controlApply || "", true).catch(console.error));
+        }
+        for (const button of document.querySelectorAll("[data-control-reject]")) {
+          button.addEventListener("click", () => applyControlProposalAction(button.dataset.controlReject || "", false).catch(console.error));
+        }
+        for (const button of document.querySelectorAll("[data-control-promote]")) {
+          button.addEventListener("click", () => promoteControlProposalAction(button.dataset.controlPromote || "").catch(console.error));
+        }
+        for (const button of document.querySelectorAll("[data-fuse-engage]")) {
+          button.addEventListener("click", () => engageLayerFuseAction(button.dataset.fuseEngage || "").catch(console.error));
+        }
+        for (const button of document.querySelectorAll("[data-fuse-restore]")) {
+          button.addEventListener("click", () => restoreLayerFuseAction(button.dataset.fuseRestore || "").catch(console.error));
+        }
+      }
+
       function renderApprovals() {
         const approvals = (sessionState && sessionState.approvals && sessionState.approvals.pending) || [];
         el("metric-approval").textContent = String(approvals.length);
@@ -4171,6 +4574,9 @@
           }],
           instinct: [cardById.instinct_space].filter(Boolean),
           probability: [cardById.probability_layers].filter(Boolean),
+          chain: [cardById.chain].filter(Boolean),
+          controls: [cardById.controls].filter(Boolean),
+          fuses: [cardById.fuses].filter(Boolean),
           "why-not": [{
             title: "为什么不是",
             summary: joinSummaryWithMonologue(whyNot.summary || "当前没有 why-not 摘要。", whyNot.expressive_trace),
@@ -4184,7 +4590,11 @@
             ]
           }]
         };
-        const selected = mappings[activeWorkbenchTab] || mappings.state;
+        const controls = controlsPayload();
+        const layerControls = asObject(controls.layer_controls);
+        const layerFuses = asObject(controls.layer_fuses);
+        const proposals = asArray(controls.proposals);
+        const recentControlEvents = asArray(controls.recent_control_events);
         if (activeWorkbenchTab === "instinct") {
           const plot = (probabilitySpaceState.plots || [])[0];
           el("workbench-panel").innerHTML = `
@@ -4195,6 +4605,213 @@
           `;
           return;
         }
+        if (activeWorkbenchTab === "chain") {
+          el("workbench-panel").innerHTML = renderChainWorkbench(cardById.chain || {});
+          for (const button of document.querySelectorAll("[data-replay-layer]")) {
+            button.addEventListener("click", () => replayLayerSnapshot(button.dataset.replayLayer || "").catch(console.error));
+          }
+          return;
+        }
+        if (activeWorkbenchTab === "controls") {
+          const layerEntries = Object.entries(layerControls).filter(([key]) => key !== "behavior_policies");
+          const policyEntries = Object.entries(asObject(layerControls.behavior_policies));
+          el("workbench-panel").innerHTML = `
+            <div class="control-workbench-grid">
+              <section class="workbench-card">
+                <h3>${escapeHtml(currentLanguage === "zh" ? "提案工作流" : "Proposal workflow")}</h3>
+                <div class="control-form-grid">
+                  <div class="field-stack">
+                    <label for="control-proposal-title">${escapeHtml(currentLanguage === "zh" ? "提案标题" : "Proposal title")}</label>
+                    <input id="control-proposal-title" type="text" placeholder="${escapeHtml(currentLanguage === "zh" ? "层控制提案" : "Layer control proposal")}" />
+                  </div>
+                  <div class="field-stack">
+                    <label for="control-proposal-target">${escapeHtml(currentLanguage === "zh" ? "目标" : "Target")}</label>
+                    <input id="control-proposal-target" type="text" value="runtime" />
+                  </div>
+                  <div class="field-stack" style="grid-column: 1 / -1;">
+                    <label for="control-proposal-patch">${escapeHtml(currentLanguage === "zh" ? "补丁 JSON" : "Patch JSON")}</label>
+                    <textarea id="control-proposal-patch" placeholder='{"layer_controls":{"behavior_policies":{"PFCAgent":{"mode":"inspect"}}}}'></textarea>
+                  </div>
+                </div>
+                <div class="inline-row" style="margin-top: 12px;">
+                  <button class="primary-button" id="control-proposal-submit">${escapeHtml(currentLanguage === "zh" ? "创建提案" : "Create proposal")}</button>
+                </div>
+                <div class="control-status" id="control-workbench-status">${escapeHtml(currentLanguage === "zh" ? "准备就绪，表单内容仅在点击按钮时提交到后端。" : "Ready. Form inputs are only submitted when you click a button.")}</div>
+              </section>
+              <section class="workbench-card">
+                <h3>${escapeHtml(currentLanguage === "zh" ? "当前层控制" : "Current layer controls")}</h3>
+                <div class="control-item-list">
+                  ${layerEntries.length ? layerEntries.map(([name, value]) => `
+                    <div class="control-item">
+                      <div class="control-item-head">
+                        <strong>${escapeHtml(humanizeLabel(name))}</strong>
+                        <span class="chip">${escapeHtml(String(name))}</span>
+                      </div>
+                      <div class="muted">${escapeHtml(compactMappingText(value))}</div>
+                    </div>
+                  `).join("") : `<div class="empty-state">${escapeHtml(currentLanguage === "zh" ? "当前没有层控制。" : "No layer controls yet.")}</div>`}
+                </div>
+                ${policyEntries.length ? `
+                  <div style="margin-top: 12px;" class="control-item-list">
+                    ${policyEntries.map(([name, value]) => `
+                      <div class="control-item">
+                        <div class="control-item-head">
+                          <strong>${escapeHtml(humanizeLabel(name))}</strong>
+                          <span class="chip">${escapeHtml(String(name))}</span>
+                        </div>
+                        <div class="muted">${escapeHtml(compactMappingText(value))}</div>
+                      </div>
+                    `).join("")}
+                  </div>
+                ` : ""}
+              </section>
+              <section class="workbench-card">
+                <h3>${escapeHtml(currentLanguage === "zh" ? "提案队列" : "Proposal queue")}</h3>
+                <div class="control-item-list" id="control-proposal-list">
+                  ${proposals.length ? proposals.map((proposal) => `
+                    <div class="control-item" data-proposal-id="${escapeHtml(String(proposal.proposal_id || ""))}">
+                      <div class="control-item-head">
+                        <div>
+                          <strong>${escapeHtml(String(proposal.title || proposal.proposal_id || "proposal"))}</strong>
+                          <div class="muted">${escapeHtml(String(proposal.target || "runtime"))}</div>
+                        </div>
+                        <div class="control-item-badges">
+                          <span class="chip">${escapeHtml(controlProposalStatusLabel(proposal.status))}</span>
+                        </div>
+                      </div>
+                      <div class="muted">${escapeHtml(compactMappingText(proposal.patch))}</div>
+                      <div class="control-item-actions">
+                        <button class="soft-button" data-control-proposal-apply="${escapeHtml(String(proposal.proposal_id || ""))}" ${String(proposal.status || "") !== "pending" ? "disabled" : ""}>${escapeHtml(currentLanguage === "zh" ? "应用" : "Apply")}</button>
+                        <button class="danger-button" data-control-proposal-reject="${escapeHtml(String(proposal.proposal_id || ""))}" ${String(proposal.status || "") !== "pending" ? "disabled" : ""}>${escapeHtml(currentLanguage === "zh" ? "拒绝" : "Reject")}</button>
+                        <button class="ghost-button" data-control-proposal-promote="${escapeHtml(String(proposal.proposal_id || ""))}" ${String(proposal.status || "") !== "applied" ? "disabled" : ""}>${escapeHtml(currentLanguage === "zh" ? "提升" : "Promote")}</button>
+                      </div>
+                    </div>
+                  `).join("") : `<div class="empty-state">${escapeHtml(currentLanguage === "zh" ? "当前没有待处理提案。" : "No proposals are queued yet.")}</div>`}
+                </div>
+              </section>
+              <section class="workbench-card">
+                <h3>${escapeHtml(currentLanguage === "zh" ? "最近控制事件" : "Recent control events")}</h3>
+                <div class="control-item-list" id="control-event-list">
+                  ${recentControlEvents.length ? recentControlEvents.slice(-8).reverse().map((event) => `
+                    <div class="control-item">
+                      <div class="control-item-head">
+                        <strong>${escapeHtml(controlEventLabel(event.event_type || "event"))}</strong>
+                        <span class="chip">${escapeHtml(localTimeText(event.recorded_at || ""))}</span>
+                      </div>
+                      <div class="muted">${escapeHtml(compactMappingText(event))}</div>
+                    </div>
+                  `).join("") : `<div class="empty-state">${escapeHtml(currentLanguage === "zh" ? "尚无控制事件。" : "No control events yet.")}</div>`}
+                </div>
+              </section>
+            </div>
+          `;
+          bindControlWorkbenchActions();
+          return;
+        }
+        if (activeWorkbenchTab === "fuses") {
+          const fuseLayers = controlFuseOptions();
+          const alertHistory = asArray((alertsHistoryState || {}).history);
+          el("workbench-panel").innerHTML = `
+            <div class="control-workbench-grid">
+              <section class="workbench-card">
+                <h3>${escapeHtml(currentLanguage === "zh" ? "熔断工作流" : "Fuse workflow")}</h3>
+                <div class="control-form-grid">
+                  <div class="field-stack">
+                    <label for="control-fuse-layer">${escapeHtml(currentLanguage === "zh" ? "层级" : "Layer")}</label>
+                    <select id="control-fuse-layer">
+                      ${fuseLayers.map((layer) => `<option value="${escapeHtml(layer)}">${escapeHtml(humanizeLabel(layer))}</option>`).join("")}
+                    </select>
+                  </div>
+                  <div class="field-stack">
+                    <label for="control-fuse-mode">${escapeHtml(currentLanguage === "zh" ? "模式" : "Mode")}</label>
+                    <select id="control-fuse-mode">
+                      <option value="normal">${escapeHtml(controlFuseModeLabel("normal"))}</option>
+                      <option value="degraded">${escapeHtml(controlFuseModeLabel("degraded"))}</option>
+                      <option value="muted">${escapeHtml(controlFuseModeLabel("muted"))}</option>
+                    </select>
+                  </div>
+                  <div class="field-stack">
+                    <label for="control-fuse-throttle">${escapeHtml(currentLanguage === "zh" ? "节流系数" : "Throttle")}</label>
+                    <input id="control-fuse-throttle" type="number" min="0" max="1" step="0.05" value="1" />
+                  </div>
+                  <div class="field-stack">
+                    <label for="control-fuse-muted">${escapeHtml(currentLanguage === "zh" ? "静音" : "Muted")}</label>
+                    <input id="control-fuse-muted" type="checkbox" />
+                  </div>
+                  <div class="field-stack" style="grid-column: 1 / -1;">
+                    <label for="control-fuse-reason">${escapeHtml(currentLanguage === "zh" ? "原因" : "Reason")}</label>
+                    <input id="control-fuse-reason" type="text" placeholder="${escapeHtml(currentLanguage === "zh" ? "例如：工作台手动熔断" : "e.g. dashboard fuse engage")}" />
+                  </div>
+                </div>
+                <div class="inline-row" style="margin-top: 12px;">
+                  <button class="primary-button" id="control-fuse-apply">${escapeHtml(currentLanguage === "zh" ? "应用熔断" : "Apply fuse")}</button>
+                  <button class="ghost-button" id="control-fuse-restore">${escapeHtml(currentLanguage === "zh" ? "恢复" : "Restore")}</button>
+                </div>
+                <div class="control-status" id="control-workbench-status">${escapeHtml(currentLanguage === "zh" ? "熔断操作会直接提交到后端控制面。" : "Fuse actions are submitted directly to the backend control surface.")}</div>
+              </section>
+              <section class="workbench-card">
+                <h3>${escapeHtml(currentLanguage === "zh" ? "当前熔断" : "Current fuses")}</h3>
+                <div class="control-item-list">
+                  ${fuseLayers.length ? fuseLayers.map((layer) => `
+                    <div class="control-item">
+                      <div class="control-item-head">
+                        <strong>${escapeHtml(humanizeLabel(layer))}</strong>
+                        <span class="chip">${escapeHtml(String(layer))}</span>
+                      </div>
+                      <div class="muted">${escapeHtml(compactMappingText(layerFuses[layer] || {}))}</div>
+                    </div>
+                  `).join("") : `<div class="empty-state">${escapeHtml(currentLanguage === "zh" ? "当前没有熔断层。" : "No fuse layers yet.")}</div>`}
+                </div>
+              </section>
+              <section class="workbench-card">
+                <h3>${escapeHtml(currentLanguage === "zh" ? "层控制快照" : "Layer control snapshot")}</h3>
+                <div class="control-item-list">
+                  ${Object.entries(layerControls).length ? Object.entries(layerControls).map(([name, value]) => `
+                    <div class="control-item">
+                      <div class="control-item-head">
+                        <strong>${escapeHtml(humanizeLabel(name))}</strong>
+                        <span class="chip">${escapeHtml(String(name))}</span>
+                      </div>
+                      <div class="muted">${escapeHtml(compactMappingText(value))}</div>
+                    </div>
+                  `).join("") : `<div class="empty-state">${escapeHtml(currentLanguage === "zh" ? "当前没有层控制。" : "No layer controls yet.")}</div>`}
+                </div>
+              </section>
+              <section class="workbench-card">
+                <h3>${escapeHtml(currentLanguage === "zh" ? "告警历史" : "Alert history")}</h3>
+                <div class="control-item-list">
+                  ${alertHistory.length ? alertHistory.slice(-8).reverse().map((item) => `
+                    <div class="control-item">
+                      <div class="control-item-head">
+                        <strong>${escapeHtml(String(item.rule_id || item.metric || "alert"))}</strong>
+                        <span class="chip">${escapeHtml(localTimeText(item.recorded_at || ""))}</span>
+                      </div>
+                      <div class="muted">${escapeHtml(`${item.metric || "metric"} ${item.operator || ""} ${item.threshold || ""}`)}</div>
+                      <div class="muted">${escapeHtml(`observed=${item.observed ?? "n/a"}, suggested=${item.suggested_layer || "n/a"}`)}</div>
+                    </div>
+                  `).join("") : `<div class="empty-state">${escapeHtml(currentLanguage === "zh" ? "当前没有告警历史。" : "No alert history yet.")}</div>`}
+                </div>
+              </section>
+              <section class="workbench-card">
+                <h3>${escapeHtml(currentLanguage === "zh" ? "最近控制事件" : "Recent control events")}</h3>
+                <div class="control-item-list" id="control-event-list">
+                  ${recentControlEvents.length ? recentControlEvents.slice(-8).reverse().map((event) => `
+                    <div class="control-item">
+                      <div class="control-item-head">
+                        <strong>${escapeHtml(controlEventLabel(event.event_type || "event"))}</strong>
+                        <span class="chip">${escapeHtml(localTimeText(event.recorded_at || ""))}</span>
+                      </div>
+                      <div class="muted">${escapeHtml(compactMappingText(event))}</div>
+                    </div>
+                  `).join("") : `<div class="empty-state">${escapeHtml(currentLanguage === "zh" ? "尚无控制事件。" : "No control events yet.")}</div>`}
+                </div>
+              </section>
+            </div>
+          `;
+          bindControlWorkbenchActions();
+          return;
+        }
+        const selected = mappings[activeWorkbenchTab] || mappings.state;
         el("workbench-panel").innerHTML = selected.map((card) => `
           <section class="workbench-card">
             <h3>${escapeHtml(card.title || "未命名卡片")}</h3>
@@ -4205,8 +4822,132 @@
               ${(card.blockers || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
               ${(card.next_paths || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
             </ul>
+            ${Array.isArray(card.details) && card.details.length ? `
+              <div style="display:grid; gap:10px; margin-top:12px;">
+                ${card.details.map((detail) => `
+                  <div style="padding:10px 12px; border:1px solid var(--line); border-radius:14px; background:rgba(255,255,255,0.72);">
+                    <div style="font-weight:600;">${escapeHtml(detail.label || "detail")}</div>
+                    <div class="muted" style="margin-top:4px;">${escapeHtml(detail.summary || "暂无摘要")}</div>
+                    ${(detail.lines || []).length ? `
+                      <ul style="margin:8px 0 0; padding-left:18px;">
+                        ${(detail.lines || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
+                      </ul>
+                    ` : ""}
+                  </div>
+                `).join("")}
+              </div>
+            ` : ""}
           </section>
         `).join("");
+      }
+
+      function setControlWorkbenchStatus(text) {
+        const target = el("control-workbench-status");
+        if (target) target.textContent = text;
+      }
+
+      function bindControlWorkbenchActions() {
+        const createButton = el("control-proposal-submit");
+        if (createButton) {
+          createButton.addEventListener("click", async () => {
+            try {
+              const payload = {
+                title: el("control-proposal-title").value.trim(),
+                target: el("control-proposal-target").value.trim() || "runtime",
+                patch: parseControlPatchInput(el("control-proposal-patch").value),
+              };
+              const response = await postJson("/controls/proposals", payload);
+              controlsState = response.current || controlsState;
+              setControlWorkbenchStatus(currentLanguage === "zh" ? "提案已创建，正在回读控制面。" : "Proposal created. Refreshing control surface.");
+              await refreshControls();
+            } catch (error) {
+              setControlWorkbenchStatus(String((error && error.message) || error || ""));
+              throw error;
+            }
+          });
+        }
+        for (const button of document.querySelectorAll("[data-control-proposal-apply]")) {
+          button.addEventListener("click", async () => {
+            try {
+              const proposalId = button.dataset.controlProposalApply || "";
+              if (!proposalId) return;
+              const response = await postJson(`/controls/proposals/${encodeURIComponent(proposalId)}/apply`, { approved: true });
+              controlsState = response.current || controlsState;
+              setControlWorkbenchStatus(currentLanguage === "zh" ? "提案已应用，正在回读控制面。" : "Proposal applied. Refreshing control surface.");
+              await refreshControls();
+            } catch (error) {
+              setControlWorkbenchStatus(String((error && error.message) || error || ""));
+              throw error;
+            }
+          });
+        }
+        for (const button of document.querySelectorAll("[data-control-proposal-reject]")) {
+          button.addEventListener("click", async () => {
+            try {
+              const proposalId = button.dataset.controlProposalReject || "";
+              if (!proposalId) return;
+              const response = await postJson(`/controls/proposals/${encodeURIComponent(proposalId)}/apply`, { approved: false });
+              controlsState = response.current || controlsState;
+              setControlWorkbenchStatus(currentLanguage === "zh" ? "提案已拒绝，正在回读控制面。" : "Proposal rejected. Refreshing control surface.");
+              await refreshControls();
+            } catch (error) {
+              setControlWorkbenchStatus(String((error && error.message) || error || ""));
+              throw error;
+            }
+          });
+        }
+        for (const button of document.querySelectorAll("[data-control-proposal-promote]")) {
+          button.addEventListener("click", async () => {
+            try {
+              const proposalId = button.dataset.controlProposalPromote || "";
+              if (!proposalId) return;
+              const response = await postJson(`/controls/proposals/${encodeURIComponent(proposalId)}/promote`, {});
+              controlsState = response.current || controlsState;
+              setControlWorkbenchStatus(currentLanguage === "zh" ? "提案已晋升，正在回读控制面。" : "Proposal promoted. Refreshing control surface.");
+              await refreshControls();
+            } catch (error) {
+              setControlWorkbenchStatus(String((error && error.message) || error || ""));
+              throw error;
+            }
+          });
+        }
+        const fuseApplyButton = el("control-fuse-apply");
+        if (fuseApplyButton) {
+          fuseApplyButton.addEventListener("click", async () => {
+            try {
+              const layer = el("control-fuse-layer").value;
+              const payload = {
+                mode: el("control-fuse-mode").value,
+                throttle: parseNumberInputValue("control-fuse-throttle", 1),
+                muted: Boolean(el("control-fuse-muted").checked),
+              };
+              const reason = el("control-fuse-reason").value.trim();
+              const response = await postJson(`/controls/fuses/${encodeURIComponent(layer)}`, { ...payload, reason });
+              controlsState = response.layer_fuses ? { ...(controlsState || {}), layer_fuses: response.layer_fuses, recent_control_events: response.recent_control_events || [] } : controlsState;
+              setControlWorkbenchStatus(currentLanguage === "zh" ? "熔断已应用，正在回读控制面。" : "Fuse engaged. Refreshing control surface.");
+              await refreshControls();
+            } catch (error) {
+              setControlWorkbenchStatus(String((error && error.message) || error || ""));
+              throw error;
+            }
+          });
+        }
+        const fuseRestoreButton = el("control-fuse-restore");
+        if (fuseRestoreButton) {
+          fuseRestoreButton.addEventListener("click", async () => {
+            try {
+              const layer = el("control-fuse-layer").value;
+              const reason = el("control-fuse-reason").value.trim();
+              const response = await postJson(`/controls/fuses/${encodeURIComponent(layer)}/restore`, { reason });
+              controlsState = response.layer_fuses ? { ...(controlsState || {}), layer_fuses: response.layer_fuses, recent_control_events: response.recent_control_events || [] } : controlsState;
+              setControlWorkbenchStatus(currentLanguage === "zh" ? "熔断已恢复，正在回读控制面。" : "Fuse restored. Refreshing control surface.");
+              await refreshControls();
+            } catch (error) {
+              setControlWorkbenchStatus(String((error && error.message) || error || ""));
+              throw error;
+            }
+          });
+        }
       }
 
       function renderStatusSummary() {
@@ -4292,6 +5033,77 @@
         }).join("");
       }
 
+      function compactMappingText(value, limit = 4) {
+        if (!value || typeof value !== "object" || Array.isArray(value)) return "暂无";
+        const entries = Object.entries(value).slice(0, limit);
+        return entries.length ? entries.map(([key, item]) => `${key}=${item}`).join(", ") : "暂无";
+      }
+
+      function controlsPayload() {
+        return controlsState || { layer_controls: {}, layer_fuses: {}, proposals: [], recent_control_events: [] };
+      }
+
+      function controlLayerNames() {
+        const payload = controlsPayload();
+        const layerControls = asObject(payload.layer_controls);
+        const layerFuses = asObject(payload.layer_fuses);
+        const layerControlsNames = Object.keys(layerControls).filter((key) => key !== "behavior_policies");
+        const policyNames = Object.keys(asObject(layerControls.behavior_policies));
+        return [...new Set([...layerControlsNames, ...policyNames, ...Object.keys(layerFuses)])];
+      }
+
+      function controlFuseOptions() {
+        const names = controlLayerNames();
+        if (names.length) return names;
+        return ["perception", "memory", "cognition", "decision", "execution", "feedback"];
+      }
+
+      function parseControlPatchInput(value) {
+        const raw = String(value || "").trim();
+        if (!raw) return {};
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+      }
+
+      function controlProposalStatusLabel(value) {
+        const key = String(value || "").trim();
+        if (currentLanguage === "zh") {
+          return {
+            pending: "待处理",
+            applied: "已应用",
+            promoted: "已晋升",
+          }[key] || key || "待处理";
+        }
+        return key || "pending";
+      }
+
+      function controlFuseModeLabel(value) {
+        const key = String(value || "").trim();
+        if (currentLanguage === "zh") {
+          return {
+            normal: "正常",
+            degraded: "降级",
+            muted: "静音",
+          }[key] || key || "normal";
+        }
+        return key || "normal";
+      }
+
+      function controlEventLabel(value) {
+        const key = String(value || "").trim();
+        if (currentLanguage === "zh") {
+          return {
+            proposal_created: "提案已创建",
+            proposal_applied: "提案已应用",
+            proposal_promoted: "提案已晋升",
+            fuse_engaged: "熔断已应用",
+            fuse_restored: "熔断已恢复",
+            alert_triggered: "告警已触发",
+          }[key] || humanizeLabel(key);
+        }
+        return key || "event";
+      }
+
       function renderSettings() {
         if (!settingsState) return;
         identityState = settingsState.identity || identityState;
@@ -4369,6 +5181,12 @@
         renderSettings();
         renderStatusSummary();
         renderMessages();
+      }
+
+      async function refreshControls() {
+        await refreshCognitiveControlSurfaces(workbenchRoundId());
+        controlsState = controlsSurfaceState || controlsState;
+        renderWorkbench();
       }
 
       async function saveSettings() {
@@ -4879,6 +5697,12 @@
         } catch (error) {
           console.error(error);
         }
+        try {
+          await refreshCognitiveControlSurfaces(roundId);
+          controlsState = controlsSurfaceState || controlsState;
+        } catch (error) {
+          console.error(error);
+        }
         renderAutonomySummary();
         renderAnalysis();
         renderDream();
@@ -5177,7 +6001,7 @@
         renderProfile();
         renderDeveloperDetails();
         renderRouteStatus();
-        await Promise.all([refreshSessionState(), refreshConsole({ heavy: true }), refreshSettings()]);
+        await Promise.all([refreshSessionState(), refreshConsole({ heavy: true }), refreshSettings(), refreshControls()]);
       }
 
       function bindNavigation() {
@@ -5335,7 +6159,7 @@
         renderAutonomySummary();
         renderMessages();
         if (sessionId) connectEventStream();
-        const startupTasks = [refreshConsole({ heavy: false }), refreshSettings()];
+        const startupTasks = [refreshConsole({ heavy: false }), refreshSettings(), refreshControls()];
         if (sessionId) startupTasks.unshift(refreshSessionState());
         await Promise.allSettled(startupTasks);
         if (!(probabilitySpaceState.plots || []).length) {

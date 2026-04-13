@@ -12,21 +12,29 @@
   autonomy / initiative / monologue 已进入后台持续运行主线，并已有 observer API、launcher 和 diagnostics 回归。
 - **Controlled learning policy surface**
   1.5 已将 `learning_mode`、网络 allowlist、可写目录、知识目录、学习日志目录、外部学习 trace 开关并入 observer settings 与 runtime autonomy policy。
+- **Feedback loop runtime**
+  `FeedbackLoopRuntime` 已成为六层链路末层反馈闭合与 memory writeback gate 的唯一归并面。
+- **Layered controls and runtime baseline**
+  `/controls/*`、`/alerts/*`、`/dashboards/current` 与 `config/runtime.yaml` 已成为 1.5 正式运行时控制基线，并保持 proposal / approval / promote 的单一真相面。
+- **Remote Terminal stateless relay client**
+  `apps/remote-terminal/index.html` 是 observer web session 的无状态接入端，不持有第二份运行时真相。
 - **Terminal-facing controlled learning**
   terminal `sidebar_snapshot` / `/state` 现在能直接看到 controlled-learning 边界，和 observer settings、acceptance-report 对齐。
+- **Six-layer observer/control surface**
+  六层 `感知 -> 记忆 -> 认知 -> 决策 -> 执行 -> 反馈` 链路已进入 round trace、why/replay、observer API、runtime controls 和 dashboard workbench 壳层。
 - **Acceptance artifacts**
   1.5 acceptance plan、matrix、local client / self-hosted deployment 文档已建立。
 - **Bounded long-run acceptance report**
   `nalr eval acceptance-report` 已提供 terminal-facing 的 release acceptance report 入口，并补齐了 [`docs/testing/2026-04-08-self-hosted-equivalent-longrun.md`](/Users/fantasylee/类脑架构/docs/testing/2026-04-08-self-hosted-equivalent-longrun.md) 这份等价长跑报告。
+- **Canonical read-model convergence**
+  `/state`、`/service/status`、`/console/refresh`、`/web/runtime/bootstrap` 已共享同一份 canonical overlap 字段，不再各自拼装第二真相面。
+- **Frozen route taxonomy**
+  `chat_fast / chat_standard / chat_deep / endogenous_light / endogenous_deep / dream_sleep` 已成为 1.5 的公开 route taxonomy；`task_run` 仅保留为内部执行热路径。
 
 ## In Flight Before 1.5 Freeze
 
-- **Canonical read-model 收敛**
-  terminal / dashboard / observer API 仍需进一步收敛到同一读模型，继续清理第二真相面。
-- **Route taxonomy closeout**
-  `chat_fast / chat_standard / chat_deep / endogenous_* / dream_sleep` 仍需全部固化到配置、UI 和文档。
 - **24h 运行证据**
-  已补齐 bounded 等价长跑 acceptance report，但正式 24h soak 仍未执行；仍需补跑一次真实长时运行验收，覆盖 service status、autonomy、initiative、monologue。
+  已补齐 bounded 等价长跑 acceptance report，并新增 `scripts/self_hosted_24h_soak.py` 作为真实长跑采样器，但正式 24h soak remains pending；仍需补跑一次真实长时运行验收，覆盖 service status、autonomy、initiative、monologue。
 
 ## Deferred After 1.5
 
@@ -73,7 +81,7 @@
 - **P0**
   本地客户端入口、服务可达、state / why / why-not / initiative / monologue、单实例服务状态观测。
 - **P1**
-  TLH 一致性、trace / replay / diagnostics、一致的权限模型与 controlled learning policy surface。
+  TLH 一致性、trace / replay / diagnostics、一致的权限模型与 controlled learning policy surface、feedback loop runtime、layered controls/runtime baseline、remote terminal 接入端。
 - **P2**
   长时 soak、分发增强、持续学习策略增强。
 

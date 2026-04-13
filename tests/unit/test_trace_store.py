@@ -148,6 +148,52 @@ def test_round_trace_rows_use_canonical_probability_field_columns(tmp_path):
     assert "distribution_state_json" not in columns
 
 
+def test_round_trace_rows_surface_cognitive_chain_layer_metrics_and_control_events(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    result = controller.tick(
+        RoundEvent(
+            source="user",
+            content="Please remember tea and explain how you decided to respond.",
+            target="user",
+            cue="tea",
+            valence=0.15,
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+    controller.flush_pending_io(raise_on_error=True)
+
+    round_payload = controller.trace_store.read_round(result.round_id)
+    cognitive_chain = round_payload["cognitive_chain"]
+    layer_metrics = round_payload["layer_metrics"]
+    control_events = round_payload["control_events"]
+
+    assert [item["layer"] for item in cognitive_chain] == [
+        "perception",
+        "memory",
+        "cognition",
+        "decision",
+        "execution",
+        "feedback",
+    ]
+    assert "cognitive" in layer_metrics
+    assert "feedback" in layer_metrics
+    assert isinstance(control_events, list)
+
+    canonical_rows = read_dataset_rows(
+        controller.trace_store.round_canonical_dir,
+        "select payload_json from read_parquet(?) where round_id = ?",
+        [result.round_id],
+    )
+
+    assert len(canonical_rows) == 1
+    canonical_payload = json.loads(canonical_rows[0]["payload_json"])
+    assert canonical_payload["cognitive_chain"] == cognitive_chain
+    assert canonical_payload["layer_metrics"] == layer_metrics
+    assert canonical_payload["control_events"] == control_events
+
+
 def test_read_round_rewrites_legacy_canonical_parquet_to_canonical_payload_and_columns(tmp_path):
     store = TraceStore(tmp_path)
     legacy_payload = {

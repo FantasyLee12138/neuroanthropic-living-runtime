@@ -6,8 +6,10 @@ NALR 的当前公开主线是 `1.5`。这个版本的目标不是继续堆概念
 
 - **主线版本**：`1.5`
 - **运行理念**：继续坚持 TLH 的单一概率真相面、trace-first、safe mode、approval、memory write gate，不因为交付形态而退化成普通 agent 壳。
+- **观测与控制主轴**：observer / terminal / trace / replay / config 统一收敛到六层 canonical chain：`感知 -> 记忆 -> 认知 -> 决策 -> 执行 -> 反馈`。
 - **交付定义**：
   - 本地可双击打开的客户端入口
+  - `Remote Terminal` 远端接入页，直接挂到 observer web session API
   - 可 24h 运行的单实例服务端
   - 一套有文档、有矩阵、有证据的 acceptance program
 
@@ -54,6 +56,7 @@ NALR 的当前公开主线是 `1.5`。这个版本的目标不是继续堆概念
 
 - [`Open_NALR_Workbench.command`](/Users/fantasylee/类脑架构/Open_NALR_Workbench.command)
 - [`alive-observer`](/Users/fantasylee/类脑架构/alive-observer)
+- [`apps/remote-terminal/index.html`](/Users/fantasylee/类脑架构/apps/remote-terminal/index.html)
 - [`NALR_Alive_Console_Product_Design.md`](/Users/fantasylee/类脑架构/NALR_Alive_Console_Product_Design.md)
 - [`NALR_Alive_Console_Product_Design.pdf`](/Users/fantasylee/类脑架构/NALR_Alive_Console_Product_Design.pdf)
 - [`alive trace why latest.json`](/Users/fantasylee/类脑架构/alive%20trace%20why%20latest.json)

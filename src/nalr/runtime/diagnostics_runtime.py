@@ -239,6 +239,19 @@ class DiagnosticsRuntimeService:
             payload["why_not"] = None
             payload["probability_field"] = {}
             payload["counterfactual_preview"] = None
+            payload["cognitive_chain"] = {
+                "round_id": None,
+                "trace_ref": None,
+                "cognitive_chain": [],
+                "layer_metrics": {},
+                "control_events": [],
+            }
+            payload["controls"] = controller.controls_current()
+            payload["dashboards"] = controller.dashboards_current()
+            payload["alerts"] = {
+                "rules": controller.alert_rules_payload(),
+                "history": controller.alert_history_payload(),
+            }
             payload["recent_rounds"] = controller.console_recent_rounds()
             payload["source_links"] = controller.console_source_links(round_id=None, trace_ref=None, why_not_action=None)
             return payload
@@ -249,6 +262,13 @@ class DiagnosticsRuntimeService:
         default_why_not_action = controller.console_default_why_not_action(effective_round, action_field=payload["action_field"])
         payload["why_not"] = controller.console_why_not(default_why_not_action, effective_round) if default_why_not_action else None
         payload["counterfactual_preview"] = controller.replay(int(controller.resolve_round_ref(effective_round))).get("counterfactual_preview", {})
+        payload["cognitive_chain"] = controller.layer_chain(effective_round)
+        payload["controls"] = controller.controls_current()
+        payload["dashboards"] = controller.dashboards_current()
+        payload["alerts"] = {
+            "rules": controller.alert_rules_payload(),
+            "history": controller.alert_history_payload(),
+        }
         payload["recent_rounds"] = controller.console_recent_rounds()
         payload["source_links"] = controller.console_source_links(
             round_id=int(controller.resolve_round_ref(effective_round)),

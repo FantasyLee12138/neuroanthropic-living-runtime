@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NALR Remote Terminal</title>
+    <style>
+      :root {
+        --bg: #f4efe7;
+        --panel: rgba(255, 252, 247, 0.92);
+        --ink: #1f1b16;
+        --muted: #6e6255;
+        --line: rgba(91, 71, 50, 0.16);
+        --accent: #8c4f24;
+      }
+
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Iowan Old Style", "Palatino Linotype", "Noto Serif SC", serif;
+        background:
+          radial-gradient(circle at top left, rgba(140, 79, 36, 0.08), transparent 32%),
+          linear-gradient(180deg, #fbf7f1, var(--bg));
+        color: var(--ink);
+      }
+      .shell {
+        max-width: 1400px;
+        margin: 0 auto;
+        padding: 20px;
+        display: grid;
+        gap: 16px;
+      }
+      .hero, .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        padding: 16px;
+        box-shadow: 0 16px 40px rgba(39, 24, 10, 0.08);
+      }
+      .hero h1, .panel h2 { margin: 0 0 8px; }
+      .hero p, .muted { color: var(--muted); }
+      .controls {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 12px;
+      }
+      label { display: grid; gap: 6px; font-size: 0.92rem; }
+      input, textarea, button, select {
+        font: inherit;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 10px 12px;
+        background: rgba(255,255,255,0.92);
+        color: var(--ink);
+      }
+      textarea { min-height: 110px; resize: vertical; }
+      button {
+        cursor: pointer;
+        background: linear-gradient(180deg, #9f6031, var(--accent));
+        color: white;
+        border: none;
+      }
+      .secondary { background: white; color: var(--ink); border: 1px solid var(--line); }
+      .grid {
+        display: grid;
+        grid-template-columns: 1.2fr 1fr 1fr;
+        gap: 16px;
+      }
+      .stack { display: grid; gap: 12px; }
+      pre {
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-family: "SFMono-Regular", ui-monospace, monospace;
+        font-size: 0.83rem;
+        line-height: 1.55;
+      }
+      .log {
+        max-height: 420px;
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 10px;
+        background: rgba(255,255,255,0.84);
+      }
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 10px;
+      }
+      @media (max-width: 980px) {
+        .grid { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <section class="hero">
+        <h1>NALR Remote Terminal</h1>
+        <p>Stateless relay client for observer web sessions. All truth stays on the server-side runtime.</p>
+      </section>
+
+      <section class="panel">
+        <div class="controls">
+          <label>
+            Observer Base URL
+            <input id="base-url" value="http://127.0.0.1:8765" />
+          </label>
+          <label>
+            Session ID
+            <input id="session-id" value="remote-terminal" />
+          </label>
+          <label>
+            Working Directory
+            <input id="cwd" value="" placeholder="/path/to/workspace" />
+          </label>
+        </div>
+        <div class="actions">
+          <button id="start-session">Start / Resume</button>
+          <button class="secondary" id="refresh-state">Refresh State</button>
+        </div>
+      </section>
+
+      <section class="grid">
+        <section class="panel stack">
+          <h2>Send Input</h2>
+          <label>
+            User Turn
+            <textarea id="user-turn" placeholder="总结这个仓库结构"></textarea>
+          </label>
+          <div class="actions">
+            <button id="send-user-turn">Send User Turn</button>
+          </div>
+          <label>
+            Control Command
+            <input id="control-command" placeholder="status" />
+          </label>
+          <div class="actions">
+            <button class="secondary" id="send-control-command">Send Control Command</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Transcript / Events</h2>
+          <div class="log"><pre id="event-log">Waiting for session…</pre></div>
+        </section>
+
+        <section class="panel">
+          <h2>Session State</h2>
+          <div class="log"><pre id="session-state">{}</pre></div>
+        </section>
+      </section>
+    </div>
+
+    <script>
+      const state = {
+        eventSource: null,
+        eventLog: [],
+        sessionState: null,
+      };
+
+      const $ = (id) => document.getElementById(id);
+
+      function endpoint(path) {
+        const base = $("base-url").value.replace(/\/$/, "");
+        return `${base}${path}`;
+      }
+
+      function currentSessionId() {
+        return $("session-id").value.trim();
+      }
+
+      function currentCwd() {
+        return $("cwd").value.trim() || undefined;
+      }
+
+      function appendLog(payload) {
+        state.eventLog.push(payload);
+        state.eventLog = state.eventLog.slice(-80);
+        $("event-log").textContent = state.eventLog.map((item) => JSON.stringify(item, null, 2)).join("\n\n");
+      }
+
+      async function postJson(path, payload) {
+        const response = await fetch(endpoint(path), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(`${response.status} ${text}`);
+        }
+        return response.json();
+      }
+
+      async function fetchState() {
+        const response = await fetch(`${endpoint("/web/session/state")}?session_id=${encodeURIComponent(currentSessionId())}`);
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(`${response.status} ${text}`);
+        }
+        state.sessionState = await response.json();
+        $("session-state").textContent = JSON.stringify(state.sessionState, null, 2);
+      }
+
+      function bindEventStream() {
+        if (state.eventSource) {
+          state.eventSource.close();
+        }
+        const url = `${endpoint("/web/session/events")}?session_id=${encodeURIComponent(currentSessionId())}`;
+        const source = new EventSource(url);
+        source.onmessage = (event) => {
+          try {
+            const payload = JSON.parse(event.data);
+            appendLog(payload);
+            fetchState().catch((error) => appendLog({ type: "fetch_state_error", message: String(error) }));
+          } catch (error) {
+            appendLog({ type: "parse_error", message: String(error) });
+          }
+        };
+        source.onerror = () => appendLog({ type: "stream_error", message: "event stream disconnected" });
+        state.eventSource = source;
+      }
+
+      async function startSession() {
+        const payload = await postJson("/web/session/start", {
+          session_id: currentSessionId(),
+          cwd: currentCwd(),
+          persist_current: true,
+        });
+        appendLog({ type: "session_started", session_id: payload.session_id, event_count: payload.event_count });
+        bindEventStream();
+        await fetchState();
+      }
+
+      async function sendUserTurn() {
+        const text = $("user-turn").value.trim();
+        if (!text) return;
+        await postJson("/web/session/event", {
+          type: "user_turn",
+          session_id: currentSessionId(),
+          text,
+        });
+        $("user-turn").value = "";
+      }
+
+      async function sendControlCommand() {
+        const command = $("control-command").value.trim();
+        if (!command) return;
+        await postJson("/web/session/event", {
+          type: "control_command",
+          session_id: currentSessionId(),
+          command,
+        });
+        $("control-command").value = "";
+      }
+
+      $("start-session").addEventListener("click", () => startSession().catch((error) => appendLog({ type: "error", message: String(error) })));
+      $("refresh-state").addEventListener("click", () => fetchState().catch((error) => appendLog({ type: "error", message: String(error) })));
+      $("send-user-turn").addEventListener("click", () => sendUserTurn().catch((error) => appendLog({ type: "error", message: String(error) })));
+      $("send-control-command").addEventListener("click", () => sendControlCommand().catch((error) => appendLog({ type: "error", message: String(error) })));
+    </script>
+  </body>
+</html>

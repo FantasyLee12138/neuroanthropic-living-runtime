@@ -242,31 +242,11 @@ def create_app(
             "stall_threshold_seconds": round(_runtime_stall_threshold_seconds(), 3),
         }
 
-    def _autonomy_status_payload() -> dict:
-        status = controller.autonomy_runtime_status()
-        runner_state = _autonomy_runner_stall_payload()
-        runner_alive = bool(runner_state["runner_alive"])
-        loop_should_run = bool(status.get("enabled") and status.get("running"))
-        return {
-            **status,
-            "service": _service_status_payload(),
-            "running": bool(loop_should_run),
-            "desired_running": loop_should_run,
-            "loop_should_run": loop_should_run,
-            "runner_attached": runner_alive,
-            "runner_alive": runner_alive,
-            "stalled": bool(runner_state["stalled"]),
-            "stall_seconds": runner_state["stall_seconds"],
-            "stall_threshold_seconds": runner_state["stall_threshold_seconds"],
-            "heartbeat_state": "stalled" if runner_state["stalled"] else ("running" if runner_alive and loop_should_run else "idle"),
-            "runner_source": "observer_heartbeat",
-        }
-
-    def _service_status_payload() -> dict:
-        now = _now_iso()
-        service_probe_state["last_http_ok_at"] = now
+    def _service_status_payload(*, now: str | None = None, runner_state: dict[str, object] | None = None) -> dict:
+        current_time = now or _now_iso()
+        service_probe_state["last_http_ok_at"] = current_time
         service_probe_state["last_probe_error"] = ""
-        runner_state = _autonomy_runner_stall_payload()
+        runner = runner_state or _autonomy_runner_stall_payload()
         return {
             "instance_id": service_instance_id,
             "pid": service_pid,
@@ -284,12 +264,47 @@ def create_app(
             "runtime_serial_active": _runtime_serial_active(),
             "observer_turn_active": _observer_turn_active(),
             "active_turn_sessions": _active_turn_sessions(),
-            "autonomy_runner_alive": bool(runner_state["runner_alive"]),
-            "autonomy_runner_stalled": bool(runner_state["stalled"]),
-            "autonomy_runner_stall_seconds": runner_state["stall_seconds"],
-            "autonomy_runner_stall_threshold_seconds": runner_state["stall_threshold_seconds"],
+            "autonomy_runner_alive": bool(runner["runner_alive"]),
+            "autonomy_runner_stalled": bool(runner["stalled"]),
+            "autonomy_runner_stall_seconds": runner["stall_seconds"],
+            "autonomy_runner_stall_threshold_seconds": runner["stall_threshold_seconds"],
             "project_root": str(project_root_path),
             "config_root": str(effective_config_root),
+        }
+
+    def _autonomy_status_payload(
+        *,
+        service_payload: dict[str, object] | None = None,
+        runner_state: dict[str, object] | None = None,
+    ) -> dict:
+        status = controller.autonomy_runtime_status()
+        runner = runner_state or _autonomy_runner_stall_payload()
+        runner_alive = bool(runner["runner_alive"])
+        loop_should_run = bool(status.get("enabled") and status.get("running"))
+        service = service_payload or _service_status_payload(runner_state=runner)
+        return {
+            **status,
+            "service": service,
+            "running": bool(loop_should_run),
+            "desired_running": loop_should_run,
+            "loop_should_run": loop_should_run,
+            "runner_attached": runner_alive,
+            "runner_alive": runner_alive,
+            "stalled": bool(runner["stalled"]),
+            "stall_seconds": runner["stall_seconds"],
+            "stall_threshold_seconds": runner["stall_threshold_seconds"],
+            "heartbeat_state": "stalled" if runner["stalled"] else ("running" if runner_alive and loop_should_run else "idle"),
+            "runner_source": "observer_heartbeat",
+        }
+
+    def _runtime_status_surface() -> dict[str, dict[str, object]]:
+        now = _now_iso()
+        runner_state = _autonomy_runner_stall_payload()
+        service = _service_status_payload(now=now, runner_state=runner_state)
+        autonomy = _autonomy_status_payload(service_payload=service, runner_state=runner_state)
+        return {
+            "service": service,
+            "autonomy": autonomy,
         }
 
     @asynccontextmanager
@@ -371,17 +386,58 @@ def create_app(
             except FileNotFoundError:
                 session_payload = None
         recent_actions = controller.console_recent_actions()
+        status_surface = _runtime_status_surface()
         return _json_safe(
             {
                 "session": session_payload,
-                "state": controller.state_payload(),
-                "service": _service_status_payload(),
-                "autonomy": _autonomy_status_payload(),
+                "state": _state_payload_with_canonical(status_surface=status_surface),
+                "service": status_surface["service"],
+                "autonomy": status_surface["autonomy"],
                 "recent_actions": recent_actions.get("actions", []),
                 "recent_actions_message": recent_actions.get("message", ""),
                 "probability_space": controller.console_probability_space(),
             }
         )
+
+    def _canonical_read_model(
+        round_id: int | None = None,
+        *,
+        status_surface: dict[str, dict[str, object]] | None = None,
+        console_payload: dict | None = None,
+    ) -> dict:
+        effective_status_surface = status_surface or _runtime_status_surface()
+        effective_console_payload = console_payload or controller.console_refresh_payload(round_id)
+        return _json_safe(
+            {
+                "service": effective_status_surface["service"],
+                "autonomy": effective_status_surface["autonomy"],
+                "current_round": dict(effective_console_payload.get("state", {}).get("current_round", {}) or {}),
+                "controls": effective_console_payload.get("controls", controller.controls_current()),
+                "alerts": effective_console_payload.get(
+                    "alerts",
+                    {
+                        "rules": controller.alert_rules_payload(),
+                        "history": controller.alert_history_payload(),
+                    },
+                ),
+                "dashboards": effective_console_payload.get("dashboards", controller.dashboards_current()),
+            }
+        )
+
+    def _state_payload_with_canonical(
+        round_id: int | None = None,
+        *,
+        status_surface: dict[str, dict[str, object]] | None = None,
+        console_payload: dict | None = None,
+    ) -> dict:
+        payload = controller.state_payload()
+        payload.update(_canonical_read_model(round_id, status_surface=status_surface, console_payload=console_payload))
+        return payload
+
+    def _console_refresh_with_canonical(round_id: int | None = None) -> dict:
+        payload = controller.console_refresh_payload(round_id)
+        payload.update(_canonical_read_model(round_id, console_payload=payload))
+        return payload
 
     def _skipped_console_refresh_payload(reason: str) -> dict:
         summary = "前台对话进行中，本次内源刷新已让路。"
@@ -408,13 +464,11 @@ def create_app(
 
     @app.get("/state")
     async def state() -> dict:
-        payload = controller.state_payload()
-        payload["service"] = _service_status_payload()
-        return payload
+        return _state_payload_with_canonical()
 
     @app.get("/service/status")
     async def service_status() -> dict:
-        return _service_status_payload()
+        return _runtime_status_surface()["service"]
 
     @app.get("/console/state")
     async def console_state() -> dict:
@@ -450,7 +504,7 @@ def create_app(
 
     @app.get("/console/refresh")
     async def console_refresh(round_id: int | None = None) -> dict:
-        return await _run_readonly_async(controller.console_refresh_payload, round_id)
+        return await _run_readonly_async(_console_refresh_with_canonical, round_id)
 
     @app.get("/console/recent-actions")
     async def console_recent_actions(limit: int = 8) -> dict:
@@ -486,7 +540,7 @@ def create_app(
             return {
                 "assistant": assistant,
                 "session": session,
-                "console": controller.console_refresh_payload(),
+                "console": _console_refresh_with_canonical(),
             }
 
         return await _run_serialized_async(_console_talk_payload)
@@ -564,7 +618,9 @@ def create_app(
                 controller._save_state(state, sync=True)
             _ensure_autonomy_runner()
             runtime_payload = _runtime_payload(session_id, light_session=False)
-            runtime_payload["autonomy"] = _autonomy_status_payload()
+            status_surface = _runtime_status_surface()
+            runtime_payload["service"] = status_surface["service"]
+            runtime_payload["autonomy"] = status_surface["autonomy"]
             return runtime_payload
 
         return await _run_serialized_async(_web_runtime_start_payload)
@@ -572,7 +628,6 @@ def create_app(
     @app.get("/web/runtime/bootstrap")
     async def web_runtime_bootstrap() -> dict:
         def _web_runtime_bootstrap_payload() -> dict:
-            _ensure_autonomy_runner()
             try:
                 session_payload = _light_session_state_payload(OBSERVER_MAIN_SESSION_ID)
                 session_attached = True
@@ -580,10 +635,11 @@ def create_app(
                 session_payload = None
                 session_attached = False
             recent_actions = controller.console_recent_actions()
+            status_surface = _runtime_status_surface()
             return _json_safe(
                 {
-                    "service": _service_status_payload(),
-                    "autonomy": _autonomy_status_payload(),
+                    "service": status_surface["service"],
+                    "autonomy": status_surface["autonomy"],
                     "session": session_payload,
                     "session_attached": session_attached,
                     "recent_actions": recent_actions.get("actions", []),
@@ -600,7 +656,9 @@ def create_app(
             controller.stop_autonomy(reason=reason)
             _stop_autonomy_runner(wait=True)
             runtime_payload = _runtime_payload(OBSERVER_MAIN_SESSION_ID, light_session=False)
-            runtime_payload["autonomy"] = _autonomy_status_payload()
+            status_surface = _runtime_status_surface()
+            runtime_payload["service"] = status_surface["service"]
+            runtime_payload["autonomy"] = status_surface["autonomy"]
             return runtime_payload
 
         return await _run_serialized_async(_web_runtime_pause_payload)
@@ -613,7 +671,9 @@ def create_app(
             except FileNotFoundError as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
             runtime_payload = _runtime_payload(OBSERVER_MAIN_SESSION_ID, light_session=False)
-            runtime_payload["autonomy"] = _autonomy_status_payload()
+            status_surface = _runtime_status_surface()
+            runtime_payload["service"] = status_surface["service"]
+            runtime_payload["autonomy"] = status_surface["autonomy"]
             return runtime_payload
 
         return await _run_serialized_async(_web_runtime_resume_payload)
@@ -623,7 +683,9 @@ def create_app(
         def _web_runtime_wake_payload() -> dict:
             controller.apply_command("mode set interactive")
             runtime_payload = _runtime_payload(OBSERVER_MAIN_SESSION_ID, light_session=False)
-            runtime_payload["autonomy"] = _autonomy_status_payload()
+            status_surface = _runtime_status_surface()
+            runtime_payload["service"] = status_surface["service"]
+            runtime_payload["autonomy"] = status_surface["autonomy"]
             return runtime_payload
 
         return await _run_serialized_async(_web_runtime_wake_payload)
@@ -729,7 +791,7 @@ def create_app(
             round_id = tick_payload.get("round_id")
             return {
                 "tick": tick_payload,
-                "console": controller.console_refresh_payload(round_id),
+                "console": _console_refresh_with_canonical(round_id),
             }
 
         return await _run_serialized_async(_console_endogenous_tick_payload)
@@ -788,7 +850,7 @@ def create_app(
             transcript_sync_offsets.clear()
             return _json_safe(
                 {
-                    "state": controller.state_payload(),
+                    "state": _state_payload_with_canonical(),
                     "autonomy": _autonomy_status_payload(),
                     "recent_actions": controller.console_recent_actions().get("actions", []),
                     "probability_space": controller.console_probability_space(),
@@ -862,6 +924,13 @@ def create_app(
         except FileNotFoundError as exc:
             return controller.empty_trace_payload(round_id)
 
+    @app.get("/trace/layer-chain/{round_ref}")
+    async def trace_layer_chain(round_ref: str) -> dict:
+        try:
+            return controller.layer_chain(round_ref)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.get("/why/{round_id}")
     async def why(round_id: int) -> dict:
         try:
@@ -891,6 +960,14 @@ def create_app(
     @app.get("/metrics/summary")
     async def metrics_summary() -> dict:
         return controller.metrics_summary()
+
+    @app.get("/metrics/cognitive")
+    async def cognitive_metrics() -> dict:
+        return controller.cognitive_metrics()
+
+    @app.get("/metrics/feedback")
+    async def feedback_metrics() -> dict:
+        return controller.feedback_metrics()
 
     @app.get("/metrics/authenticity")
     async def authenticity_metrics() -> dict:
@@ -1073,6 +1150,15 @@ def create_app(
         except FileNotFoundError as exc:
             return controller.empty_replay_payload(round_id, seed=seed)
 
+    @app.get("/replay/layer/{round_id}/{layer}")
+    async def replay_layer(round_id: int, layer: str) -> dict:
+        try:
+            return controller.replay_layer(round_id, layer)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.get("/replay/motivation/{round_id}")
     async def replay_motivation(round_id: int) -> dict:
         try:
@@ -1097,6 +1183,68 @@ def create_app(
             return controller.why_not(round_id, action)
         except FileNotFoundError as exc:
             return controller.empty_why_not_payload(action=action, round_ref=round_id)
+
+    @app.get("/controls/current")
+    async def controls_current() -> dict:
+        return controller.controls_current()
+
+    @app.post("/controls/fuses/{layer}")
+    async def controls_fuse_apply(layer: str, payload: dict = Body(default={})):  # type: ignore[valid-type]
+        reason = str(payload.get("reason") or "")
+        patch = {key: value for key, value in dict(payload).items() if key in {"mode", "throttle", "muted"}}
+        try:
+            return controller.apply_layer_fuse(layer, patch, reason=reason)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/controls/fuses/{layer}/restore")
+    async def controls_fuse_restore(layer: str, payload: dict = Body(default={})):  # type: ignore[valid-type]
+        reason = str(payload.get("reason") or "")
+        try:
+            return controller.restore_layer_fuse(layer, reason=reason)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/controls/proposals")
+    async def controls_proposals() -> dict:
+        return controller.controls_proposals()
+
+    @app.post("/controls/proposals")
+    async def controls_proposal_create(payload: dict = Body(default={})):  # type: ignore[valid-type]
+        proposal = controller.create_control_proposal(payload)
+        return {"proposal": proposal, "current": controller.controls_current()}
+
+    @app.post("/controls/proposals/{proposal_id}/apply")
+    async def controls_proposal_apply(proposal_id: str, payload: dict = Body(default={})):  # type: ignore[valid-type]
+        approved = bool(payload.get("approved", True))
+        try:
+            proposal = controller.apply_control_proposal(proposal_id, approved=approved)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"proposal": proposal, "current": controller.controls_current()}
+
+    @app.post("/controls/proposals/{proposal_id}/promote")
+    async def controls_proposal_promote(proposal_id: str, payload: dict = Body(default={})):  # type: ignore[valid-type]
+        del payload
+        try:
+            proposal = controller.promote_control_proposal(proposal_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"proposal": proposal, "current": controller.controls_current()}
+
+    @app.get("/alerts/rules")
+    async def alerts_rules() -> dict:
+        return controller.alert_rules_payload()
+
+    @app.get("/alerts/history")
+    async def alerts_history() -> dict:
+        return controller.alert_history_payload()
+
+    @app.get("/dashboards/current")
+    async def dashboards_current() -> dict:
+        return controller.dashboards_current()
 
     dashboard_path = project_root_path / "services" / "observer" / "dashboard" / "index.html"
     if not dashboard_path.exists():

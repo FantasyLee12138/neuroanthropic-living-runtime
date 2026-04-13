@@ -27,21 +27,27 @@ def test_acceptance_runner_plan_matches_documented_key_checks():
     checks = module.build_checks()
     plan = module.render_plan(checks)
 
-    assert [check.group for check in checks[:8]] == ["local-client"] * 8
-    assert [check.group for check in checks[8:10]] == ["observer"] * 2
-    assert [check.group for check in checks[10:13]] == ["runtime"] * 3
-    assert [check.group for check in checks[13:18]] == ["controlled-learning"] * 5
-    assert [check.group for check in checks[18:]] == ["self-hosted"] * 3
+    assert [check.group for check in checks[:9]] == ["local-client"] * 9
+    assert [check.group for check in checks[9:11]] == ["observer"] * 2
+    assert [check.group for check in checks[11:16]] == ["runtime"] * 5
+    assert [check.group for check in checks[16:21]] == ["controlled-learning"] * 5
+    assert [check.group for check in checks[21:]] == ["self-hosted"] * 5
     assert "zsh" in plan
     assert "Open_NALR_Workbench.command" in plan
     assert "--help" in plan
     assert "tests/unit/test_local_client_packager.py" in plan
     assert "local_client_packager.py" in plan
     assert "cd apps/terminal && npm test" in plan
+    assert "tests/unit/test_remote_terminal_static_contract.py" in plan
     assert "tests/integration/test_observer_api.py" in plan
     assert "tests/unit/test_tlh_runtime.py" in plan
+    assert "tests/unit/test_trace_store.py" in plan
+    assert "tests/unit/test_feedback_loop.py" in plan
     assert "tests/integration/test_observer_learning_settings.py" in plan
     assert "tests/unit/test_release_acceptance_report.py" in plan
+    assert "tests/unit/test_self_hosted_24h_soak.py" in plan
+    assert "Release acceptance report parity gate" in plan
+    assert "six_layer or replay_layer or control_proposal or observer_parity" in plan
     assert "tests/unit/test_terminal_bridge.py" in plan
     assert "tests/integration/test_terminal_bridge_stdio.py" in plan
     assert "eval acceptance-report --window 12" in plan

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import inspect
 import json
@@ -44,6 +45,7 @@ from nalr.runtime.longrun import LongRunAnalyzer
 from nalr.runtime.math_kernel import kl_divergence, normalize_distribution, sample_action_name, softmax_distribution
 from nalr.runtime.metadata import iso_date, utc_now_iso
 from nalr.runtime.monologue import MonologueStreamRuntime
+from nalr.runtime.feedback_loop import FeedbackLoopRuntime
 from nalr.runtime.motivation_feedback import MotivationFeedbackUpdater
 from nalr.runtime.motivation_pool import EndogenousMotivationPool
 from nalr.runtime.probability_field import ProbabilityFieldIntegrator, compute_tlh_vector_collapse
@@ -135,6 +137,16 @@ from nalr.trace.store import TraceStore, canonical_probability_field_payload
 
 def _clip(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return max(low, min(high, value))
+
+
+def _deep_merge_dict(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge_dict(result[key], value)
+        else:
+            result[key] = copy.deepcopy(value)
+    return result
 
 
 PIPELINE_TELEMETRY_STAGES: list[str] = [
@@ -280,6 +292,7 @@ class RuntimeController:
         self.probability_integrator = ProbabilityFieldIntegrator()
         self.endogenous_motivation_pool = EndogenousMotivationPool()
         self.motivation_feedback_updater = MotivationFeedbackUpdater()
+        self.feedback_loop_runtime = FeedbackLoopRuntime()
         self.endogenous_scheduler = EndogenousTickScheduler()
         self._pending_endogenous_trigger: EndogenousTickTrigger | None = None
         self._pending_endogenous_trigger_context: EndogenousTriggerContext | None = None
@@ -325,6 +338,18 @@ class RuntimeController:
             path = self.config_root / name
             return yaml.safe_load(path.read_text(encoding="utf-8"))
 
+        def read_runtime_yaml() -> dict[str, Any]:
+            project_path = self.project_root / "config" / "runtime.yaml"
+            config_path = self.config_root / "runtime.yaml"
+            target = project_path if project_path.exists() else config_path
+            if not target.exists():
+                return self._default_runtime_config()
+            payload = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
+            runtime_payload = payload.get("runtime", payload) if isinstance(payload, dict) else {}
+            if not isinstance(runtime_payload, dict):
+                return self._default_runtime_config()
+            return self._normalize_runtime_config(runtime_payload)
+
         temperament_cfg = self._normalize_temperament_config(read_yaml("temperament.yaml"))
         resource_rules = read_yaml("resource_rules.yaml")
         resource_rules.setdefault("resource_defaults", {})
@@ -332,6 +357,7 @@ class RuntimeController:
         resource_rules["resource_defaults"].setdefault("target_burn_ratio", 0.20)
         observer_settings = self._load_observer_settings_file()
         models_cfg = self._apply_observer_settings_to_models(read_yaml("models.yaml"), observer_settings)
+        runtime_cfg = self._apply_observer_runtime_overrides(read_runtime_yaml(), observer_settings)
         return {
             "agents": read_yaml("agents.yaml"),
             "modes": read_yaml("modes.yaml"),
@@ -344,6 +370,7 @@ class RuntimeController:
             "models": models_cfg,
             "identity": read_yaml("identity.yaml"),
             "dream": read_yaml("dream.yaml"),
+            "runtime": runtime_cfg,
             "observer_settings": observer_settings,
         }
 
@@ -438,7 +465,90 @@ class RuntimeController:
                 "agent_model_bindings": {},
                 "model_routes": {},
             },
+            "runtime": {},
         }
+
+    def _default_runtime_config(self) -> dict[str, Any]:
+        return {
+            "layer_controls": {
+                "perception": {"input_sensitivity": 0.58, "salience_gain": 0.62},
+                "memory": {"awakening_threshold": 0.48, "semantic_grounding_bias": 0.6, "working_memory_span": 6},
+                "cognition": {"association_gain": 0.54, "meaning_generation_bias": 0.52},
+                "decision": {"collapse_temperature": 0.46, "autonomy_bias": 0.28},
+                "execution": {"expression_threshold": 0.16, "output_rate_limit_per_minute": 6},
+                "feedback": {"correction_strength": 0.5, "reward_gain": 0.42},
+                "behavior_policies": {
+                    "monologue": {
+                        "grounding_sources": ["memory", "semantic", "working_memory"],
+                        "max_events_per_10m": 3,
+                        "scenario_multipliers": {"interactive": 1.0, "idle": 0.7, "sleep": 0.35},
+                        "silence_when_safe_mode": True,
+                    },
+                    "initiative": {
+                        "trigger_interval_minutes": 10,
+                        "scenario_allowlist": ["interactive", "idle"],
+                        "require_memory_support": 0.2,
+                        "relation_weight": 0.52,
+                        "task_weight": 0.48,
+                    },
+                    "execution": {"burst_suppression_window_seconds": 90, "safe_mode_multiplier": 0.2},
+                },
+            },
+            "layer_fuses": {
+                layer: {"mode": "normal", "throttle": 1.0, "muted": False}
+                for layer in ("perception", "memory", "cognition", "decision", "execution", "feedback")
+            },
+            "dashboards": [
+                {"dashboard_id": "cognitive-chain", "title": "认知链路", "widgets": ["flow", "vector_diff", "layer_metrics"]},
+                {"dashboard_id": "layer-controls", "title": "层级配置", "widgets": ["controls", "approvals"]},
+                {"dashboard_id": "emergency-fuses", "title": "应急熔断", "widgets": ["fuse_state", "recovery"]},
+            ],
+            "alerts": {
+                "rules": [
+                    {
+                        "rule_id": "memory-awakening-low",
+                        "metric": "memory_awakening_rate",
+                        "operator": "<",
+                        "threshold": 0.18,
+                        "window": 5,
+                        "action": "raise_banner",
+                    },
+                    {
+                        "rule_id": "feedback-effectiveness-low",
+                        "metric": "behavior_effectiveness",
+                        "operator": "<",
+                        "threshold": 0.25,
+                        "window": 5,
+                        "action": "suggest_fuse",
+                    },
+                ],
+                "history": [],
+            },
+        }
+
+    def _normalize_runtime_config(self, payload: dict[str, Any] | None) -> dict[str, Any]:
+        defaults = self._default_runtime_config()
+        if not isinstance(payload, dict):
+            return defaults
+        normalized = _deep_merge_dict(defaults, payload)
+        if not isinstance(normalized.get("dashboards"), list):
+            normalized["dashboards"] = copy.deepcopy(defaults["dashboards"])
+        alerts = normalized.get("alerts", {})
+        if not isinstance(alerts, dict):
+            alerts = copy.deepcopy(defaults["alerts"])
+        alerts["rules"] = [item for item in list(alerts.get("rules", []) or []) if isinstance(item, dict)]
+        alerts["history"] = [item for item in list(alerts.get("history", []) or []) if isinstance(item, dict)]
+        normalized["alerts"] = alerts
+        return normalized
+
+    def _apply_observer_runtime_overrides(self, runtime_cfg: dict[str, Any], observer_settings: dict[str, Any]) -> dict[str, Any]:
+        runtime_overlay = observer_settings.get("runtime", {}) if isinstance(observer_settings.get("runtime"), dict) else {}
+        runtime_overlay = {
+            key: value
+            for key, value in dict(runtime_overlay).items()
+            if value not in ({}, [], None)
+        }
+        return self._normalize_runtime_config(_deep_merge_dict(runtime_cfg, runtime_overlay))
 
     def _load_observer_settings_file(self) -> dict[str, Any]:
         defaults = self._default_observer_settings()
@@ -562,6 +672,10 @@ class RuntimeController:
             for key, value in bindings.items()
             if str(value).strip()
         }
+        runtime_overlay = data.get("runtime", {}) if isinstance(data.get("runtime"), dict) else {}
+        defaults["runtime"] = self._normalize_runtime_config(
+            _deep_merge_dict(defaults.get("runtime", {}), runtime_overlay)
+        )
         return defaults
 
     def _normalize_model_config(self, payload: dict[str, Any], *, tier_mode: bool) -> dict[str, Any]:
@@ -630,6 +744,9 @@ class RuntimeController:
 
     def _observer_settings(self) -> dict[str, Any]:
         return self.config.get("observer_settings", self._default_observer_settings())
+
+    def _runtime_config(self) -> dict[str, Any]:
+        return self._normalize_runtime_config(self.config.get("runtime"))
 
     def observer_settings_current(self) -> dict[str, Any]:
         return self._observer_settings()
@@ -1461,7 +1578,47 @@ class RuntimeController:
                 setattr(state, key, value)
         self._sync_tlh_state(state)
 
+    def _recent_control_events(self, state: RuntimeState, *, limit: int = 12) -> list[dict[str, Any]]:
+        raw = state.session_metadata.setdefault("control_events", [])
+        if not isinstance(raw, list):
+            raw = []
+            state.session_metadata["control_events"] = raw
+        normalized = [item for item in raw if isinstance(item, dict)][-limit:]
+        state.session_metadata["control_events"] = normalized
+        return normalized
+
+    def _record_control_event(self, state: RuntimeState, event: dict[str, Any]) -> None:
+        events = self._recent_control_events(state, limit=12)
+        events.append(event)
+        state.session_metadata["control_events"] = events[-12:]
+
+    def _ensure_runtime_control_state(self, state: RuntimeState) -> None:
+        runtime_cfg = self._runtime_config()
+        state.layer_controls = _deep_merge_dict(runtime_cfg.get("layer_controls", {}), state.layer_controls or {})
+        state.layer_fuses = _deep_merge_dict(runtime_cfg.get("layer_fuses", {}), state.layer_fuses or {})
+
+        dashboards = [item for item in list(state.dashboard_state.get("dashboards", []) or []) if isinstance(item, dict)]
+        if not dashboards:
+            dashboards = copy.deepcopy(runtime_cfg.get("dashboards", []))
+        proposals = [item for item in list(state.dashboard_state.get("control_proposals", []) or []) if isinstance(item, dict)]
+        state.dashboard_state = {
+            **dict(state.dashboard_state or {}),
+            "dashboards": dashboards,
+            "control_proposals": proposals,
+        }
+
+        rules = [item for item in list(state.alert_state.get("rules", []) or []) if isinstance(item, dict)]
+        if not rules:
+            rules = copy.deepcopy(dict(runtime_cfg.get("alerts", {}) or {}).get("rules", []))
+        history = [item for item in list(state.alert_state.get("history", []) or []) if isinstance(item, dict)]
+        state.alert_state = {
+            **dict(state.alert_state or {}),
+            "rules": rules,
+            "history": history[-50:],
+        }
+
     def _sync_tlh_state(self, state: RuntimeState) -> None:
+        self._ensure_runtime_control_state(state)
         state.body_state.energy = round(_clip(float(state.body_energy), 0.0, 1.0), 4)
         state.body_state.fatigue = state.fatigue = round(_clip(float(state.fatigue), 0.0, 1.0), 4)
         state.body_state.memory_fragments = state.memory_fragments = round(_clip(float(state.memory_fragments), 0.0, 1.0), 4)
@@ -3125,16 +3282,6 @@ class RuntimeController:
                     "high_disclosure_sensitivity",
                     "high_authenticity_risk",
                 ],
-            },
-            "task_run": {
-                "latency_budget_ms": 1200,
-                "entry_mode": "interactive",
-                "hot_path": "supervisor_run",
-                "explicit_route": "planner",
-                "default_tier": self._agent_tier("planner"),
-                "primary_agents": ["planner", "PFCAgent"],
-                "escalates_to": ["large_model"],
-                "upgrade_conditions": ["planner_complexity_high", "relation_risk_high"],
             },
             "endogenous_light": {
                 "latency_budget_ms": 300,
@@ -6793,12 +6940,12 @@ class RuntimeController:
         if route == "fast_chat":
             return "chat_fast"
         if route == "task_run":
-            return "task_run"
+            return "chat_deep"
         endogenous_route = self._endogenous_route_type(mode)
         if endogenous_route:
             return endogenous_route
         if scenario == "task":
-            return "task_run"
+            return "chat_deep"
         return self._direct_chat_route_type(text, probe=probe)
 
     def _runtime_route_type_for_round(
@@ -6815,7 +6962,7 @@ class RuntimeController:
         if endogenous_route:
             return endogenous_route
         if scenario == "task":
-            return "task_run"
+            return "chat_deep"
         return self._direct_chat_route_type(
             event.content,
             probe=probe,
@@ -7183,14 +7330,14 @@ class RuntimeController:
         )
         return TurnExecution(
             route="task_run",
-            route_type=plan.route_type or "task_run",
+            route_type=plan.route_type or "chat_deep",
             assistant_preamble=self._task_turn_message(run_details["run"]),
             assistant_final=self._task_turn_message(run_details["run"]),
             run=run_details["run"],
             explain=run_details["explain"],
             steps=run_details["steps"],
             tools=run_details["tools"],
-            payload={"reason": plan.reason, "top_action": plan.top_action, "route_type": plan.route_type or "task_run"},
+            payload={"reason": plan.reason, "top_action": plan.top_action, "route_type": plan.route_type or "chat_deep"},
         )
 
     def probe_terminal_route(
@@ -9094,6 +9241,11 @@ class RuntimeController:
             )
         trace.motivation_pool = self.endogenous_motivation_pool.trace_payload(motivation_pool_state)
         trace.motivation_feedback = motivation_feedback_payload
+        trace.feedback_loop = self.feedback_loop_runtime.evaluate(
+            trace_payload=to_dict(trace),
+            control_events=self._recent_control_events(state, limit=12),
+            layer_fuses=state.layer_fuses,
+        )
         if latest_trigger is None:
             latest_trigger = (
                 state.endogenous_scheduler_state.recent_triggers[-1]
@@ -9112,6 +9264,20 @@ class RuntimeController:
         trace.state_snapshot = self._trace_state_snapshot_payload(
             state,
             endogenous_turn=endogenous_turn,
+        )
+        trace.control_events = self._recent_control_events(state, limit=12)
+        trace.cognitive_chain = self._build_cognitive_chain(
+            trace_payload=to_dict(trace),
+            state=state,
+            prior_state=prior_state,
+            event=event,
+            context=context,
+            relation_state=relation_state,
+        )
+        trace.layer_metrics = self._build_layer_metrics(
+            trace_payload=to_dict(trace),
+            cognitive_chain=trace.cognitive_chain,
+            control_events=trace.control_events,
         )
         return {
             "trace": trace,
@@ -9739,12 +9905,503 @@ class RuntimeController:
         payload["display_name"] = payload.get("display_name") or self._unnamed_label()
         return payload
 
+    def _runtime_config_path(self) -> Path:
+        return self.project_root / "config" / "runtime.yaml"
+
+    def _runtime_config_payload_from_state(self, state: RuntimeState) -> dict[str, Any]:
+        self._ensure_runtime_control_state(state)
+        return {
+            "runtime": self._normalize_runtime_config(
+                {
+                    "layer_controls": state.layer_controls,
+                    "layer_fuses": state.layer_fuses,
+                    "dashboards": state.dashboard_state.get("dashboards", []),
+                    "alerts": {
+                        "rules": state.alert_state.get("rules", []),
+                        "history": [],
+                    },
+                }
+            )
+        }
+
+    def _metric_window_snapshot(self, metric_name: str, *, window: int = 5) -> dict[str, Any]:
+        self.trace_store.flush(raise_on_error=False)
+        recent_rounds = self.trace_store.list_rounds()[-max(1, int(window or 1)) :]
+        values: list[float] = []
+        latest_round_id: int | None = None
+        for row in recent_rounds:
+            try:
+                latest_round_id = int(row.get("round_id", 0) or 0)
+            except (TypeError, ValueError):
+                latest_round_id = latest_round_id
+            layer_metrics = dict(row.get("layer_metrics", {}) or {})
+            for group_name in ("existing", "cognitive", "feedback"):
+                metric_group = dict(layer_metrics.get(group_name, {}) or {})
+                if metric_name not in metric_group:
+                    continue
+                try:
+                    values.append(float(metric_group.get(metric_name, 0.0) or 0.0))
+                except (TypeError, ValueError):
+                    continue
+                break
+        return {
+            "metric": metric_name,
+            "window": max(1, int(window or 1)),
+            "samples": len(values),
+            "observed": round(sum(values) / len(values), 4) if values else None,
+            "round_id": latest_round_id,
+        }
+
+    def _alert_operator_match(self, observed: float | None, operator: str, threshold: float) -> bool:
+        if observed is None:
+            return False
+        normalized_operator = str(operator or "").strip() or "<"
+        if normalized_operator == "<":
+            return observed < threshold
+        if normalized_operator == "<=":
+            return observed <= threshold
+        if normalized_operator == ">":
+            return observed > threshold
+        if normalized_operator == ">=":
+            return observed >= threshold
+        if normalized_operator == "==":
+            return observed == threshold
+        if normalized_operator == "!=":
+            return observed != threshold
+        return False
+
+    def _suggested_fuse_layer(self, metric_name: str) -> str:
+        normalized = str(metric_name or "").strip().lower()
+        if any(token in normalized for token in ("memory", "grounding", "working")):
+            return "memory"
+        if any(token in normalized for token in ("feedback", "effectiveness", "reward")):
+            return "feedback"
+        if any(token in normalized for token in ("meaning", "association", "semantic", "cognitive")):
+            return "cognition"
+        if any(token in normalized for token in ("collapse", "initiative", "probability", "conflict")):
+            return "decision"
+        return "execution"
+
+    def _refresh_alert_state(self, state: RuntimeState) -> bool:
+        self._sync_tlh_state(state)
+        rules = [item for item in list(state.alert_state.get("rules", []) or []) if isinstance(item, dict)]
+        if not rules:
+            rules = copy.deepcopy(dict(self._runtime_config().get("alerts", {}) or {}).get("rules", []))
+        history = [item for item in list(state.alert_state.get("history", []) or []) if isinstance(item, dict)]
+        evaluated_rules: list[dict[str, Any]] = []
+        changed = False
+        for rule in rules:
+            metric = str(rule.get("metric") or "").strip()
+            operator = str(rule.get("operator") or "<").strip() or "<"
+            try:
+                threshold = float(rule.get("threshold", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                threshold = 0.0
+            try:
+                window = max(1, int(rule.get("window", 1) or 1))
+            except (TypeError, ValueError):
+                window = 1
+            snapshot = self._metric_window_snapshot(metric, window=window)
+            observed = snapshot["observed"]
+            triggered = self._alert_operator_match(observed, operator, threshold)
+            evaluated_rule = {
+                **copy.deepcopy(rule),
+                "observed": observed,
+                "samples": snapshot["samples"],
+                "round_id": snapshot["round_id"],
+                "triggered": triggered,
+                "suggested_layer": self._suggested_fuse_layer(metric),
+            }
+            evaluated_rules.append(evaluated_rule)
+            if not triggered:
+                continue
+            dedupe_key = (
+                str(rule.get("rule_id") or ""),
+                int(snapshot["round_id"] or 0),
+                operator,
+                round(threshold, 6),
+            )
+            if any(
+                (
+                    str(item.get("rule_id") or ""),
+                    int(item.get("round_id", 0) or 0),
+                    str(item.get("operator") or ""),
+                    round(float(item.get("threshold", 0.0) or 0.0), 6),
+                )
+                == dedupe_key
+                for item in history
+            ):
+                continue
+            recorded_at = utc_now_iso()
+            entry = {
+                "alert_id": f"alert-{uuid4().hex[:12]}",
+                "rule_id": str(rule.get("rule_id") or metric or "alert-rule"),
+                "metric": metric,
+                "operator": operator,
+                "threshold": threshold,
+                "observed": observed,
+                "window": window,
+                "samples": snapshot["samples"],
+                "round_id": snapshot["round_id"],
+                "action": str(rule.get("action") or ""),
+                "suggested_layer": self._suggested_fuse_layer(metric),
+                "recorded_at": recorded_at,
+                "status": "triggered",
+            }
+            history.append(entry)
+            self._record_control_event(
+                state,
+                {
+                    "event_type": "alert_triggered",
+                    "rule_id": entry["rule_id"],
+                    "metric": metric,
+                    "round_id": snapshot["round_id"],
+                    "recorded_at": recorded_at,
+                    "suggested_layer": entry["suggested_layer"],
+                },
+            )
+            changed = True
+        if evaluated_rules != list(state.alert_state.get("rules", []) or []):
+            changed = True
+        if history[-100:] != list(state.alert_state.get("history", []) or []):
+            changed = True
+        state.alert_state = {
+            **dict(state.alert_state or {}),
+            "rules": evaluated_rules,
+            "history": history[-100:],
+        }
+        return changed
+
+    def _normalize_layer_fuse_payload(self, payload: dict[str, Any], *, base: dict[str, Any] | None = None) -> dict[str, Any]:
+        merged = _deep_merge_dict(base or {"mode": "normal", "throttle": 1.0, "muted": False}, payload or {})
+        mode = str(merged.get("mode") or "normal").strip() or "normal"
+        if mode not in {"normal", "degraded", "muted"}:
+            mode = "normal"
+        try:
+            throttle = float(merged.get("throttle", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            throttle = 1.0
+        return {
+            "mode": mode,
+            "throttle": round(_clip(throttle), 4),
+            "muted": bool(merged.get("muted", False)),
+        }
+
+    def controls_current(self) -> dict[str, Any]:
+        state = self.load_runtime_state()
+        self._sync_tlh_state(state)
+        if self._refresh_alert_state(state):
+            self._save_state(state, sync=True)
+        return {
+            "layer_controls": copy.deepcopy(state.layer_controls),
+            "layer_fuses": copy.deepcopy(state.layer_fuses),
+            "dashboards": copy.deepcopy(state.dashboard_state.get("dashboards", [])),
+            "alerts": {
+                "rules": copy.deepcopy(state.alert_state.get("rules", [])),
+                "history": copy.deepcopy(state.alert_state.get("history", [])),
+            },
+            "proposals": copy.deepcopy(state.dashboard_state.get("control_proposals", [])),
+            "recent_control_events": copy.deepcopy(self._recent_control_events(state)),
+            "storage": self._trace_storage_payload(),
+        }
+
+    def controls_proposals(self) -> dict[str, Any]:
+        state = self.load_runtime_state()
+        self._sync_tlh_state(state)
+        return {
+            "proposals": copy.deepcopy(state.dashboard_state.get("control_proposals", [])),
+            "storage": self._trace_storage_payload(),
+        }
+
+    def _proposal_by_id(self, state: RuntimeState, proposal_id: str) -> dict[str, Any]:
+        self._sync_tlh_state(state)
+        proposals = state.dashboard_state.setdefault("control_proposals", [])
+        for proposal in proposals:
+            if str(proposal.get("proposal_id") or "") == proposal_id:
+                return proposal
+        raise FileNotFoundError(f"control proposal {proposal_id} not found")
+
+    def create_control_proposal(self, payload: dict[str, Any]) -> dict[str, Any]:
+        state = self.load_runtime_state()
+        self._sync_tlh_state(state)
+        before_hash = self._state_hash(state)
+        recorded_at = utc_now_iso()
+        proposal = {
+            "proposal_id": f"ctl-{uuid4().hex[:12]}",
+            "title": str(payload.get("title") or "Layer control proposal").strip() or "Layer control proposal",
+            "target": str(payload.get("target") or "runtime").strip() or "runtime",
+            "patch": copy.deepcopy(dict(payload.get("patch", {}) or {})),
+            "status": "pending",
+            "created_at": recorded_at,
+            "approved": None,
+            "approved_at": None,
+            "promoted_at": None,
+        }
+        state.dashboard_state.setdefault("control_proposals", []).append(proposal)
+        self._record_control_event(
+            state,
+            {
+                "event_type": "proposal_created",
+                "proposal_id": proposal["proposal_id"],
+                "target": proposal["target"],
+                "recorded_at": recorded_at,
+            },
+        )
+        self._save_state(state, sync=True)
+        self.trace_store.append_command(
+            f"controls proposal create {proposal['proposal_id']}",
+            CommandResult(
+                applied=True,
+                scope="controls",
+                delta={"proposal_id": proposal["proposal_id"], "status": proposal["status"]},
+                operator_level="soft_intervene",
+                mutation_scope="controls",
+                rollback_available=False,
+            ),
+            before_hash,
+            self._state_hash(state),
+            session_id=state.session_id,
+            recorded_at=recorded_at,
+            sync=True,
+        )
+        return copy.deepcopy(proposal)
+
+    def apply_control_proposal(self, proposal_id: str, *, approved: bool = True) -> dict[str, Any]:
+        state = self.load_runtime_state()
+        self._sync_tlh_state(state)
+        before_hash = self._state_hash(state)
+        proposal = self._proposal_by_id(state, proposal_id)
+        recorded_at = utc_now_iso()
+        proposal["approved"] = bool(approved)
+        proposal["approved_at"] = recorded_at
+        proposal["status"] = "applied" if approved else "rejected"
+        if approved:
+            patch = dict(proposal.get("patch", {}) or {})
+            known_layers = {"perception", "memory", "cognition", "decision", "execution", "feedback", "behavior_policies"}
+            control_patch = {key: value for key, value in patch.items() if key in known_layers}
+            if control_patch:
+                state.layer_controls = _deep_merge_dict(state.layer_controls, control_patch)
+            elif proposal.get("target") in known_layers:
+                state.layer_controls[str(proposal.get("target"))] = _deep_merge_dict(
+                    dict(state.layer_controls.get(str(proposal.get("target")), {}) or {}),
+                    patch,
+                )
+            if isinstance(patch.get("layer_fuses"), dict):
+                state.layer_fuses = _deep_merge_dict(state.layer_fuses, dict(patch["layer_fuses"]))
+            if isinstance(patch.get("dashboards"), list):
+                state.dashboard_state["dashboards"] = [item for item in patch["dashboards"] if isinstance(item, dict)]
+            if isinstance(patch.get("alerts"), dict):
+                state.alert_state = _deep_merge_dict(state.alert_state, dict(patch["alerts"]))
+        self._refresh_alert_state(state)
+        self._record_control_event(
+            state,
+            {
+                "event_type": "proposal_applied" if approved else "proposal_rejected",
+                "proposal_id": proposal_id,
+                "target": proposal.get("target"),
+                "recorded_at": recorded_at,
+            },
+        )
+        self._save_state(state, sync=True)
+        self.trace_store.append_command(
+            f"controls proposal apply {proposal_id}",
+            CommandResult(
+                applied=bool(approved),
+                scope="controls",
+                delta={"proposal_id": proposal_id, "status": proposal["status"]},
+                operator_level="soft_intervene",
+                mutation_scope="controls",
+                rollback_available=False,
+            ),
+            before_hash,
+            self._state_hash(state),
+            session_id=state.session_id,
+            recorded_at=recorded_at,
+            sync=True,
+        )
+        return copy.deepcopy(proposal)
+
+    def promote_control_proposal(self, proposal_id: str) -> dict[str, Any]:
+        state = self.load_runtime_state()
+        self._sync_tlh_state(state)
+        before_hash = self._state_hash(state)
+        proposal = self._proposal_by_id(state, proposal_id)
+        if str(proposal.get("status") or "") != "applied":
+            raise ValueError(f"control proposal {proposal_id} must be applied before promote")
+        recorded_at = utc_now_iso()
+        proposal["status"] = "promoted"
+        proposal["promoted_at"] = recorded_at
+        runtime_path = self._runtime_config_path()
+        runtime_path.parent.mkdir(parents=True, exist_ok=True)
+        runtime_payload = self._runtime_config_payload_from_state(state)
+        runtime_path.write_text(yaml.safe_dump(runtime_payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        self.refresh_runtime_components_from_config()
+        self._refresh_alert_state(state)
+        self._record_control_event(
+            state,
+            {
+                "event_type": "proposal_promoted",
+                "proposal_id": proposal_id,
+                "target": proposal.get("target"),
+                "recorded_at": recorded_at,
+                "runtime_path": str(runtime_path),
+            },
+        )
+        self._save_state(state, sync=True)
+        self.trace_store.append_command(
+            f"controls proposal promote {proposal_id}",
+            CommandResult(
+                applied=True,
+                scope="controls",
+                delta={"proposal_id": proposal_id, "status": proposal["status"], "runtime_path": str(runtime_path)},
+                operator_level="soft_intervene",
+                mutation_scope="controls",
+                rollback_available=False,
+            ),
+            before_hash,
+            self._state_hash(state),
+            session_id=state.session_id,
+            recorded_at=recorded_at,
+            sync=True,
+        )
+        return copy.deepcopy(proposal)
+
+    def alert_rules_payload(self) -> dict[str, Any]:
+        state = self.load_runtime_state()
+        self._sync_tlh_state(state)
+        if self._refresh_alert_state(state):
+            self._save_state(state, sync=True)
+        rules = [item for item in list(state.alert_state.get("rules", []) or []) if isinstance(item, dict)]
+        return {
+            "rules": copy.deepcopy(rules),
+            "storage": self._trace_storage_payload(),
+        }
+
+    def alert_history_payload(self) -> dict[str, Any]:
+        state = self.load_runtime_state()
+        self._sync_tlh_state(state)
+        if self._refresh_alert_state(state):
+            self._save_state(state, sync=True)
+        return {
+            "history": copy.deepcopy(state.alert_state.get("history", [])),
+            "storage": self._trace_storage_payload(),
+        }
+
+    def dashboards_current(self) -> dict[str, Any]:
+        state = self.load_runtime_state()
+        self._sync_tlh_state(state)
+        if self._refresh_alert_state(state):
+            self._save_state(state, sync=True)
+        dashboards = [item for item in list(state.dashboard_state.get("dashboards", []) or []) if isinstance(item, dict)]
+        if not dashboards:
+            dashboards = copy.deepcopy(self._runtime_config().get("dashboards", []))
+        return {
+            "dashboards": copy.deepcopy(dashboards),
+            "storage": self._trace_storage_payload(),
+        }
+
+    def apply_layer_fuse(self, layer: str, payload: dict[str, Any], *, reason: str = "") -> dict[str, Any]:
+        normalized_layer = str(layer or "").strip().lower()
+        if normalized_layer not in self._chain_layers():
+            raise ValueError(f"unknown layer: {layer}")
+        state = self.load_runtime_state()
+        self._sync_tlh_state(state)
+        before_hash = self._state_hash(state)
+        recorded_at = utc_now_iso()
+        current = dict(state.layer_fuses.get(normalized_layer, {}) or {})
+        updated = self._normalize_layer_fuse_payload(dict(payload or {}), base=current)
+        state.layer_fuses[normalized_layer] = updated
+        self._refresh_alert_state(state)
+        rollback_token = f"restore:{normalized_layer}:{uuid4().hex[:8]}"
+        self._record_control_event(
+            state,
+            {
+                "event_type": "fuse_engaged",
+                "layer": normalized_layer,
+                "reason": str(reason or ""),
+                "recorded_at": recorded_at,
+                "rollback_token": rollback_token,
+                "fuse": copy.deepcopy(updated),
+            },
+        )
+        self._save_state(state, sync=True)
+        self.trace_store.append_command(
+            f"controls fuse engage {normalized_layer}",
+            CommandResult(
+                applied=True,
+                scope="controls",
+                delta={"layer": normalized_layer, "fuse": updated, "rollback_token": rollback_token},
+                operator_level="soft_intervene",
+                mutation_scope="controls",
+                rollback_available=True,
+            ),
+            before_hash,
+            self._state_hash(state),
+            session_id=state.session_id,
+            recorded_at=recorded_at,
+            sync=True,
+        )
+        return {
+            "layer": normalized_layer,
+            "layer_fuses": copy.deepcopy(state.layer_fuses),
+            "recent_control_events": copy.deepcopy(self._recent_control_events(state)),
+            "rollback_token": rollback_token,
+            "storage": self._trace_storage_payload(),
+        }
+
+    def restore_layer_fuse(self, layer: str, *, reason: str = "") -> dict[str, Any]:
+        normalized_layer = str(layer or "").strip().lower()
+        if normalized_layer not in self._chain_layers():
+            raise ValueError(f"unknown layer: {layer}")
+        state = self.load_runtime_state()
+        self._sync_tlh_state(state)
+        before_hash = self._state_hash(state)
+        recorded_at = utc_now_iso()
+        baseline = dict(dict(self._runtime_config().get("layer_fuses", {}) or {}).get(normalized_layer, {}) or {})
+        restored = self._normalize_layer_fuse_payload({"mode": "normal", "throttle": 1.0, "muted": False}, base=baseline)
+        state.layer_fuses[normalized_layer] = restored
+        self._refresh_alert_state(state)
+        self._record_control_event(
+            state,
+            {
+                "event_type": "fuse_restored",
+                "layer": normalized_layer,
+                "reason": str(reason or ""),
+                "recorded_at": recorded_at,
+                "fuse": copy.deepcopy(restored),
+            },
+        )
+        self._save_state(state, sync=True)
+        self.trace_store.append_command(
+            f"controls fuse restore {normalized_layer}",
+            CommandResult(
+                applied=True,
+                scope="controls",
+                delta={"layer": normalized_layer, "fuse": restored},
+                operator_level="soft_intervene",
+                mutation_scope="controls",
+                rollback_available=False,
+            ),
+            before_hash,
+            self._state_hash(state),
+            session_id=state.session_id,
+            recorded_at=recorded_at,
+            sync=True,
+        )
+        return {
+            "layer": normalized_layer,
+            "layer_fuses": copy.deepcopy(state.layer_fuses),
+            "recent_control_events": copy.deepcopy(self._recent_control_events(state)),
+            "storage": self._trace_storage_payload(),
+        }
+
     def observer_settings_payload(self) -> dict[str, Any]:
         settings = self._observer_settings()
         return {
             "identity": self.identity_payload(),
             "autonomy": settings.get("autonomy", {}),
             "newborn": settings.get("newborn", {}),
+            "runtime": self._runtime_config(),
             "models": {
                 "supported_backends": list(settings.get("models", {}).get("supported_backends", [])),
                 "provider_endpoints": dict(settings.get("models", {}).get("provider_endpoints", {})),
@@ -12134,6 +12791,7 @@ class RuntimeController:
         enriched = dict(payload)
         enriched.setdefault("motivation_pool", {})
         enriched.setdefault("motivation_feedback", {})
+        enriched.setdefault("feedback_loop", {})
         enriched.setdefault("endogenous_tick_reason", {})
         enriched.setdefault("endogenous_policy_shift", {})
         enriched.setdefault("endogenous_trigger_context", {})
@@ -12144,6 +12802,22 @@ class RuntimeController:
         enriched["cross_layer_coupling_verdict"] = self._cross_layer_coupling_verdict(enriched)
         enriched["renderer_decision_integrity"] = self._renderer_decision_integrity(enriched)
         enriched["conflict_arbitration"] = self._conflict_arbitration_summary(enriched)
+        if not isinstance(enriched.get("feedback_loop"), dict) or not enriched.get("feedback_loop"):
+            enriched["feedback_loop"] = self.feedback_loop_runtime.evaluate(
+                trace_payload=enriched,
+                control_events=list(enriched.get("control_events", []) or []),
+                layer_fuses=dict(enriched.get("state_snapshot", {}).get("layer_fuses", {}) or {}),
+            )
+        if not isinstance(enriched.get("control_events"), list):
+            enriched["control_events"] = []
+        if not isinstance(enriched.get("cognitive_chain"), list) or not enriched.get("cognitive_chain"):
+            enriched["cognitive_chain"] = self._build_cognitive_chain(trace_payload=enriched)
+        if not isinstance(enriched.get("layer_metrics"), dict) or not enriched.get("layer_metrics"):
+            enriched["layer_metrics"] = self._build_layer_metrics(
+                trace_payload=enriched,
+                cognitive_chain=list(enriched.get("cognitive_chain", []) or []),
+                control_events=list(enriched.get("control_events", []) or []),
+            )
         enriched["storage"] = self._trace_storage_payload(read_source=read_source)
         enriched["trace_ref"] = f"round://{enriched['round_id']}"
         dream = self._dream_summary_from_trace(enriched)
@@ -12154,6 +12828,316 @@ class RuntimeController:
             enriched["dream_guard_summary"] = dream["guard_summary"]
             enriched["dream_effect_summary"] = dream["effect_summary"]
         return enriched
+
+    def _chain_layers(self) -> tuple[str, ...]:
+        return ("perception", "memory", "cognition", "decision", "execution", "feedback")
+
+    def _build_cognitive_chain(
+        self,
+        *,
+        trace_payload: dict[str, Any],
+        state: RuntimeState | None = None,
+        prior_state: RuntimeState | None = None,
+        event: RoundEvent | None = None,
+        context: dict[str, Any] | None = None,
+        relation_state: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        snapshot = dict(trace_payload.get("state_snapshot", {}) or {})
+        render_plan = dict(trace_payload.get("render_plan", {}) or {})
+        rendered_expression = dict(trace_payload.get("rendered_expression", {}) or {})
+        appraisal = dict(trace_payload.get("appraisal_snapshot", {}) or {})
+        probability_field = dict(trace_payload.get("probability_field", {}) or {})
+        action_field = dict(probability_field.get("action", {}) or {})
+        conflict = dict(trace_payload.get("conflict_arbitration", {}) or {})
+        motivation_feedback = dict(trace_payload.get("motivation_feedback", {}) or {})
+        feedback_loop = dict(trace_payload.get("feedback_loop", {}) or {})
+        memory_gate = dict(trace_payload.get("memory_write_gate", {}) or {})
+        runtime_metrics = dict(trace_payload.get("runtime_metrics", {}) or {})
+        initiative = dict(trace_payload.get("initiative", {}) or {})
+        context_payload = dict(context or trace_payload.get("run_context", {}) or {})
+        relation_payload = dict(relation_state or {})
+        cue = context_payload.get("cue")
+        if cue is None and event is not None:
+            cue = event.cue
+        recall_strength = float(context_payload.get("recall_strength", trace_payload.get("identity_evidence_score", 0.0)) or 0.0)
+        output_text = str(rendered_expression.get("text") or "")
+        event_valence = float(getattr(event, "valence", appraisal.get("valence", 0.0)) or 0.0)
+        event_energy_delta = float(getattr(event, "energy_delta", 0.0) or 0.0)
+        current_mode = str(trace_payload.get("mode") or snapshot.get("mode") or "")
+        active_state = state if state is not None else RuntimeState(**snapshot) if snapshot else None
+        previous_state = prior_state
+
+        perception_delta = {
+            "mode": current_mode,
+            "safe_mode": bool(snapshot.get("safe_mode", False)),
+            "focus": snapshot.get("focus"),
+        }
+        memory_delta = {}
+        cognition_delta = {}
+        decision_delta = {}
+        execution_delta = {}
+        feedback_delta = dict(trace_payload.get("state_delta_after_clip", {}) or {})
+        if active_state is not None and previous_state is not None:
+            memory_delta = {
+                "memory_fragments": round(float(active_state.memory_fragments) - float(previous_state.memory_fragments), 4),
+                "self_continuity": round(float(active_state.self_continuity) - float(previous_state.self_continuity), 4),
+            }
+            cognition_delta = {
+                "meaning_strength": round(float(active_state.meaning_strength) - float(previous_state.meaning_strength), 4),
+                "mood": round(float(active_state.mood) - float(previous_state.mood), 4),
+            }
+            decision_delta = {
+                "focus": active_state.focus,
+                "budget_remaining": round(float(active_state.budget_remaining) - float(previous_state.budget_remaining), 4),
+            }
+            execution_delta = {
+                "last_action": active_state.last_action,
+                "safe_mode": bool(active_state.safe_mode),
+            }
+
+        return [
+            {
+                "layer": "perception",
+                "input_vector": {
+                    "source": getattr(event, "source", ""),
+                    "target": getattr(event, "target", ""),
+                    "cue": cue,
+                    "valence": round(event_valence, 4),
+                    "energy_delta": round(event_energy_delta, 4),
+                    "content_length": len(str(getattr(event, "content", ""))),
+                },
+                "transform_summary": {
+                    "scenario": trace_payload.get("scenario"),
+                    "cause_type": trace_payload.get("cause_type"),
+                    "appraisal": appraisal,
+                },
+                "output_vector": {
+                    "salience": round(max(abs(event_valence), recall_strength), 4),
+                    "recall_strength": round(recall_strength, 4),
+                    "appraisal_valence": round(float(appraisal.get("valence", event_valence) or 0.0), 4),
+                },
+                "state_delta": perception_delta,
+            },
+            {
+                "layer": "memory",
+                "input_vector": {
+                    "cue": cue,
+                    "recall_strength": round(recall_strength, 4),
+                    "write_gate_open": not bool(memory_gate.get("suppressed", False)),
+                },
+                "transform_summary": {
+                    "memory_write_gate": memory_gate,
+                    "relation_state": relation_payload,
+                    "working_memory_span": dict((state.layer_controls if state is not None else {}).get("memory", {}) or {}).get("working_memory_span"),
+                },
+                "output_vector": {
+                    "semantic_grounding": round(
+                        min(
+                            1.0,
+                            recall_strength * 0.7 + (0.3 if not bool(memory_gate.get("suppressed", False)) else 0.0),
+                        ),
+                        4,
+                    ),
+                    "memory_fragments": round(float(snapshot.get("memory_fragments", 0.0) or 0.0), 4),
+                    "continuity": round(float(snapshot.get("self_continuity", 0.0) or 0.0), 4),
+                },
+                "state_delta": memory_delta,
+            },
+            {
+                "layer": "cognition",
+                "input_vector": {
+                    "identity_evidence_score": round(float(trace_payload.get("identity_evidence_score", 0.0) or 0.0), 4),
+                    "meaning_strength": round(float(snapshot.get("meaning_strength", 0.0) or 0.0), 4),
+                    "top_driver_count": len(list(trace_payload.get("top_drivers", []) or [])),
+                },
+                "transform_summary": {
+                    "identity_trigger_blockers": list(trace_payload.get("identity_trigger_blockers", []) or []),
+                    "temperament_window_summary": dict(trace_payload.get("temperament_window_summary", {}) or {}),
+                    "reasoning_agents": [
+                        str(item.get("agent_name") or item.get("module_name") or "")
+                        for item in list(trace_payload.get("top_drivers", []) or [])[:4]
+                        if isinstance(item, dict)
+                    ],
+                },
+                "output_vector": {
+                    "meaning_strength": round(float(snapshot.get("meaning_strength", 0.0) or 0.0), 4),
+                    "identity_evidence_score": round(float(trace_payload.get("identity_evidence_score", 0.0) or 0.0), 4),
+                    "semantic_grounding": round(min(1.0, recall_strength * 0.5 + float(snapshot.get("meaning_strength", 0.0) or 0.0) * 0.5), 4),
+                },
+                "state_delta": cognition_delta,
+            },
+            {
+                "layer": "decision",
+                "input_vector": {
+                    "candidate_distribution": dict(trace_payload.get("candidate_distribution", {}) or {}),
+                    "autonomy_bias": dict((state.layer_controls if state is not None else {}).get("decision", {}) or {}).get("autonomy_bias"),
+                    "collapse_temperature": dict((state.layer_controls if state is not None else {}).get("decision", {}) or {}).get("collapse_temperature"),
+                },
+                "transform_summary": {
+                    "winner": trace_payload.get("sampled_action"),
+                    "conflict_mode": conflict.get("conflict_mode"),
+                    "conflict_score": conflict.get("total_score", conflict.get("score", 0.0)),
+                    "hard_masked_targets": list(conflict.get("hard_masked_targets", []) or []),
+                },
+                "output_vector": {
+                    "winner_posterior": dict(action_field.get("winner_posterior", {}) or {}),
+                    "final_energy": dict(action_field.get("final_energy", {}) or {}),
+                    "selected_action": trace_payload.get("sampled_action"),
+                },
+                "state_delta": decision_delta,
+            },
+            {
+                "layer": "execution",
+                "input_vector": {
+                    "render_action": render_plan.get("action"),
+                    "delivery_mode": rendered_expression.get("delivery_mode"),
+                    "initiative_should_send": bool(initiative.get("should_send", False)),
+                    "render_route": rendered_expression.get("route"),
+                },
+                "transform_summary": {
+                    "render_plan": {
+                        "route": rendered_expression.get("route"),
+                        "model": rendered_expression.get("model"),
+                        "degraded": bool(rendered_expression.get("degraded", False)),
+                    },
+                    "renderer_decision_integrity": dict(trace_payload.get("renderer_decision_integrity", {}) or {}),
+                    "runtime_metrics": {
+                        "route_type": runtime_metrics.get("route_type"),
+                        "model_call_count": runtime_metrics.get("model_call_count", 0),
+                    },
+                },
+                "output_vector": {
+                    "text_preview": output_text[:160],
+                    "text_length": len(output_text),
+                    "delivery_mode": rendered_expression.get("delivery_mode"),
+                    "degraded": bool(rendered_expression.get("degraded", False)),
+                },
+                "state_delta": execution_delta,
+            },
+            {
+                "layer": "feedback",
+                "input_vector": {
+                    "motivation_feedback": motivation_feedback,
+                    "control_events": list(trace_payload.get("control_events", []) or []),
+                    "fuse_state": copy.deepcopy((state.layer_fuses if state is not None else {})),
+                },
+                "transform_summary": {
+                    "initiative": initiative,
+                    "memory_write_gate": memory_gate,
+                    "delta_suppression_reason": list(trace_payload.get("delta_suppression_reason", []) or []),
+                },
+                "output_vector": {
+                    "behavior_effectiveness": round(float(dict(feedback_loop.get("feedback_metrics", {}) or {}).get("behavior_effectiveness", 0.0) or 0.0), 4),
+                    "feedback_reward": round(float(dict(feedback_loop.get("feedback_metrics", {}) or {}).get("feedback_reward", motivation_feedback.get("reward", motivation_feedback.get("reward_signal", 0.0))) or 0.0), 4),
+                    "state_correction_magnitude": round(float(dict(feedback_loop.get("feedback_metrics", {}) or {}).get("state_correction_magnitude", 0.0) or 0.0), 4),
+                },
+                "state_delta": feedback_delta,
+            },
+        ]
+
+    def _build_layer_metrics(
+        self,
+        trace_payload: dict[str, Any],
+        *,
+        cognitive_chain: list[dict[str, Any]],
+        control_events: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        chain_by_layer = {
+            str(item.get("layer") or ""): item
+            for item in cognitive_chain
+            if isinstance(item, dict) and str(item.get("layer") or "").strip()
+        }
+        memory_snapshot = dict(chain_by_layer.get("memory", {}) or {})
+        cognition_snapshot = dict(chain_by_layer.get("cognition", {}) or {})
+        feedback_snapshot = dict(chain_by_layer.get("feedback", {}) or {})
+        execution_snapshot = dict(chain_by_layer.get("execution", {}) or {})
+        action_field = dict(dict(trace_payload.get("probability_field", {}) or {}).get("action", {}) or {})
+        feedback_loop = dict(trace_payload.get("feedback_loop", {}) or {})
+        round_count = max(1, int(trace_payload.get("round_id", 1) or 1))
+        memory_output = dict(memory_snapshot.get("output_vector", {}) or {})
+        cognition_output = dict(cognition_snapshot.get("output_vector", {}) or {})
+        feedback_output = dict(feedback_snapshot.get("output_vector", {}) or {})
+        fuse_state = dict(feedback_snapshot.get("input_vector", {}) or {}).get("fuse_state", {})
+        fuse_rows = [item for item in list(fuse_state.values()) if isinstance(item, dict)]
+        fuse_hits = sum(
+            1
+            for item in fuse_rows
+            if bool(item.get("muted", False)) or float(item.get("throttle", 1.0) or 1.0) < 1.0 or str(item.get("mode") or "normal") != "normal"
+        )
+        return {
+            "existing": {
+                "probability_collapse": round(float(action_field.get("winner_confidence", 0.0) or 0.0), 4),
+                "conflict_score": round(float(trace_payload.get("conflict_arbitration", {}).get("total_score", 0.0) or 0.0), 4),
+                "initiative_trigger_rate": round(1.0 if dict(trace_payload.get("initiative", {}) or {}).get("should_send") else 0.0, 4),
+                "monologue_activity": round(
+                    1.0 if list(dict(trace_payload.get("expressive_trace", {}) or {}).get("monologue_stream", []) or []) else 0.0,
+                    4,
+                ),
+                "mode_switch": round(1.0 if bool(trace_payload.get("state_snapshot", {}).get("safe_mode")) else 0.0, 4),
+            },
+            "cognitive": {
+                "memory_awakening_rate": round(float(memory_snapshot.get("input_vector", {}).get("recall_strength", 0.0) or 0.0), 4),
+                "association_reasoning_strength": round(
+                    min(1.0, len(list(trace_payload.get("top_drivers", []) or [])) / 4.0),
+                    4,
+                ),
+                "meaning_generation_degree": round(float(cognition_output.get("meaning_strength", 0.0) or 0.0), 4),
+                "working_memory_occupancy": round(
+                    min(1.0, len(str(trace_payload.get("render_plan", {}).get("event_summary", ""))) / 120.0),
+                    4,
+                ),
+                "semantic_grounding_strength": round(float(cognition_output.get("semantic_grounding", memory_output.get("semantic_grounding", 0.0)) or 0.0), 4),
+            },
+            "feedback": {
+                "behavior_effectiveness": round(float(dict(feedback_loop.get("feedback_metrics", {}) or {}).get("behavior_effectiveness", feedback_output.get("behavior_effectiveness", 0.0)) or 0.0), 4),
+                "user_feedback_rate": round(float(dict(feedback_loop.get("feedback_metrics", {}) or {}).get("user_feedback_rate", 0.0) or 0.0), 4),
+                "state_correction_magnitude": round(float(dict(feedback_loop.get("feedback_metrics", {}) or {}).get("state_correction_magnitude", feedback_output.get("state_correction_magnitude", 0.0)) or 0.0), 4),
+                "feedback_reward": round(float(dict(feedback_loop.get("feedback_metrics", {}) or {}).get("feedback_reward", feedback_output.get("feedback_reward", 0.0)) or 0.0), 4),
+                "fuse_hit_rate": round(float(dict(feedback_loop.get("feedback_metrics", {}) or {}).get("fuse_hit_rate", fuse_hits / max(len(fuse_rows), 1)) or 0.0), 4),
+            },
+            "meta": {
+                "round_id": round_count,
+                "control_event_count": len(control_events),
+                "layer_count": len(cognitive_chain),
+            },
+        }
+
+    def layer_chain(self, round_ref: int | str) -> dict[str, Any]:
+        trace = self.trace_round(round_ref)
+        return {
+            "round_id": trace["round_id"],
+            "trace_ref": trace.get("trace_ref", f"round://{trace['round_id']}"),
+            "cognitive_chain": copy.deepcopy(list(trace.get("cognitive_chain", []) or [])),
+            "layer_metrics": copy.deepcopy(dict(trace.get("layer_metrics", {}) or {})),
+            "control_events": copy.deepcopy(list(trace.get("control_events", []) or [])),
+            "storage": trace.get("storage", self._trace_storage_payload()),
+        }
+
+    def replay_layer(self, round_id: int, layer: str) -> dict[str, Any]:
+        trace = self.trace_round(round_id)
+        normalized_layer = str(layer or "").strip().lower()
+        snapshot = next(
+            (
+                item
+                for item in list(trace.get("cognitive_chain", []) or [])
+                if isinstance(item, dict) and str(item.get("layer") or "").strip().lower() == normalized_layer
+            ),
+            None,
+        )
+        if snapshot is None:
+            raise ValueError(f"unknown layer: {layer}")
+        return {
+            "round_id": int(trace.get("round_id", round_id) or round_id),
+            "trace_ref": trace.get("trace_ref", f"round://{round_id}"),
+            "layer": normalized_layer,
+            "snapshot": {
+                "input_vector": copy.deepcopy(dict(snapshot.get("input_vector", {}) or {})),
+                "transform_summary": copy.deepcopy(dict(snapshot.get("transform_summary", {}) or {})),
+                "output_vector": copy.deepcopy(dict(snapshot.get("output_vector", {}) or {})),
+                "state_delta": copy.deepcopy(dict(snapshot.get("state_delta", {}) or {})),
+            },
+            "storage": trace.get("storage", self._trace_storage_payload()),
+        }
 
     def empty_trace_payload(self, round_ref: int | str | None = None) -> dict[str, Any]:
         round_id = round_ref if isinstance(round_ref, int) else None
@@ -12213,6 +13197,7 @@ class RuntimeController:
             "motivation_feedback": trace.get("motivation_feedback", {}),
             "initiative": trace.get("initiative", {}),
             "expressive_trace": trace.get("expressive_trace", trace.get("initiative", {})),
+            "feedback_loop": trace.get("feedback_loop", {}),
             "micro_intent": trace.get("micro_intent", {}),
             "endogenous_tick_reason": trace.get("endogenous_tick_reason", {}),
             "endogenous_policy_shift": trace.get("endogenous_policy_shift", {}),
@@ -12230,6 +13215,9 @@ class RuntimeController:
             "cross_layer_coupling_verdict": trace.get("cross_layer_coupling_verdict", {}),
             "renderer_decision_integrity": trace.get("renderer_decision_integrity", {}),
             "memory_write_gate": trace.get("memory_write_gate", {}),
+            "cognitive_chain": copy.deepcopy(list(trace.get("cognitive_chain", []) or [])),
+            "layer_metrics": copy.deepcopy(dict(trace.get("layer_metrics", {}) or {})),
+            "control_events": copy.deepcopy(list(trace.get("control_events", []) or [])),
             "failure_taxonomy": self._failure_taxonomy_from_trace(trace),
             "conflict_arbitration": trace.get("conflict_arbitration", self._conflict_arbitration_summary(trace)),
             "action_probability_explanation": self._action_probability_explanation(
@@ -12278,6 +13266,7 @@ class RuntimeController:
             "motivation_feedback": {},
             "initiative": {},
             "expressive_trace": {},
+            "feedback_loop": {},
             "endogenous_tick_reason": {},
             "endogenous_policy_shift": {},
             "appraisal_snapshot": {},
@@ -12294,6 +13283,9 @@ class RuntimeController:
             "cross_layer_coupling_verdict": {},
             "renderer_decision_integrity": {},
             "memory_write_gate": {},
+            "cognitive_chain": [],
+            "layer_metrics": {},
+            "control_events": [],
             "failure_taxonomy": [],
             "conflict_arbitration": {},
             "action_probability_explanation": {},
@@ -13061,6 +14053,35 @@ class RuntimeController:
             "subjectivity": self._subjectivity_metrics(),
             "storage": self._trace_storage_payload(),
         }
+
+    def _aggregate_layer_metric_group(self, group_name: str) -> dict[str, Any]:
+        self.trace_store.flush(raise_on_error=False)
+        rounds = self.trace_store.list_rounds()
+        collected: dict[str, list[float]] = {}
+        for row in rounds:
+            metrics = dict(row.get("layer_metrics", {}) or {}).get(group_name, {})
+            if not isinstance(metrics, dict):
+                continue
+            for key, value in metrics.items():
+                try:
+                    numeric = float(value)
+                except (TypeError, ValueError):
+                    continue
+                collected.setdefault(str(key), []).append(numeric)
+        payload = {
+            key: round(sum(values) / len(values), 4)
+            for key, values in collected.items()
+            if values
+        }
+        payload["samples"] = len(rounds)
+        payload["storage"] = self._trace_storage_payload()
+        return payload
+
+    def cognitive_metrics(self) -> dict[str, Any]:
+        return self._aggregate_layer_metric_group("cognitive")
+
+    def feedback_metrics(self) -> dict[str, Any]:
+        return self._aggregate_layer_metric_group("feedback")
 
     def agent_list(self) -> list[dict[str, Any]]:
         state = self.load_runtime_state()

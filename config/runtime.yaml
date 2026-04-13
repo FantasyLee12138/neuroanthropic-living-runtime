@@ -1,0 +1,101 @@
+runtime:
+  layer_controls:
+    perception:
+      input_sensitivity: 0.58
+      salience_gain: 0.62
+    memory:
+      awakening_threshold: 0.48
+      semantic_grounding_bias: 0.6
+      working_memory_span: 6
+    cognition:
+      association_gain: 0.54
+      meaning_generation_bias: 0.52
+    decision:
+      collapse_temperature: 0.46
+      autonomy_bias: 0.28
+    execution:
+      expression_threshold: 0.16
+      output_rate_limit_per_minute: 6
+    feedback:
+      correction_strength: 0.5
+      reward_gain: 0.42
+    behavior_policies:
+      monologue:
+        grounding_sources:
+          - memory
+          - semantic
+          - working_memory
+        max_events_per_10m: 3
+        scenario_multipliers:
+          interactive: 1.0
+          idle: 0.7
+          sleep: 0.35
+        silence_when_safe_mode: true
+      initiative:
+        trigger_interval_minutes: 10
+        scenario_allowlist:
+          - interactive
+          - idle
+        require_memory_support: 0.2
+        relation_weight: 0.52
+        task_weight: 0.48
+      execution:
+        burst_suppression_window_seconds: 90
+        safe_mode_multiplier: 0.2
+  layer_fuses:
+    perception:
+      mode: normal
+      throttle: 1.0
+      muted: false
+    memory:
+      mode: normal
+      throttle: 1.0
+      muted: false
+    cognition:
+      mode: normal
+      throttle: 1.0
+      muted: false
+    decision:
+      mode: normal
+      throttle: 1.0
+      muted: false
+    execution:
+      mode: normal
+      throttle: 1.0
+      muted: false
+    feedback:
+      mode: normal
+      throttle: 1.0
+      muted: false
+  dashboards:
+    - dashboard_id: cognitive-chain
+      title: 认知链路
+      widgets:
+        - flow
+        - vector_diff
+        - layer_metrics
+    - dashboard_id: layer-controls
+      title: 层级配置
+      widgets:
+        - controls
+        - approvals
+    - dashboard_id: emergency-fuses
+      title: 应急熔断
+      widgets:
+        - fuse_state
+        - recovery
+  alerts:
+    rules:
+      - rule_id: memory-awakening-low
+        metric: memory_awakening_rate
+        operator: "<"
+        threshold: 0.18
+        window: 5
+        action: raise_banner
+      - rule_id: feedback-effectiveness-low
+        metric: behavior_effectiveness
+        operator: "<"
+        threshold: 0.25
+        window: 5
+        action: suggest_fuse
+    history: []

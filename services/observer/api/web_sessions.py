@@ -131,12 +131,25 @@ def _region_label(value: Any) -> str:
     return labels.get(text, text or "暂无")
 
 
+def _compact_mapping(value: Any, *, limit: int = 3) -> str:
+    if not isinstance(value, dict) or not value:
+        return "暂无"
+    parts: list[str] = []
+    for key, item in list(value.items())[:limit]:
+        parts.append(f"{key}={item}")
+    return ", ".join(parts) or "暂无"
+
+
 def build_workbench_cards(snapshot: dict[str, Any]) -> dict[str, Any]:
     console = dict(snapshot.get("console") or {})
     state = dict(console.get("state") or {})
     action_field = dict(console.get("action_field") or {})
     why_current = dict((console.get("why_current") or {}).get("why") or {})
     why_not = dict((console.get("why_not") or {}).get("why_not") or {})
+    chain_payload = dict(console.get("cognitive_chain") or {})
+    controls_payload = dict(console.get("controls") or {})
+    dashboards_payload = dict(console.get("dashboards") or {})
+    alerts_payload = dict(console.get("alerts") or {})
     tlh = dict(((state.get("cognitive_snapshot") or {}).get("tlh") or {}))
     instinct_field = dict(tlh.get("instinct_field") or {})
     probability_field = dict(console.get("probability_field") or {})
@@ -188,6 +201,89 @@ def build_workbench_cards(snapshot: dict[str, Any]) -> dict[str, Any]:
             "drivers": [f"可用层：{available_layers or '暂无'}"],
             "blockers": [f"why-not 阻滞项：{blocked_by or '暂无'}"],
             "next_paths": [f"反事实预览：{'已生成' if console.get('counterfactual_preview') else '暂无'}"],
+        },
+        {
+            "panel_id": "chain",
+            "title": "认知链路",
+            "summary": f"当前采用 {len(list(chain_payload.get('cognitive_chain', []) or []))} 层快照串联感知到反馈。",
+            "explanation": "这一栏读取同一 round trace 中的链路快照，不二次推理，不生成第二真相面。",
+            "drivers": [f"层级：{' -> '.join(item.get('layer', '') for item in list(chain_payload.get('cognitive_chain', []) or [])) or '暂无'}"],
+            "blockers": [f"控制事件：{len(list(chain_payload.get('control_events', []) or []))}"],
+            "next_paths": [f"指标组：{', '.join(dict(chain_payload.get('layer_metrics', {}) or {}).keys()) or '暂无'}"],
+            "details": [
+                {
+                    "label": str(item.get("layer") or "layer"),
+                    "summary": f"transform：{_compact_mapping(item.get('transform_summary', {}))}",
+                    "lines": [
+                        f"input：{_compact_mapping(item.get('input_vector', {}))}",
+                        f"output：{_compact_mapping(item.get('output_vector', {}))}",
+                        f"delta：{_compact_mapping(item.get('state_delta', {}))}",
+                    ],
+                }
+                for item in list(chain_payload.get("cognitive_chain", []) or [])
+                if isinstance(item, dict)
+            ],
+        },
+        {
+            "panel_id": "controls",
+            "title": "层级配置",
+            "summary": "六层控制与行为策略统一走运行时配置真相面。",
+            "explanation": "observer 不保留私有控制状态，所有修改都应映射到运行时控制或 proposal 审批链。",
+            "drivers": [f"待审批提案：{len(list(controls_payload.get('proposals', []) or []))}"],
+            "blockers": [f"行为策略：{', '.join(dict(controls_payload.get('layer_controls', {}) or {}).keys()) or '暂无'}"],
+            "next_paths": [f"看板面板：{len(list(dashboards_payload.get('dashboards', []) or []))}"],
+            "details": [
+                *[
+                    {
+                        "label": f"policy:{name}",
+                        "summary": _compact_mapping(spec),
+                        "lines": [f"{key}={value}" for key, value in list(dict(spec or {}).items())[:4]],
+                    }
+                    for name, spec in list(dict(dict(controls_payload.get("layer_controls", {}) or {}).get("behavior_policies", {}) or {}).items())[:3]
+                ],
+                *[
+                    {
+                        "label": f"dashboard:{item.get('dashboard_id') or 'unknown'}",
+                        "summary": str(item.get("title") or "未命名面板"),
+                        "lines": [f"widgets：{', '.join(list(item.get('widgets', []) or [])) or '暂无'}"],
+                    }
+                    for item in list(dashboards_payload.get("dashboards", []) or [])[:3]
+                    if isinstance(item, dict)
+                ],
+            ],
+        },
+        {
+            "panel_id": "fuses",
+            "title": "应急熔断",
+            "summary": "所有层级熔断状态与恢复轨迹都应落 trace。",
+            "explanation": "熔断只读取当前运行时层级状态，不在前端本地维护第二份开关副本。",
+            "drivers": [f"层级熔断：{len(list(controls_payload.get('layer_fuses', {}) or {}))}"],
+            "blockers": [f"告警规则：{len(list((alerts_payload.get('rules') or {}).get('rules', []) or []))}"],
+            "next_paths": [f"告警历史：{len(list((alerts_payload.get('history') or {}).get('history', []) or []))}"],
+            "details": [
+                *[
+                    {
+                        "label": f"fuse:{layer}",
+                        "summary": _compact_mapping(spec),
+                        "lines": [f"mode={spec.get('mode')}", f"throttle={spec.get('throttle')}", f"muted={spec.get('muted')}"],
+                    }
+                    for layer, spec in list(dict(controls_payload.get("layer_fuses", {}) or {}).items())[:6]
+                    if isinstance(spec, dict)
+                ],
+                *[
+                    {
+                        "label": f"alert:{item.get('rule_id') or 'rule'}",
+                        "summary": f"{item.get('metric')} {item.get('operator')} {item.get('threshold')}",
+                        "lines": [
+                            f"observed={item.get('observed', '暂无')}",
+                            f"window={item.get('window', '暂无')}",
+                            f"action={item.get('action', '暂无')}",
+                        ],
+                    }
+                    for item in list((alerts_payload.get("rules") or {}).get("rules", []) or [])[:3]
+                    if isinstance(item, dict)
+                ],
+            ],
         },
     ]
     return {"cards": cards}
