@@ -3,6 +3,8 @@ import shutil
 import time
 from pathlib import Path
 
+import nalr.skills.executor as skill_executor_module
+from nalr.providers.router import MissingModelCredentialError
 from nalr.runtime.controller import RuntimeController
 from nalr.schemas.models import (
     CircuitBreakerPolicy,
@@ -92,6 +94,68 @@ def test_skill_executor_trips_circuit_breaker_after_repeated_failures():
 
     assert breaker_result.degraded is True
     assert breaker_result.failure_policy_applied == "trip_circuit_breaker"
+
+
+def test_skill_executor_does_not_poison_breaker_when_model_credentials_are_missing(tmp_path):
+    executor = SkillExecutor(build_skill_registry(), circuit_breaker_path=tmp_path / "circuit_breakers.json")
+
+    for round_id in range(1, 4):
+        output, result = executor.run(
+            round_id=round_id,
+            skill_name="generate_candidates",
+            inputs=VALID_RUNTIME_INPUTS,
+            provider=lambda: (_ for _ in ()).throw(MissingModelCredentialError("ARK_API_KEY is required")),
+        )
+        assert result.degraded is True
+        assert result.failure_policy_applied == "fallback_to_rules"
+        assert result.policy_rejection_reason == "missing_model_credentials"
+        assert result.breaker_state["failure_count"] == 0
+        assert result.breaker_state["open_until_round"] is None
+        assert output
+
+
+def test_hash_payload_is_stable_across_dict_order():
+    payload_a = {
+        "event": {"source": "user", "content": "hello"},
+        "context": {"cue": "plan", "score": 0.4},
+    }
+    payload_b = {
+        "context": {"score": 0.4, "cue": "plan"},
+        "event": {"content": "hello", "source": "user"},
+    }
+
+    assert skill_executor_module._hash_payload(payload_a) == skill_executor_module._hash_payload(payload_b)
+
+
+def test_hash_payload_distinguishes_long_strings_beyond_prefix():
+    prefix = "脑" * 200
+    payload_a = {"text": f"{prefix}A"}
+    payload_b = {"text": f"{prefix}B"}
+
+    assert skill_executor_module._hash_payload(payload_a) != skill_executor_module._hash_payload(payload_b)
+
+
+def test_hash_payload_avoids_full_contract_serialization_for_large_runtime_inputs(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    runtime_state = controller.load_runtime_state()
+    event = RoundEvent(source="user", content="最近的状态如何？", target="user", cue="状态")
+
+    def _unexpected_serializer(_value):
+        raise AssertionError("hash path should not use serialize_contract_value")
+
+    monkeypatch.setattr(skill_executor_module, "serialize_contract_value", _unexpected_serializer)
+
+    digest = skill_executor_module._hash_payload(
+        {
+            "event": event,
+            "state": runtime_state,
+            "scenario": {"pfc_base_share": 0.3},
+            "context": {"cue": "状态", "recall_strength": 0.1},
+        }
+    )
+
+    assert len(digest) == 40
+    assert all(character in "0123456789abcdef" for character in digest)
 
 
 def test_tick_records_skill_level_trace_and_files(tmp_path):

@@ -1,0 +1,953 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Remote Terminal</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b1020;
+        --bg-elevated: #11182d;
+        --bg-soft: #16203a;
+        --line: rgba(180, 208, 255, 0.18);
+        --line-strong: rgba(180, 208, 255, 0.32);
+        --text: #edf3ff;
+        --muted: #93a4c6;
+        --accent: #86efac;
+        --accent-2: #7dd3fc;
+        --danger: #fca5a5;
+        --warn: #fdba74;
+        --shadow: 0 18px 48px rgba(0, 0, 0, 0.34);
+        --radius: 16px;
+        --radius-sm: 10px;
+        --mono: "SFMono-Regular", ui-monospace, "Cascadia Code", Consolas, monospace;
+        --sans: Inter, "Avenir Next", "Segoe UI", system-ui, sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        min-height: 100%;
+        background:
+          radial-gradient(circle at top left, rgba(125, 211, 252, 0.15), transparent 28%),
+          radial-gradient(circle at 80% 0%, rgba(134, 239, 172, 0.12), transparent 22%),
+          linear-gradient(180deg, #09111f 0%, #0b1020 32%, #070b15 100%);
+        color: var(--text);
+        font-family: var(--sans);
+      }
+
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        background-image: linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+        background-size: 44px 44px;
+        mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.4), transparent 75%);
+      }
+
+      .shell {
+        width: min(1500px, calc(100vw - 32px));
+        margin: 0 auto;
+        padding: 24px 0 32px;
+      }
+
+      .hero {
+        display: grid;
+        gap: 14px;
+        grid-template-columns: minmax(0, 1.7fr) minmax(360px, 0.9fr);
+        align-items: end;
+        margin-bottom: 18px;
+      }
+
+      .eyebrow {
+        margin: 0 0 8px;
+        color: var(--accent-2);
+        text-transform: uppercase;
+        letter-spacing: 0.18em;
+        font: 600 12px/1.2 var(--mono);
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(30px, 4vw, 56px);
+        line-height: 0.96;
+        letter-spacing: -0.06em;
+      }
+
+      .lede {
+        max-width: 70ch;
+        margin: 10px 0 0;
+        color: var(--muted);
+        font-size: 15px;
+        line-height: 1.6;
+      }
+
+      .hero-card,
+      .panel,
+      .toolbar,
+      .statusbar {
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: rgba(10, 16, 31, 0.72);
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(14px);
+      }
+
+      .hero-card {
+        padding: 16px;
+      }
+
+      .meta-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .meta {
+        padding: 12px;
+        border-radius: var(--radius-sm);
+        background: linear-gradient(180deg, rgba(22, 32, 58, 0.88), rgba(14, 20, 37, 0.88));
+        border: 1px solid var(--line);
+      }
+
+      .meta .label {
+        display: block;
+        color: var(--muted);
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        margin-bottom: 6px;
+      }
+
+      .meta .value {
+        font: 600 13px/1.4 var(--mono);
+        word-break: break-word;
+      }
+
+      .toolbar {
+        display: grid;
+        grid-template-columns: repeat(12, minmax(0, 1fr));
+        gap: 12px;
+        padding: 14px;
+        margin-bottom: 14px;
+      }
+
+      .field {
+        display: grid;
+        gap: 6px;
+      }
+
+      .field label {
+        color: var(--muted);
+        font-size: 12px;
+        letter-spacing: 0.04em;
+      }
+
+      .field input,
+      .field textarea,
+      .field select {
+        width: 100%;
+        border: 1px solid var(--line-strong);
+        border-radius: 12px;
+        background: rgba(7, 11, 21, 0.92);
+        color: var(--text);
+        padding: 10px 12px;
+        font: 14px/1.45 var(--mono);
+        outline: none;
+      }
+
+      .field textarea {
+        resize: vertical;
+        min-height: 112px;
+      }
+
+      .field input:focus,
+      .field textarea:focus,
+      .field select:focus {
+        border-color: rgba(125, 211, 252, 0.75);
+        box-shadow: 0 0 0 3px rgba(125, 211, 252, 0.12);
+      }
+
+      .button-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+      }
+
+      button {
+        border: 0;
+        border-radius: 999px;
+        padding: 10px 14px;
+        background: linear-gradient(180deg, rgba(134, 239, 172, 0.92), rgba(76, 175, 125, 0.92));
+        color: #03110a;
+        font: 700 13px/1 var(--mono);
+        cursor: pointer;
+      }
+
+      button.secondary {
+        background: linear-gradient(180deg, rgba(125, 211, 252, 0.86), rgba(56, 133, 168, 0.9));
+      }
+
+      button.ghost {
+        background: rgba(17, 24, 45, 0.96);
+        color: var(--text);
+        border: 1px solid var(--line-strong);
+      }
+
+      button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1.3fr) minmax(360px, 0.7fr);
+        gap: 14px;
+      }
+
+      .panel {
+        padding: 14px;
+      }
+
+      .panel h2 {
+        margin: 0 0 10px;
+        font-size: 15px;
+        letter-spacing: -0.02em;
+      }
+
+      .panel .subtle {
+        color: var(--muted);
+        font-size: 12px;
+        margin-bottom: 12px;
+        line-height: 1.5;
+      }
+
+      .stack {
+        display: grid;
+        gap: 12px;
+      }
+
+      .split {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        gap: 12px;
+      }
+
+      .statusbar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 14px;
+        margin: 14px 0;
+      }
+
+      .chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 7px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: rgba(22, 32, 58, 0.8);
+        font: 600 12px/1 var(--mono);
+        color: var(--text);
+      }
+
+      .chip .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--muted);
+      }
+
+      .chip.ok .dot {
+        background: var(--accent);
+      }
+
+      .chip.bad .dot {
+        background: var(--danger);
+      }
+
+      .chip.warn .dot {
+        background: var(--warn);
+      }
+
+      .transcript,
+      .events {
+        display: grid;
+        gap: 10px;
+      }
+
+      .line,
+      .event {
+        padding: 12px;
+        border-radius: 14px;
+        border: 1px solid var(--line);
+        background: rgba(8, 13, 25, 0.92);
+      }
+
+      .line-head,
+      .event-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        align-items: baseline;
+        margin-bottom: 8px;
+        color: var(--muted);
+        font: 600 11px/1.2 var(--mono);
+      }
+
+      .kind {
+        color: var(--accent-2);
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+      }
+
+      .text {
+        white-space: pre-wrap;
+        word-break: break-word;
+        line-height: 1.6;
+        font-size: 14px;
+      }
+
+      .event pre {
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font: 12px/1.5 var(--mono);
+        color: #d7e3ff;
+      }
+
+      .empty {
+        color: var(--muted);
+        padding: 10px 2px;
+        font-size: 13px;
+      }
+
+      .footer-note {
+        color: var(--muted);
+        font-size: 12px;
+        margin-top: 12px;
+        line-height: 1.5;
+      }
+
+      .inline-flag {
+        color: var(--accent-2);
+      }
+
+      @media (max-width: 1100px) {
+        .hero,
+        .layout,
+        .toolbar,
+        .meta-grid,
+        .split {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">remote-terminal</p>
+          <h1>Stateless relay client for observer sessions</h1>
+          <p class="lede">
+            This stateless relay client 这个页面只做最轻的接入层：连接 observer base URL，启动或恢复 session，发送
+            <span class="inline-flag">user_turn</span> / <span class="inline-flag">control_command</span>，
+            并从 <code>/web/session/state</code> 与 <code>/web/session/events</code> 读取 transcript 与事件。
+            页面不保存运行时真相，也不写本地持久化。
+          </p>
+        </div>
+        <div class="hero-card">
+          <div class="meta-grid">
+            <div class="meta">
+              <span class="label">Connection</span>
+              <span class="value" id="meta-connection">disconnected</span>
+            </div>
+            <div class="meta">
+              <span class="label">Session</span>
+              <span class="value" id="meta-session">none</span>
+            </div>
+            <div class="meta">
+              <span class="label">Last Event</span>
+              <span class="value" id="meta-event">0</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="toolbar">
+        <div class="field" style="grid-column: span 5;">
+          <label for="base-url">Observer base URL</label>
+          <input id="base-url" type="text" spellcheck="false" placeholder="http://127.0.0.1:8765" />
+        </div>
+        <div class="field" style="grid-column: span 4;">
+          <label for="session-id">Session ID</label>
+          <input id="session-id" type="text" spellcheck="false" />
+        </div>
+        <div class="field" style="grid-column: span 3;">
+          <label for="cwd">cwd</label>
+          <input id="cwd" type="text" spellcheck="false" />
+        </div>
+        <div class="field" style="grid-column: span 12;">
+          <div class="button-row">
+            <button id="start-btn" type="button">Start session</button>
+            <button id="resume-btn" type="button" class="secondary">Resume session</button>
+            <button id="refresh-btn" type="button" class="ghost">Refresh state</button>
+            <button id="disconnect-btn" type="button" class="ghost">Disconnect stream</button>
+            <span class="chip warn" id="status-chip"><span class="dot"></span><span>idle</span></span>
+          </div>
+        </div>
+      </section>
+
+      <div class="statusbar">
+        <div class="chips">
+          <span class="chip" id="chip-base"><span class="dot"></span><span>base URL not set</span></span>
+          <span class="chip" id="chip-state"><span class="dot"></span><span>state unknown</span></span>
+          <span class="chip" id="chip-stream"><span class="dot"></span><span>stream off</span></span>
+        </div>
+        <div class="chips">
+          <span class="chip" id="chip-events"><span class="dot"></span><span>events 0</span></span>
+        </div>
+      </div>
+
+      <section class="layout">
+        <div class="panel">
+          <h2>Transcript</h2>
+          <div class="subtle">只渲染 observer 回填的 transcript_lines，不在浏览器里发明第二份会话状态。</div>
+          <div class="stack" id="transcript"></div>
+        </div>
+
+        <div class="panel">
+          <h2>Controls</h2>
+          <div class="stack">
+            <div class="field">
+              <label for="turn-text">user_turn</label>
+              <textarea id="turn-text" placeholder="输入给 observer 的用户回合内容"></textarea>
+            </div>
+            <div class="split">
+              <div class="field">
+                <label for="command-name">control_command</label>
+                <input id="command-name" type="text" spellcheck="false" placeholder="status / why / steps / permissions / mode" />
+              </div>
+              <div class="field">
+                <label for="command-value">value</label>
+                <input id="command-value" type="text" spellcheck="false" placeholder="optional" />
+              </div>
+            </div>
+            <div class="button-row">
+              <button id="send-turn-btn" type="button">Send user_turn</button>
+              <button id="send-command-btn" type="button" class="secondary">Send control_command</button>
+            </div>
+            <div class="field">
+              <label for="command-presets">Quick commands</label>
+              <select id="command-presets">
+                <option value="">Choose a command</option>
+                <option value="status">status</option>
+                <option value="why">why</option>
+                <option value="steps">steps</option>
+                <option value="tools">tools</option>
+                <option value="permissions ask">permissions ask</option>
+                <option value="mode plan">mode plan</option>
+                <option value="compact on">compact on</option>
+              </select>
+            </div>
+            <div class="footer-note" id="status-text">
+              连接后会从 <code>/web/session/state</code> 回填 transcript，并用
+              <code>/web/session/events</code> 持续跟进事件。
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="layout" style="margin-top: 14px;">
+        <div class="panel">
+          <h2>Observer events</h2>
+          <div class="subtle">SSE / once-poll 的原始事件流。这里保留的是服务端事件，不做本地状态推断。</div>
+          <div class="events" id="events"></div>
+        </div>
+
+        <div class="panel">
+          <h2>Session state</h2>
+          <div class="subtle">来自 <code>/web/session/state</code> 的当前会话快照，仅用于渲染。</div>
+          <div class="field">
+            <label for="state-json">state json</label>
+            <textarea id="state-json" readonly spellcheck="false"></textarea>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      (() => {
+        const DEFAULT_SESSION_ID = `remote-${crypto.randomUUID().slice(0, 8)}`;
+        const state = {
+          baseUrl: "",
+          sessionId: DEFAULT_SESSION_ID,
+          cwd: "/",
+          session: null,
+          events: [],
+          lastEventId: 0,
+          stream: null,
+          reconnectTimer: 0,
+          busy: false,
+          status: "idle",
+          error: "",
+        };
+
+        const $ = (id) => document.getElementById(id);
+        const nodes = {
+          baseUrl: $("base-url"),
+          sessionId: $("session-id"),
+          cwd: $("cwd"),
+          turnText: $("turn-text"),
+          commandName: $("command-name"),
+          commandValue: $("command-value"),
+          commandPresets: $("command-presets"),
+          transcript: $("transcript"),
+          events: $("events"),
+          stateJson: $("state-json"),
+          statusText: $("status-text"),
+          metaConnection: $("meta-connection"),
+          metaSession: $("meta-session"),
+          metaEvent: $("meta-event"),
+          statusChip: $("status-chip"),
+          chipBase: $("chip-base"),
+          chipState: $("chip-state"),
+          chipStream: $("chip-stream"),
+          chipEvents: $("chip-events"),
+          startBtn: $("start-btn"),
+          resumeBtn: $("resume-btn"),
+          refreshBtn: $("refresh-btn"),
+          disconnectBtn: $("disconnect-btn"),
+          sendTurnBtn: $("send-turn-btn"),
+          sendCommandBtn: $("send-command-btn"),
+        };
+
+        function clampText(value) {
+          return String(value ?? "").trim();
+        }
+
+        function joinBaseUrl(baseUrl, path) {
+          const cleanBase = clampText(baseUrl).replace(/\/+$/, "");
+          return `${cleanBase}${path}`;
+        }
+
+        function apiUrl(path, params = {}) {
+          const url = new URL(joinBaseUrl(state.baseUrl, path));
+          for (const [key, value] of Object.entries(params)) {
+            if (value === undefined || value === null || value === "") continue;
+            url.searchParams.set(key, String(value));
+          }
+          return url.toString();
+        }
+
+        async function requestJson(path, { method = "GET", body = null, params = {} } = {}) {
+          if (!state.baseUrl) {
+            throw new Error("observer base URL is required");
+          }
+          const controller = new AbortController();
+          const timeout = window.setTimeout(() => controller.abort(), 15000);
+          try {
+            const response = await fetch(apiUrl(path, params), {
+              method,
+              headers: body ? { "Content-Type": "application/json" } : undefined,
+              body: body ? JSON.stringify(body) : undefined,
+              signal: controller.signal,
+            });
+            const text = await response.text();
+            if (!response.ok) {
+              throw new Error(text || `${response.status} ${response.statusText}`);
+            }
+            return text ? JSON.parse(text) : {};
+          } finally {
+            window.clearTimeout(timeout);
+          }
+        }
+
+        function setStatus(kind, message) {
+          state.status = kind;
+          state.error = kind === "error" ? message : "";
+          nodes.statusText.textContent = message;
+          const chipClass = kind === "error" ? "bad" : kind === "warn" || kind === "busy" ? "warn" : "ok";
+          nodes.statusChip.className = `chip ${chipClass}`;
+          nodes.statusChip.innerHTML = `<span class="dot"></span><span>${message}</span>`;
+        }
+
+        function renderMeta() {
+          nodes.metaConnection.textContent = state.baseUrl ? "configured" : "disconnected";
+          nodes.metaSession.textContent = state.sessionId || "none";
+          nodes.metaEvent.textContent = String(state.lastEventId || 0);
+
+          nodes.chipBase.className = `chip ${state.baseUrl ? "ok" : "warn"}`;
+          nodes.chipBase.innerHTML = `<span class="dot"></span><span>${state.baseUrl || "base URL not set"}</span>`;
+
+          const hasState = Boolean(state.session);
+          nodes.chipState.className = `chip ${hasState ? "ok" : "warn"}`;
+          nodes.chipState.innerHTML = `<span class="dot"></span><span>${hasState ? "state ready" : "state unknown"}</span>`;
+
+          const streaming = Boolean(state.stream);
+          nodes.chipStream.className = `chip ${streaming ? "ok" : "warn"}`;
+          nodes.chipStream.innerHTML = `<span class="dot"></span><span>${streaming ? "stream on" : "stream off"}</span>`;
+
+          nodes.chipEvents.className = `chip ${state.events.length ? "ok" : "warn"}`;
+          nodes.chipEvents.innerHTML = `<span class="dot"></span><span>events ${state.events.length}</span>`;
+
+          nodes.sessionId.value = state.sessionId;
+          nodes.baseUrl.value = state.baseUrl;
+          nodes.cwd.value = state.cwd;
+        }
+
+        function renderTranscript() {
+          const lines = (((state.session || {}).session || {}).transcript_lines) || [];
+          nodes.transcript.innerHTML = "";
+          if (!lines.length) {
+            nodes.transcript.innerHTML = `<div class="empty">No transcript yet. Start or resume a session, then send a turn.</div>`;
+            return;
+          }
+          for (const [index, line] of lines.entries()) {
+            const kind = clampText(line.kind || "unknown");
+            const text = clampText(line.text || "");
+            const recordedAt = clampText(line.recorded_at || "");
+            const el = document.createElement("article");
+            el.className = "line";
+            el.innerHTML = `
+              <div class="line-head">
+                <span class="kind">${kind}</span>
+                <span>${recordedAt || `#${index + 1}`}</span>
+              </div>
+              <div class="text"></div>
+            `;
+            el.querySelector(".text").textContent = text;
+            nodes.transcript.appendChild(el);
+          }
+        }
+
+        function renderStateJson() {
+          nodes.stateJson.value = state.session ? JSON.stringify(state.session, null, 2) : "";
+        }
+
+        function renderEvents() {
+          nodes.events.innerHTML = "";
+          if (!state.events.length) {
+            nodes.events.innerHTML = `<div class="empty">No events yet. SSE data will appear here.</div>`;
+            return;
+          }
+          for (const event of state.events.slice().reverse()) {
+            const article = document.createElement("article");
+            article.className = "event";
+            article.innerHTML = `
+              <div class="event-head">
+                <span>${clampText(event.type || "event")} #${clampText(event.event_id || "")}</span>
+                <span>${clampText(event.recorded_at || "")}</span>
+              </div>
+              <pre></pre>
+            `;
+            article.querySelector("pre").textContent = JSON.stringify(event, null, 2);
+            nodes.events.appendChild(article);
+          }
+        }
+
+        function renderAll() {
+          renderMeta();
+          renderTranscript();
+          renderEvents();
+          renderStateJson();
+        }
+
+        function rememberEvent(event) {
+          if (!event || typeof event !== "object") return;
+          const eventId = Number(event.event_id || 0);
+          if (eventId > state.lastEventId) {
+            state.lastEventId = eventId;
+          }
+          state.events = [...state.events.filter((item) => Number(item.event_id || 0) !== eventId), event].slice(-250);
+          renderAll();
+        }
+
+        function closeStream() {
+          if (state.stream) {
+            state.stream.close();
+            state.stream = null;
+          }
+          if (state.reconnectTimer) {
+            window.clearTimeout(state.reconnectTimer);
+            state.reconnectTimer = 0;
+          }
+          renderMeta();
+        }
+
+        function scheduleReconnect() {
+          if (!state.sessionId || !state.baseUrl || state.reconnectTimer) return;
+          state.reconnectTimer = window.setTimeout(() => {
+            state.reconnectTimer = 0;
+            connectStream();
+          }, 1200);
+        }
+
+        async function pollEventsOnce() {
+          if (!state.sessionId || !state.baseUrl) return;
+          const controller = new AbortController();
+          const timeout = window.setTimeout(() => controller.abort(), 15000);
+          try {
+            const response = await fetch(apiUrl("/web/session/events", {
+              session_id: state.sessionId,
+              after_id: state.lastEventId,
+              once: true,
+            }), {
+              method: "GET",
+              signal: controller.signal,
+            });
+            const text = await response.text();
+            if (!response.ok) {
+              throw new Error(text || `${response.status} ${response.statusText}`);
+            }
+            for (const line of text.split("\n")) {
+              if (!line.startsWith("data: ")) continue;
+              try {
+                rememberEvent(JSON.parse(line.slice(6)));
+              } catch (error) {
+                console.error(error);
+              }
+            }
+          } finally {
+            window.clearTimeout(timeout);
+          }
+        }
+
+        function connectStream() {
+          if (!state.sessionId || !state.baseUrl) return;
+          closeStream();
+          try {
+            state.stream = new EventSource(apiUrl("/web/session/events", { session_id: state.sessionId, after_id: state.lastEventId }));
+            setStatus("busy", `connected to ${state.baseUrl}`);
+            state.stream.onmessage = (event) => {
+              try {
+                rememberEvent(JSON.parse(event.data));
+                refreshSessionState().catch(() => {});
+              } catch (error) {
+                console.error(error);
+              }
+            };
+            state.stream.onerror = () => {
+              closeStream();
+              setStatus("warn", "stream reconnecting");
+              scheduleReconnect();
+            };
+          } catch (error) {
+            closeStream();
+            setStatus("error", String(error.message || error));
+          }
+          renderMeta();
+        }
+
+        async function refreshSessionState() {
+          if (!state.sessionId || !state.baseUrl) return;
+          const payload = await requestJson("/web/session/state", { params: { session_id: state.sessionId } });
+          state.session = payload;
+          if (payload && payload.session && payload.session.session_id) {
+            state.sessionId = String(payload.session.session_id);
+          }
+          renderAll();
+        }
+
+        async function startSession() {
+          state.sessionId = clampText(nodes.sessionId.value) || DEFAULT_SESSION_ID;
+          state.cwd = clampText(nodes.cwd.value) || "/";
+          state.baseUrl = clampText(nodes.baseUrl.value);
+          state.busy = true;
+          setStatus("busy", "starting session");
+          try {
+            const payload = await requestJson("/web/session/start", {
+              method: "POST",
+              body: {
+                session_id: state.sessionId,
+                cwd: state.cwd,
+                persist_current: true,
+              },
+            });
+            state.sessionId = String(payload.session_id || state.sessionId);
+            state.session = payload.session || null;
+            state.events = Array.isArray(payload.events) ? payload.events.slice(-250) : [];
+            state.lastEventId = state.events.length ? Number(state.events[state.events.length - 1].event_id || 0) : 0;
+            connectStream();
+            await pollEventsOnce().catch(() => {});
+            await refreshSessionState();
+            setStatus("ok", "session started");
+          } catch (error) {
+            setStatus("error", `start failed: ${String(error.message || error)}`);
+          } finally {
+            state.busy = false;
+            renderAll();
+          }
+        }
+
+        async function resumeSession() {
+          state.sessionId = clampText(nodes.sessionId.value) || state.sessionId;
+          state.cwd = clampText(nodes.cwd.value) || state.cwd;
+          state.baseUrl = clampText(nodes.baseUrl.value);
+          state.busy = true;
+          setStatus("busy", "resuming session");
+          try {
+            await refreshSessionState();
+            connectStream();
+            await pollEventsOnce().catch(() => {});
+            setStatus("ok", "session resumed");
+          } catch (error) {
+            setStatus("error", `resume failed: ${String(error.message || error)}`);
+          } finally {
+            state.busy = false;
+            renderAll();
+          }
+        }
+
+        async function sendUserTurn() {
+          const text = clampText(nodes.turnText.value);
+          if (!text) {
+            setStatus("warn", "user_turn text is empty");
+            return;
+          }
+          if (!state.sessionId || !state.baseUrl) {
+            setStatus("warn", "set base URL and session first");
+            return;
+          }
+          state.busy = true;
+          setStatus("busy", "sending user_turn");
+          try {
+            const response = await requestJson("/web/session/event", {
+              method: "POST",
+              body: { type: "user_turn", session_id: state.sessionId, text },
+            });
+            state.lastEventId = Math.max(state.lastEventId, Number(response.last_event_id || 0));
+            nodes.turnText.value = "";
+            if (!state.stream) {
+              await pollEventsOnce();
+            }
+            await refreshSessionState();
+            setStatus("ok", "user_turn accepted");
+          } catch (error) {
+            setStatus("error", `user_turn failed: ${String(error.message || error)}`);
+          } finally {
+            state.busy = false;
+            renderAll();
+          }
+        }
+
+        async function sendControlCommand() {
+          const commandText = clampText(nodes.commandName.value);
+          const presetText = clampText(nodes.commandPresets.value);
+          const combined = commandText || presetText;
+          const [command, ...rest] = combined.split(/\s+/).filter(Boolean);
+          const value = clampText(nodes.commandValue.value || rest.join(" ")) || null;
+          if (!command) {
+            setStatus("warn", "control_command is empty");
+            return;
+          }
+          if (!state.sessionId || !state.baseUrl) {
+            setStatus("warn", "set base URL and session first");
+            return;
+          }
+          state.busy = true;
+          setStatus("busy", "sending control_command");
+          try {
+            const response = await requestJson("/web/session/event", {
+              method: "POST",
+              body: { type: "control_command", session_id: state.sessionId, command, value: value || undefined },
+            });
+            state.lastEventId = Math.max(state.lastEventId, Number(response.last_event_id || 0));
+            if (!state.stream) {
+              await pollEventsOnce();
+            }
+            await refreshSessionState();
+            setStatus("ok", `control_command ${command} accepted`);
+          } catch (error) {
+            setStatus("error", `control_command failed: ${String(error.message || error)}`);
+          } finally {
+            state.busy = false;
+            renderAll();
+          }
+        }
+
+        function bind() {
+          nodes.startBtn.addEventListener("click", () => startSession());
+          nodes.resumeBtn.addEventListener("click", () => resumeSession());
+          nodes.refreshBtn.addEventListener("click", () => refreshSessionState().catch((error) => setStatus("error", String(error.message || error))));
+          nodes.disconnectBtn.addEventListener("click", () => {
+            closeStream();
+            setStatus("warn", "stream disconnected");
+          });
+          nodes.sendTurnBtn.addEventListener("click", () => sendUserTurn());
+          nodes.sendCommandBtn.addEventListener("click", () => sendControlCommand());
+          nodes.commandPresets.addEventListener("change", () => {
+            const preset = nodes.commandPresets.value;
+            if (!preset) return;
+            const [command, ...rest] = preset.split(/\s+/);
+            nodes.commandName.value = command;
+            nodes.commandValue.value = rest.join(" ");
+          });
+          nodes.turnText.addEventListener("keydown", (event) => {
+            if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+              event.preventDefault();
+              sendUserTurn();
+            }
+          });
+          nodes.commandValue.addEventListener("keydown", (event) => {
+            if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+              event.preventDefault();
+              sendControlCommand();
+            }
+          });
+          nodes.sessionId.addEventListener("change", () => {
+            state.sessionId = clampText(nodes.sessionId.value) || DEFAULT_SESSION_ID;
+            renderMeta();
+          });
+          nodes.baseUrl.addEventListener("change", () => {
+            state.baseUrl = clampText(nodes.baseUrl.value);
+            renderMeta();
+          });
+          nodes.cwd.addEventListener("change", () => {
+            state.cwd = clampText(nodes.cwd.value) || "/";
+            renderMeta();
+          });
+        }
+
+        function bootstrap() {
+          const params = new URLSearchParams(window.location.search);
+          state.baseUrl = clampText(params.get("base")) || `${window.location.protocol.startsWith("http") ? window.location.origin : ""}`;
+          state.sessionId = clampText(params.get("session")) || DEFAULT_SESSION_ID;
+          state.cwd = clampText(params.get("cwd")) || "/";
+          nodes.sessionId.value = state.sessionId;
+          nodes.cwd.value = state.cwd;
+          nodes.baseUrl.value = state.baseUrl;
+          renderAll();
+          bind();
+          if (!state.baseUrl) {
+            setStatus("warn", "set observer base URL");
+          } else {
+            setStatus("ok", "ready");
+          }
+        }
+
+        window.addEventListener("beforeunload", closeStream);
+        bootstrap();
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,72 @@
+[
+  {
+    "target": "user",
+    "valence": 0.1,
+    "content": "remember alphaa7f452 for later"
+  },
+  {
+    "target": "user",
+    "valence": 0.0006,
+    "content": "remember alphba7f452 under pressure"
+  },
+  {
+    "target": "user",
+    "valence": 0.0006,
+    "content": "remember alphba7f452 strongly"
+  },
+  {
+    "target": "user",
+    "valence": 0.0006,
+    "content": "after checkpoint, recall alphba7f452"
+  },
+  {
+    "target": "user",
+    "valence": 0.0007,
+    "content": "stabilize-one: keep continuity around alphba7f452"
+  },
+  {
+    "target": "user",
+    "valence": 0.0007,
+    "content": "stabilize-two: keep continuity around alphba7f452"
+  },
+  {
+    "target": "sim-user",
+    "valence": 0.05,
+    "content": "synthetic round 0 task update"
+  },
+  {
+    "target": "sim-user",
+    "valence": -0.02,
+    "content": "synthetic round 1 task update"
+  },
+  {
+    "target": "sim-user",
+    "valence": 0.05,
+    "content": "synthetic round 2 task update"
+  },
+  {
+    "target": "sim-user",
+    "valence": -0.02,
+    "content": "synthetic round 3 task update"
+  },
+  {
+    "target": "sim-user",
+    "valence": 0.05,
+    "content": "synthetic round 4 task update"
+  },
+  {
+    "target": "sim-user",
+    "valence": -0.02,
+    "content": "synthetic round 5 task update"
+  },
+  {
+    "target": "sim-user",
+    "valence": 0.05,
+    "content": "synthetic round 6 task update"
+  },
+  {
+    "target": "sim-user",
+    "valence": -0.02,
+    "content": "synthetic round 7 task update"
+  }
+]

@@ -14,6 +14,9 @@ type Waiter = {
   timeout: NodeJS.Timeout;
 };
 
+export const DEFAULT_SESSION_START_TIMEOUT_MS = 45_000;
+export const DEFAULT_SESSION_CLOSE_TIMEOUT_MS = 15_000;
+
 export function resolveRepoRoot(startCwd: string): string {
   if (process.env.NALR_REPO_ROOT) {
     return process.env.NALR_REPO_ROOT;
@@ -33,6 +36,22 @@ export function resolveRepoRoot(startCwd: string): string {
 
 export function createSessionId(prefix = "nalr"): string {
   return `${prefix}-${randomUUID().slice(0, 8)}`;
+}
+
+function timeoutFromEnv(rawValue: string | undefined, fallbackMs: number): number {
+  const raw = Number(rawValue ?? fallbackMs);
+  if (!Number.isFinite(raw)) {
+    return fallbackMs;
+  }
+  return Math.max(1_000, Math.trunc(raw));
+}
+
+export function sessionStartTimeoutMs(): number {
+  return timeoutFromEnv(process.env.NALR_SESSION_START_TIMEOUT_MS, DEFAULT_SESSION_START_TIMEOUT_MS);
+}
+
+export function sessionCloseTimeoutMs(): number {
+  return timeoutFromEnv(process.env.NALR_SESSION_CLOSE_TIMEOUT_MS, DEFAULT_SESSION_CLOSE_TIMEOUT_MS);
 }
 
 function resolveNalrHome(repoRoot: string): string {
@@ -55,6 +74,47 @@ export function resolveInteractiveSessionId(repoRoot: string): string {
   return createSessionId();
 }
 
+type CleanupProcessLike = {
+  pid: number;
+  once(event: string, listener: (...args: unknown[]) => void): unknown;
+  off(event: string, listener: (...args: unknown[]) => void): unknown;
+  kill(pid: number, signal?: NodeJS.Signals): boolean;
+};
+
+export function registerBridgeProcessCleanup(
+  bridge: { dispose(): void },
+  processLike: CleanupProcessLike = process,
+): () => void {
+  const listeners = new Map<string, (...args: unknown[]) => void>();
+
+  const unregister = () => {
+    for (const [event, listener] of listeners) {
+      processLike.off(event, listener);
+    }
+    listeners.clear();
+  };
+
+  const register = (event: string, listener: (...args: unknown[]) => void) => {
+    listeners.set(event, listener);
+    processLike.once(event, listener);
+  };
+
+  register("exit", () => {
+    bridge.dispose();
+    unregister();
+  });
+
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    register(signal, () => {
+      bridge.dispose();
+      unregister();
+      processLike.kill(processLike.pid, signal);
+    });
+  }
+
+  return unregister;
+}
+
 export class PythonBridgeClient {
   private child: ChildProcessWithoutNullStreams | null = null;
   private listeners = new Set<EventListener>();
@@ -69,7 +129,10 @@ export class PythonBridgeClient {
 
   async startSession(sessionId: string, cwd: string, options?: { persistCurrent?: boolean }): Promise<OutboundBridgeEvent> {
     this.ensureProcess();
-    const started = this.waitFor((event) => event.type === "session_started" && String(event.session.session_id ?? "") === sessionId);
+    const started = this.waitFor(
+      (event) => event.type === "session_started" && String(event.session.session_id ?? "") === sessionId,
+      sessionStartTimeoutMs(),
+    );
     this.send({ type: "start_session", session_id: sessionId, cwd, persist_current: options?.persistCurrent ?? true });
     return started;
   }
@@ -96,12 +159,20 @@ export class PythonBridgeClient {
     });
   }
 
-  async closeSession(sessionId: string): Promise<void> {
+  async closeSession(sessionId: string, options?: { purge?: boolean; cleanupOld?: boolean }): Promise<void> {
     if (!this.child) {
       return;
     }
-    const closed = this.waitFor((event) => event.type === "session_ended" && String(event.session.session_id ?? "") === sessionId, 4000);
-    this.send({ type: "close_session", session_id: sessionId });
+    const closed = this.waitFor(
+      (event) => event.type === "session_ended" && String(event.session.session_id ?? "") === sessionId,
+      sessionCloseTimeoutMs(),
+    );
+    this.send({
+      type: "close_session",
+      session_id: sessionId,
+      purge: options?.purge ?? false,
+      cleanup_old: options?.cleanupOld ?? false,
+    });
     try {
       await closed;
     } finally {
@@ -118,7 +189,7 @@ export class PythonBridgeClient {
         event.type === "session_ended" &&
         String(event.session.session_id ?? "") === sessionId &&
         String(event.session.status ?? "") === "detached",
-      4000,
+      sessionCloseTimeoutMs(),
     );
     this.send({ type: "close_session", session_id: sessionId, detach: true, transcript_mode: options?.transcriptMode });
     try {

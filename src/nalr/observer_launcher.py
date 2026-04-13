@@ -5,10 +5,13 @@ import json
 import os
 import signal
 import socket
+import shutil
 import subprocess
 import sys
 import time
+import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 import webbrowser
@@ -117,6 +120,17 @@ def _wait_until_ready(url: str, timeout_seconds: float = 20.0) -> None:
     if last_error is not None:
         raise RuntimeError(f"observer app did not become ready: {last_error}") from last_error
     raise RuntimeError("observer app did not become ready before timeout")
+
+
+def _observer_ready_timeout_seconds() -> float:
+    raw = str(os.environ.get("NALR_OBSERVER_READY_TIMEOUT_SECONDS") or "").strip()
+    if not raw:
+        return 90.0
+    try:
+        timeout_seconds = float(raw)
+    except ValueError:
+        return 90.0
+    return timeout_seconds if timeout_seconds > 0 else 90.0
 
 
 def _can_bind_port(host: str, port: int) -> bool:
@@ -232,6 +246,37 @@ def _build_subprocess_env(repo_root: Path) -> dict[str, str]:
     env["PYTHONPATH"] = os.pathsep.join(parts)
     env["PYTHONUNBUFFERED"] = "1"
     return env
+
+
+def _latest_file_mtime(path: Path) -> float:
+    if not path.exists():
+        return 0.0
+    if path.is_file():
+        return path.stat().st_mtime
+    latest = 0.0
+    for child in path.rglob("*"):
+        if child.is_file():
+            latest = max(latest, child.stat().st_mtime)
+    return latest
+
+
+def _sync_workbench_dist(repo_root: Path | None = None) -> dict[str, object]:
+    root = Path(repo_root) if repo_root else _repo_root()
+    workbench_root = root / "apps" / "workbench"
+    src = workbench_root / "src"
+    dist = workbench_root / "dist"
+    if not src.exists():
+        return {"synced": False, "reason": "src_missing", "src": str(src), "dist": str(dist)}
+
+    src_mtime = _latest_file_mtime(src)
+    dist_mtime = _latest_file_mtime(dist)
+    if dist.exists() and dist_mtime >= src_mtime:
+        return {"synced": False, "reason": "up_to_date", "src": str(src), "dist": str(dist)}
+
+    if dist.exists():
+        shutil.rmtree(dist)
+    shutil.copytree(src, dist)
+    return {"synced": True, "reason": "copied", "src": str(src), "dist": str(dist)}
 
 
 def _python_bin_supports_observer_service(candidate: Path) -> bool:
@@ -404,6 +449,33 @@ def _open_browser(url: str, no_browser: bool) -> None:
         webbrowser.open(url)
 
 
+def _open_browser_when_ready(url: str, no_browser: bool) -> None:
+    if no_browser:
+        return
+
+    parsed = urllib.parse.urlsplit(url)
+    host = parsed.hostname or DEFAULT_HOST
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
+    def _runner() -> None:
+        deadline = time.monotonic() + _observer_ready_timeout_seconds()
+        while time.monotonic() < deadline:
+            try:
+                with socket.create_connection((host, port), timeout=0.5):
+                    break
+            except OSError:
+                time.sleep(0.1)
+        else:
+            return
+        _open_browser(url, False)
+
+    threading.Thread(
+        target=_runner,
+        name="nalr-observer-browser",
+        daemon=True,
+    ).start()
+
+
 def _launch_service(args: argparse.Namespace, repo_root: Path) -> dict[str, object]:
     service_dir = _service_dir(repo_root)
     service_dir.mkdir(parents=True, exist_ok=True)
@@ -483,7 +555,7 @@ def _launch_service(args: argparse.Namespace, repo_root: Path) -> dict[str, obje
     _write_service_state(payload, repo_root)
 
     try:
-        _wait_until_ready(url)
+        _wait_until_ready(url, timeout_seconds=_observer_ready_timeout_seconds())
         service_payload, service_error = _load_json_url_with_error(_compose_service_status_url(requested_host, effective_port), timeout_seconds=2.0)
         if not service_payload or str(service_payload.get("instance_id") or "") != instance_id:
             raise RuntimeError(f"observer service became reachable but did not expose the expected managed instance: {service_error or 'instance_mismatch'}")
@@ -581,7 +653,10 @@ def _serve_foreground(args: argparse.Namespace) -> int:
 
     repo_root = _ensure_repo_imports()
     autoload_repo_env(repo_root)
+    _sync_workbench_dist(repo_root)
+    os.environ.setdefault("NALR_OBSERVER_SKIP_DEFAULT_APP", "1")
     from services.observer.api.app import create_app
+    url = _compose_dashboard_url(str(args.host), int(args.port), str(args.open_path))
 
     app = create_app(
         project_root=Path(args.project_root),
@@ -591,12 +666,13 @@ def _serve_foreground(args: argparse.Namespace) -> int:
             "pid": os.getpid(),
             "host": str(args.host),
             "port": int(args.port),
-            "url": _compose_dashboard_url(str(args.host), int(args.port), str(args.open_path)),
+            "url": url,
             "started_at": str(args.started_at),
             "project_root": str(Path(args.project_root)),
             "config_root": str(Path(args.config_root)),
         },
     )
+    _open_browser_when_ready(url, bool(args.no_browser))
     uvicorn.run(app, host=str(args.host), port=int(args.port), log_level="warning")
     return 0
 
@@ -634,6 +710,9 @@ def build_parser() -> argparse.ArgumentParser:
     start_parser = subparsers.add_parser("start", help="Start the observer service in the background.")
     _add_launch_args(start_parser)
 
+    foreground_parser = subparsers.add_parser("foreground", help="Start the observer service in the foreground.")
+    _add_launch_args(foreground_parser)
+
     status_parser = subparsers.add_parser("status", help="Show the managed observer service status.")
     status_parser.set_defaults()
 
@@ -656,7 +735,7 @@ def build_parser() -> argparse.ArgumentParser:
 def _normalize_argv(argv: list[str]) -> list[str]:
     if not argv:
         return ["start"]
-    if argv[0] in {"start", "status", "stop", "restart", "logs", "serve", "-h", "--help"}:
+    if argv[0] in {"start", "foreground", "status", "stop", "restart", "logs", "serve", "-h", "--help"}:
         return argv
     return ["start", *argv]
 
@@ -676,6 +755,38 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(_restart_command(args))
         if command == "logs":
             raise SystemExit(_logs_command(args))
+        if command == "foreground":
+            requested_host = str(args.host)
+            requested_port = int(args.port)
+            requested_open_path = str(args.open_path)
+            requested_project_root = str(Path(args.project_root))
+            target = resolve_launch_target(requested_host, requested_port, requested_open_path)
+            if target["mode"] == "restart_required":
+                remote_status = _load_json_url(
+                    _compose_service_status_url(requested_host, requested_port),
+                    timeout_seconds=2.0,
+                ) or {}
+                remote_project_root = str(remote_status.get("project_root") or "")
+                try:
+                    remote_pid = int(remote_status.get("pid") or 0)
+                except (TypeError, ValueError):
+                    remote_pid = 0
+                if remote_project_root == requested_project_root and remote_pid and _stop_pid(remote_pid, timeout_seconds=2.0):
+                    target = {
+                        "mode": "start",
+                        "port": requested_port,
+                        "url": _compose_dashboard_url(requested_host, requested_port, requested_open_path),
+                    }
+                else:
+                    raise RuntimeError(
+                        f"检测到 {target['url']} 上已有可访问工作台，但它不属于当前受管实例。请先停止旧服务或改用其他端口。"
+                    )
+            args.port = int(target["port"])
+            if not getattr(args, "instance_id", ""):
+                args.instance_id = uuid.uuid4().hex
+            if not getattr(args, "started_at", ""):
+                args.started_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+            raise SystemExit(_serve_foreground(args))
         if command == "serve":
             raise SystemExit(_serve_foreground(args))
         parser.print_help()

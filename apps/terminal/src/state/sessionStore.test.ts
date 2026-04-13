@@ -204,10 +204,18 @@ describe("sessionStore", () => {
             sampled_action: "inspect",
             trace_ref: "round://12",
             route_type: "endogenous_light",
+            route_budget_ms: 300,
             cause_type: "endogenous",
             cause_label: "内生整理",
             mode: "endogenous_light",
             mode_label: "内生整理",
+            activation_set: ["Router", "HotStateLoader", "Reflection/DMN"],
+            activation_reason: ["deep_route_requested"],
+            memory_tiers_read: ["hot", "warm"],
+            packet_summary: { candidate_action_prior: "inspect" },
+            background_jobs: [{ kind: "memory_consolidation" }],
+            deepen_reason: "long_horizon_alignment",
+            model_call_count: 2,
             total_turn_ms: 420,
             model_wait_ms: 310,
             local_compute_ms: 110,
@@ -275,6 +283,21 @@ describe("sessionStore", () => {
             authenticity: {
               summary: "与当前设计口径一致"
             },
+            initiative: {
+              expression_mode: "external",
+              proposal_type: "speak",
+              top_intent: "follow_up_task",
+              speech_cost: 0.21,
+              intrinsic_value: 0.66,
+              should_send: false,
+              suppression_reason: "cooldown_active",
+              memory_backing: {
+                cue: "写作业",
+                summary: "写作业",
+                topic_source: "current_goal",
+                topic_relevance: 1
+              }
+            },
             expressive_trace: {
               monologue_stream: {
                 hidden_by_default: true,
@@ -335,6 +358,13 @@ describe("sessionStore", () => {
     expect(next.console.state?.currentRound.causeType).toBe("endogenous");
     expect(next.console.state?.currentRound.causeLabel).toBe("内生整理");
     expect(next.console.state?.currentRound.modeLabel).toBe("内生整理");
+    expect(next.console.state?.currentRound.routeBudgetMs).toBe(300);
+    expect(next.console.state?.currentRound.activationSet).toEqual(["Router", "HotStateLoader", "Reflection/DMN"]);
+    expect(next.console.state?.currentRound.memoryTiersRead).toEqual(["hot", "warm"]);
+    expect(next.console.state?.currentRound.packetSummary).toEqual({ candidate_action_prior: "inspect" });
+    expect(next.console.state?.currentRound.backgroundJobs).toEqual([{ kind: "memory_consolidation" }]);
+    expect(next.console.state?.currentRound.deepenReason).toBe("long_horizon_alignment");
+    expect(next.console.state?.currentRound.modelCallCount).toBe(2);
     expect(next.console.state?.currentRound.modelWaitMs).toBe(310);
     expect(next.console.state?.currentRound.localComputeMs).toBe(110);
     expect(next.console.state?.currentRound.latencySummary).toBe("模型等待占主导");
@@ -351,6 +381,9 @@ describe("sessionStore", () => {
     expect(next.aliveConsole.actionField.details.some((line) => line.includes("未采纳路径：中止(0.22)"))).toBe(true);
     expect(next.aliveConsole.why.summary).toBe("因为先钉住正式 payload 的单一事实源");
     expect(next.aliveConsole.why.details.some((line) => line.includes("主导模块：前额叶规划"))).toBe(true);
+    expect(next.aliveConsole.why.details.some((line) => line.includes("表达模式：external · intent=follow_up_task · should_send=false"))).toBe(true);
+    expect(next.aliveConsole.why.details.some((line) => line.includes("抑制原因：cooldown_active"))).toBe(true);
+    expect(next.aliveConsole.why.details.some((line) => line.includes("记忆牵引：写作业 · source=current_goal · relevance=1.00"))).toBe(true);
     expect(next.aliveConsole.why.details.some((line) => line.includes("隐藏独白流：最近 2 条碎片，累计 42 条，默认不显示"))).toBe(true);
   });
 

@@ -8,6 +8,8 @@ from pathlib import Path
 import re
 import shutil
 import threading
+import time
+from uuid import uuid4
 
 from nalr.runtime.async_io import AsyncIOWorker
 from nalr.runtime.dynamics import smooth_decay_rate, smooth_habit_recovery, smooth_interference_penalty
@@ -154,7 +156,9 @@ class MemoryStore:
         self.migration_status_path = self.memory_dir / "memory_migration_status.json"
         self.episodic_hot_dir = self.memory_dir / "episodic_hot"
         self.episodic_warm_dir = self.memory_dir / "episodic_warm"
-        self.episodic_archive_dir = self.memory_dir / "episodic_archive"
+        self.episodic_cold_dir = self.memory_dir / "episodic_cold"
+        self.legacy_episodic_archive_dir = self.memory_dir / "episodic_archive"
+        self.episodic_archive_dir = self.episodic_cold_dir
         self.relation_dir = self.memory_dir / "relation"
         self.habit_dir = self.memory_dir / "habit"
         self.raw_dir = self.memory_dir / "raw"
@@ -162,7 +166,8 @@ class MemoryStore:
         for path in (
             self.episodic_hot_dir,
             self.episodic_warm_dir,
-            self.episodic_archive_dir,
+            self.episodic_cold_dir,
+            self.legacy_episodic_archive_dir,
             self.relation_dir,
             self.habit_dir,
             self.raw_dir,
@@ -175,7 +180,9 @@ class MemoryStore:
             path.mkdir(parents=True, exist_ok=True)
         self.episodic_path = self.memory_dir / "episodic_hot.json"
         self.episodic_warm_path = self.memory_dir / "episodic_warm.json"
-        self.episodic_archive_path = self.memory_dir / "episodic_archive.json"
+        self.episodic_cold_path = self.memory_dir / "episodic_cold.json"
+        self.legacy_episodic_archive_path = self.memory_dir / "episodic_archive.json"
+        self.episodic_archive_path = self.episodic_cold_path
         self.habit_path = self.memory_dir / "habit.json"
         self.relation_path = self.memory_dir / "relation.json"
         self.relation_trace_path = self.memory_dir / "relation_trace.json"
@@ -185,7 +192,7 @@ class MemoryStore:
         self._snapshot_targets = {
             self.episodic_path: self.current_dir / "episodic_hot.parquet",
             self.episodic_warm_path: self.current_dir / "episodic_warm.parquet",
-            self.episodic_archive_path: self.current_dir / "episodic_archive.parquet",
+            self.episodic_cold_path: self.current_dir / "episodic_cold.parquet",
             self.habit_path: self.current_dir / "habit.parquet",
             self.relation_path: self.current_dir / "relation.parquet",
             self.relation_trace_path: self.current_dir / "relation_trace.parquet",
@@ -195,7 +202,7 @@ class MemoryStore:
         for path in (
             self.episodic_path,
             self.episodic_warm_path,
-            self.episodic_archive_path,
+            self.episodic_cold_path,
             self.habit_path,
             self.relation_path,
             self.relation_trace_path,
@@ -208,15 +215,21 @@ class MemoryStore:
             self._write_text_atomic(self.raw_events_path, "")
         if not self.storage_status_path.exists():
             self._write_storage_status(self._default_storage_status())
+        self._migrate_legacy_cold_files()
         self._migrate_legacy_if_needed()
         self._migrate_schema_if_needed()
         self._io_worker = AsyncIOWorker("nalr-memory-io")
         self._list_cache: dict[Path, list[dict]] = {}
         self._jsonl_cache: dict[Path, list[dict]] = {}
-        self._artifact_cache = {
-            "hot": self._load_artifacts(self.episodic_hot_dir),
-            "warm": self._load_artifacts(self.episodic_warm_dir),
-            "archive": self._load_artifacts(self.episodic_archive_dir),
+        self._artifact_tier_dirs = {
+            "hot": self.episodic_hot_dir,
+            "warm": self.episodic_warm_dir,
+            "cold": self.episodic_cold_dir,
+        }
+        self._artifact_cache: dict[str, list[dict] | None] = {
+            "hot": None,
+            "warm": None,
+            "cold": None,
         }
         self._last_ingest_diagnostics: dict[str, object] = {}
         self._recall_cache: dict[tuple[str, tuple[str, ...]], dict] = {}
@@ -232,7 +245,7 @@ class MemoryStore:
         for path in (
             self.episodic_path,
             self.episodic_warm_path,
-            self.episodic_archive_path,
+            self.episodic_cold_path,
             self.habit_path,
             self.relation_path,
             self.relation_trace_path,
@@ -243,6 +256,47 @@ class MemoryStore:
             self._path_mtimes[path] = self._mtime_ns(path)
         self._jsonl_cache[self.raw_events_path] = self._load_jsonl_from_disk(self.raw_events_path)
         self._path_mtimes[self.raw_events_path] = self._mtime_ns(self.raw_events_path)
+
+    def _normalize_tier_name(self, tier: str | None) -> str:
+        normalized = str(tier or "").strip().lower()
+        if normalized == "archive":
+            return "cold"
+        return normalized
+
+    def _public_tier_name(self, tier: str | None) -> str:
+        return self._normalize_tier_name(tier)
+
+    def _normalize_tier_budget(self, tier_budget: tuple[str, ...]) -> tuple[str, ...]:
+        normalized: list[str] = []
+        for tier in tier_budget:
+            tier_name = self._normalize_tier_name(tier)
+            if tier_name in {"hot", "warm", "cold"} and tier_name not in normalized:
+                normalized.append(tier_name)
+        return tuple(normalized or ("hot", "warm", "cold"))
+
+    def _migrate_legacy_cold_files(self) -> None:
+        if not self.legacy_episodic_archive_path.exists() and not self.legacy_episodic_archive_dir.exists():
+            return
+        cold_payload_empty = (
+            not self.episodic_cold_path.exists()
+            or not self.episodic_cold_path.read_text(encoding="utf-8").strip()
+            or self.episodic_cold_path.read_text(encoding="utf-8").strip() == "[]"
+        )
+        if cold_payload_empty and self.legacy_episodic_archive_path.exists():
+            self._write_text_atomic(self.episodic_cold_path, self.legacy_episodic_archive_path.read_text(encoding="utf-8"))
+        if self.legacy_episodic_archive_dir.exists() and not any(self.episodic_cold_dir.iterdir()):
+            for source in self.legacy_episodic_archive_dir.iterdir():
+                target = self.episodic_cold_dir / source.name
+                if target.exists():
+                    continue
+                if source.is_dir():
+                    shutil.copytree(source, target)
+                else:
+                    shutil.copy2(source, target)
+        legacy_parquet = self.current_dir / "episodic_archive.parquet"
+        cold_parquet = self.current_dir / "episodic_cold.parquet"
+        if legacy_parquet.exists() and not cold_parquet.exists():
+            shutil.copy2(legacy_parquet, cold_parquet)
 
     def _default_storage_status(self) -> dict:
         parquet_live_ready = all(path.exists() for path in self._snapshot_targets.values())
@@ -508,9 +562,18 @@ class MemoryStore:
         tier = {
             self.episodic_hot_dir: "hot",
             self.episodic_warm_dir: "warm",
-            self.episodic_archive_dir: "archive",
+            self.episodic_archive_dir: "cold",
         }[tier_dir]
         return self._read_parquet_dataset(self._compacted_dataset_dir(tier))
+
+    def _artifact_rows(self, tier: str) -> list[dict]:
+        if tier not in self._artifact_cache:
+            raise ValueError(f"unsupported tier: {tier}")
+        rows = self._artifact_cache.get(tier)
+        if rows is None:
+            rows = self._load_artifacts(self._artifact_tier_dirs[tier])
+            self._artifact_cache[tier] = rows
+        return rows
 
     def _load_list_from_disk(self, path: Path) -> list[dict]:
         snapshot_path = self._snapshot_targets.get(path)
@@ -639,7 +702,8 @@ class MemoryStore:
         return normalized
 
     def _write_text_atomic(self, path: Path, content: str) -> None:
-        tmp_path = path.with_name(f"{path.name}.tmp")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
         tmp_path.write_text(content, encoding="utf-8")
         tmp_path.replace(path)
 
@@ -745,7 +809,7 @@ class MemoryStore:
         tier = {
             self.episodic_hot_dir: "hot",
             self.episodic_warm_dir: "warm",
-            self.episodic_archive_dir: "archive",
+            self.episodic_archive_dir: "cold",
         }[tier_dir]
         snapshot = copy.deepcopy(artifacts)
         self._artifact_cache[tier] = snapshot
@@ -1253,14 +1317,15 @@ class MemoryStore:
         return cue
 
     def _lookup_tiers(self, cue: str, tier_budget: tuple[str, ...]) -> dict:
+        normalized_budget = self._normalize_tier_budget(tier_budget)
         tier_paths = {
             "hot": self.episodic_path,
             "warm": self.episodic_warm_path,
-            "archive": self.episodic_archive_path,
+            "cold": self.episodic_cold_path,
         }
         tier = None
         memory = None
-        for candidate in tier_budget:
+        for candidate in normalized_budget:
             path = tier_paths.get(candidate)
             if path is None:
                 continue
@@ -1282,7 +1347,7 @@ class MemoryStore:
             evidence = [memory["summary_chunk"]["gist"]]
         return {
             "cue": cue,
-            "tier": tier,
+            "tier": self._public_tier_name(tier),
             "strength": round(max(detail_strength, gist_strength), 4),
             "detail": detail,
             "interference": round(float(memory.get("interference", 0.0)), 4),
@@ -1299,16 +1364,18 @@ class MemoryStore:
         self,
         cue: str,
         *,
-        tier_budget: tuple[str, ...] = ("hot", "warm", "archive"),
+        tier_budget: tuple[str, ...] = ("hot", "warm", "cold"),
         allow_detail: bool = True,
     ) -> dict:
+        started_at = time.perf_counter()
         normalized_cue = cue.lower()
-        normalized_budget = tuple(tier_budget)
+        normalized_budget = self._normalize_tier_budget(tuple(tier_budget))
         cache_key = (normalized_cue, normalized_budget + (f"detail={int(allow_detail)}",))
         cached = self._recall_cache.get(cache_key)
         if cached is not None:
             return copy.deepcopy(cached)
         payload = self._lookup_tiers(normalized_cue, normalized_budget)
+        scanned_tiers = list(normalized_budget)
         if payload.get("found"):
             evidence = list(payload.get("evidence", []))
             detail_strength = float(payload.get("strength", 0.0)) if payload.get("detail") else 0.0
@@ -1323,9 +1390,50 @@ class MemoryStore:
                 payload["detail"] = False
                 if payload["mode"] == "gist":
                     payload["strength"] = round(min(gist_strength, detail_strength or gist_strength), 4)
+            tier_name = self._normalize_tier_name(payload.get("tier"))
+            if tier_name in normalized_budget:
+                scanned_tiers = list(normalized_budget[: normalized_budget.index(tier_name) + 1])
         else:
             payload["mode"] = "none"
             payload["content"] = ""
+        prior_vector = dict(payload.get("prior_vector", {}) or {})
+        interference = round(float(payload.get("interference", 0.0) or 0.0), 4)
+        cue_quality_bias = round(float(prior_vector.get("cue_quality_bias", 0.0) or 0.0), 4)
+        cue_rescue = bool(payload.get("found") and interference > 0.0 and cue_quality_bias >= 0.75)
+        contamination_detected = bool(
+            payload.get("found")
+            and (
+                payload.get("mode") == "gist"
+                or self._normalize_tier_name(payload.get("tier")) in {"warm", "cold"}
+                or interference > 0.0
+            )
+        )
+        if payload.get("mode") == "gist":
+            contamination_source = "gist_fallback"
+        elif self._normalize_tier_name(payload.get("tier")) in {"warm", "cold"}:
+            contamination_source = "summary_tier"
+        elif interference > 0.0:
+            contamination_source = "interference"
+        else:
+            contamination_source = "none"
+        latency_ms = max(0, int((time.perf_counter() - started_at) * 1000))
+        cost_tier = self._public_tier_name(payload.get("tier")) or f"miss:{'+'.join(self._public_tier_name(item) for item in scanned_tiers)}" or "miss:none"
+        payload["prior_vector"] = prior_vector
+        payload["search_trace"] = {
+            "budget": [self._public_tier_name(item) for item in normalized_budget],
+            "scanned_tiers": [self._public_tier_name(item) for item in scanned_tiers],
+        }
+        payload["latency_ms"] = latency_ms
+        payload["cost_tier"] = cost_tier
+        payload["cue_rescue"] = cue_rescue
+        payload["recall_failure"] = not bool(payload.get("found"))
+        payload["contamination"] = {
+            "detected": contamination_detected,
+            "source": contamination_source,
+            "detail_loss": bool(payload.get("mode") == "gist"),
+            "tier_fallback": self._normalize_tier_name(payload.get("tier")) in {"warm", "cold"},
+            "interference": interference,
+        }
         self._recall_cache[cache_key] = copy.deepcopy(payload)
         return payload
 
@@ -1333,7 +1441,7 @@ class MemoryStore:
         memories = []
         memories.extend({**item, "tier": "hot"} for item in self._read_list(self.episodic_path))
         memories.extend({**item, "tier": "warm"} for item in self._read_list(self.episodic_warm_path))
-        memories.extend({**item, "tier": "archive"} for item in self._read_list(self.episodic_archive_path))
+        memories.extend({**item, "tier": "cold"} for item in self._read_list(self.episodic_cold_path))
         memories = sorted(memories, key=lambda item: (item.get("detail_strength", 0.0), item.get("count", 0)), reverse=True)
         return memories[:limit]
 
@@ -1577,7 +1685,7 @@ class MemoryStore:
             "signature": signature,
         }
 
-    def recall_strength(self, cue: str | None, *, tier_budget: tuple[str, ...] = ("hot", "warm", "archive")) -> float:
+    def recall_strength(self, cue: str | None, *, tier_budget: tuple[str, ...] = ("hot", "warm", "cold")) -> float:
         if not cue:
             return 0.0
         recall_payload = self.recall(cue, tier_budget=tier_budget)
@@ -1669,7 +1777,7 @@ class MemoryStore:
     def compact_layers(self) -> None:
         hot = sorted(self._read_list(self.episodic_path), key=lambda item: (item.get("count", 0), item.get("detail_strength", 0.0)), reverse=True)
         warm = sorted(self._read_list(self.episodic_warm_path), key=lambda item: (item.get("count", 0), item.get("detail_strength", 0.0)), reverse=True)
-        archive = sorted(self._read_list(self.episodic_archive_path), key=lambda item: (item.get("count", 0), item.get("detail_strength", 0.0)), reverse=True)
+        cold = sorted(self._read_list(self.episodic_cold_path), key=lambda item: (item.get("count", 0), item.get("detail_strength", 0.0)), reverse=True)
 
         while len(hot) > self.hot_limit:
             demoted = hot.pop()
@@ -1679,18 +1787,18 @@ class MemoryStore:
         while len(warm) > self.warm_limit:
             demoted = warm.pop()
             demoted["detail_strength"] = min(float(demoted.get("detail_strength", 0.0)), 0.24)
-            demoted["summary"] = demoted.get("summary") or f"Archived memory for {demoted.get('cue', 'unknown')}"
-            archive.append(demoted)
+            demoted["summary"] = demoted.get("summary") or f"Cold memory for {demoted.get('cue', 'unknown')}"
+            cold.append(demoted)
 
         self._write_list(self.episodic_path, hot)
         self._write_list(self.episodic_warm_path, warm)
-        self._write_list(self.episodic_archive_path, archive)
+        self._write_list(self.episodic_cold_path, cold)
 
     def tier_counts(self) -> dict[str, int]:
         return {
             "hot": len(self._read_list(self.episodic_path)),
             "warm": len(self._read_list(self.episodic_warm_path)),
-            "archive": len(self._read_list(self.episodic_archive_path)),
+            "cold": len(self._read_list(self.episodic_cold_path)),
         }
 
     def _sync_memory_tiers(self, memory: dict) -> None:
@@ -1703,20 +1811,20 @@ class MemoryStore:
             warm_item.update(memory)
             self._write_list(self.episodic_warm_path, warm)
         if memory["count"] >= 8:
-            archive = self._read_list(self.episodic_archive_path)
-            archive_item = next((item for item in archive if item["cue"] == memory["cue"]), None)
-            if archive_item is None:
-                archive_item = {"cue": memory["cue"]}
-                archive.append(archive_item)
-            archive_item.update(memory)
-            self._write_list(self.episodic_archive_path, archive)
+            cold = self._read_list(self.episodic_cold_path)
+            cold_item = next((item for item in cold if item["cue"] == memory["cue"]), None)
+            if cold_item is None:
+                cold_item = {"cue": memory["cue"]}
+                cold.append(cold_item)
+            cold_item.update(memory)
+            self._write_list(self.episodic_cold_path, cold)
 
     def compact_tiers(self, *, hot_max_rounds: int = 500, warm_max_rounds: int = 3000) -> dict:
         raw_events = [row for row in self._read_jsonl(self.raw_events_path) if row.get("cue")]
         blocked_events = [row for row in raw_events if str(row.get("gate_decision", "applied")) == "suppressed"]
         events = [row for row in raw_events if str(row.get("gate_decision", "applied")) != "suppressed"]
         latest_round = max((row.get("round_id", 0) for row in events), default=0)
-        grouped: dict[str, dict[str, list[dict]]] = {"hot": {}, "warm": {}, "archive": {}}
+        grouped: dict[str, dict[str, list[dict]]] = {"hot": {}, "warm": {}, "cold": {}}
         for event in events:
             age = latest_round - event.get("round_id", 0)
             if age < hot_max_rounds:
@@ -1724,13 +1832,13 @@ class MemoryStore:
             elif age < warm_max_rounds:
                 tier = "warm"
             else:
-                tier = "archive"
+                tier = "cold"
             grouped[tier].setdefault(event["cue"], []).append(event)
 
         tier_defs = {
             "hot": (self.episodic_hot_dir, 7),
             "warm": (self.episodic_warm_dir, 30),
-            "archive": (self.episodic_archive_dir, None),
+            "cold": (self.episodic_cold_dir, None),
         }
         summary = {
             "latest_round": latest_round,
@@ -1751,9 +1859,7 @@ class MemoryStore:
         return summary
 
     def sample_compacted(self, tier: str, *, limit: int = 5, cue: str | None = None) -> list[dict]:
-        if tier not in self._artifact_cache:
-            raise ValueError(f"unsupported tier: {tier}")
-        rows = copy.deepcopy(self._artifact_cache[tier])
+        rows = copy.deepcopy(self._artifact_rows(tier))
         if cue:
             rows = [row for row in rows if row.get("cue") == cue]
         rows = sorted(rows, key=lambda item: (item.get("event_count", 0), item.get("last_round_id", 0), item.get("cue", "")), reverse=True)

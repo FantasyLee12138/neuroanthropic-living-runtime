@@ -1791,7 +1791,7 @@
                 <strong>辅助入口</strong>
                 <div class="muted">对话、命令和过程查看现在彼此分离。聊天页只负责消息流，命令和步骤流收进按钮弹层，主体控制留在这一页。</div>
                 <div class="subject-chip" id="subject-name-chip">当前运行体</div>
-                <div class="route-note" id="render-status-note">表达层：尚未产生最新输出。</div>
+                <div class="route-note" id="render-status-note">V2 路由：尚未产生最新输出。</div>
                 <div class="inline-row">
                     <button class="ghost-button" id="control-command-toggle">命令</button>
                     <button class="ghost-button" id="control-process-toggle">过程</button>
@@ -1966,20 +1966,24 @@
                 <div class="settings-fields">
                   <div class="settings-form-grid">
                     <div class="field-stack">
-                      <label for="setting-binding-renderer">表达层绑定</label>
+                      <label for="setting-binding-renderer">认知包绑定</label>
                       <select id="setting-binding-renderer"></select>
                     </div>
                     <div class="field-stack">
-                      <label for="setting-binding-planner">规划层绑定</label>
+                      <label for="setting-binding-planner">深度推理绑定</label>
                       <select id="setting-binding-planner"></select>
                     </div>
                     <div class="field-stack">
-                      <label for="setting-binding-pfc">前额叶控制绑定</label>
+                      <label for="setting-binding-pfc">工具规划绑定</label>
                       <select id="setting-binding-pfc"></select>
                     </div>
                     <div class="field-stack">
-                      <label for="setting-binding-perspective">视角模型绑定</label>
+                      <label for="setting-binding-perspective">深度表达绑定</label>
                       <select id="setting-binding-perspective"></select>
+                    </div>
+                    <div class="field-stack">
+                      <label for="setting-binding-consolidation">巩固摘要绑定</label>
+                      <select id="setting-binding-consolidation"></select>
                     </div>
                   </div>
                   <div class="settings-form-grid">
@@ -2073,7 +2077,7 @@
                   <div>
                     <h2 class="section-title">对话</h2>
                     <p class="muted" id="chat-page-intro">消息会先进入对话框，再等待主体回复。聊天输入只用于对话内容，不执行任何指令。</p>
-                    <div class="route-note" id="chat-render-status-note">表达层：尚未产生最新输出。</div>
+                    <div class="route-note" id="chat-render-status-note">V2 路由：尚未产生最新输出。</div>
                   </div>
                   <div class="chat-header-meta">
                     <span class="chip" id="session-badge">主体: 未连接</span>
@@ -2189,11 +2193,10 @@
               <div>
                 <h3>认知工作台</h3>
                 <div class="tab-row" style="margin-top: 10px;">
-                  <button class="tab-button active" data-workbench-tab="state">当前状态</button>
-                  <button class="tab-button" data-workbench-tab="why">当前解释</button>
-                  <button class="tab-button" data-workbench-tab="instinct">四维空间</button>
-                  <button class="tab-button" data-workbench-tab="probability" id="focus-instinct">概率层概览</button>
-                  <button class="tab-button" data-workbench-tab="why-not">为什么不是</button>
+                  <button class="tab-button active" data-workbench-tab="cognitive-chain">认知链路</button>
+                  <button class="tab-button" data-workbench-tab="controls">层级配置</button>
+                  <button class="tab-button" data-workbench-tab="alerts">应急熔断</button>
+                  <button class="tab-button" data-workbench-tab="dashboards" id="focus-instinct">仪表总览</button>
                 </div>
               </div>
               <div class="aside-panel" id="workbench-panel"></div>
@@ -2417,6 +2420,7 @@
         pending_approval: "有待审批动作，暂缓外显",
         active_run_blocked: "当前活跃运行占用表达通道",
         no_active_session: "当前没有可投递的会话",
+        no_fresh_session: "当前没有新鲜可投递会话",
         stay_silent_peak: "静默意图峰值占优",
         posterior_below_threshold: "后验尚未越过外显阈值",
         readiness_low: "表达准备度偏低",
@@ -2584,7 +2588,9 @@
           "chat.pending": "正在回复…",
           "control.focus_title": "运行焦点",
           "control.focus_note": "自主动作由模型自行决定，界面不再提供模式切换。",
-          "route.none": "尚未产生最新输出",
+          "route.none": "尚未产生最新 V2 路由",
+          "route.label": "V2 路由",
+          "route.activation": "激活",
           "label.expression": "表达层",
           "label.running": "运行",
           "label.connected": "已连接",
@@ -2616,7 +2622,7 @@
           "expression.actual": "当前实际输出",
           "expression.preview": "同回合预览",
           "expression.posterior": "动作后验",
-          "expression.route": "表达路由",
+          "expression.route": "V2 路由",
           "expression.model": "模型",
           "expression.links": "接口入口",
           "analysis.observability_empty": "当前还没有新的观测摘要。",
@@ -2664,8 +2670,10 @@
           "chat.pending": "Replying…",
           "control.focus_title": "Autonomy Focus",
           "control.focus_note": "Action modes are model-driven now. The UI no longer exposes mode switches.",
-          "route.none": "No recent expression output",
-          "label.expression": "Renderer",
+          "route.none": "No recent V2 route output",
+          "route.label": "V2 route",
+          "route.activation": "Activation",
+          "label.expression": "Deep Renderer",
           "label.running": "Runtime",
           "label.connected": "Connected",
           "label.disconnected": "Offline",
@@ -2696,7 +2704,7 @@
           "expression.actual": "Actual output",
           "expression.preview": "Round preview",
           "expression.posterior": "Posterior",
-          "expression.route": "Route",
+          "expression.route": "V2 route",
           "expression.model": "Model",
           "expression.links": "Endpoints",
           "analysis.observability_empty": "No observability summary yet.",
@@ -2732,7 +2740,7 @@
       let currentLanguage = window.localStorage.getItem("observer-language") || "zh";
       let lastEventId = 0;
       let eventSource = null;
-      let activeWorkbenchTab = "state";
+      let activeWorkbenchTab = "cognitive-chain";
       let spaceViewMode = "2d";
       let sessionState = null;
       let consoleState = null;
@@ -2741,12 +2749,10 @@
       let identityState = null;
       let settingsState = null;
       let initiativeState = null;
-      let initiativeDistributionState = null;
       let thoughtState = null;
       let whyNoChangeState = null;
       let replayState = null;
       let speakState = null;
-      let speakStatusState = null;
       let monologueState = null;
       let monologueStatusState = null;
       let monologueShowState = null;
@@ -2854,7 +2860,11 @@
       function prettify(value, fallback = "暂无") {
         if (value === null || value === undefined) return fallback;
         if (Array.isArray(value)) return value.length ? value.join("、") : fallback;
-        if (typeof value === "number") return value.toFixed(2);
+        if (typeof value === "number") {
+          if (!Number.isFinite(value)) return fallback;
+          if (value !== 0 && Math.abs(value) < 0.01) return value.toFixed(4);
+          return value.toFixed(2);
+        }
         if (typeof value === "boolean") return value ? "是" : "否";
         if (typeof value === "string") return value.trim() || fallback;
         return fallback;
@@ -2897,6 +2907,35 @@
 
       function asArray(value) {
         return Array.isArray(value) ? value : [];
+      }
+
+      function internalLearningView(statePayload) {
+        const snapshot = asObject(statePayload);
+        const source = asObject(snapshot.internal_learning || asObject(snapshot.cognitive_snapshot).internal_learning);
+        return {
+          recent_feedback_count: Number(source.recent_feedback_count || 0) || 0,
+          last_learning_round: String(source.last_learning_round || "").trim(),
+          top_policy_shifts: asArray(source.top_policy_shifts).map((item) => asObject(item)).filter((item) => item.intent || item.delta),
+        };
+      }
+
+      function externalLearningView(statePayload) {
+        const snapshot = asObject(statePayload);
+        const autonomySettings = asObject((settingsState || {}).autonomy || snapshot.autonomy_policy || {});
+        const blockedCommands = asArray(autonomySettings.blocked_commands).map((item) => String(item || "").trim()).filter(Boolean);
+        const blockedReasons = [];
+        if (String(autonomySettings.learning_mode || "").trim()) blockedReasons.push(`learning_mode=${autonomySettings.learning_mode}`);
+        if (autonomySettings.external_io_enabled === false) blockedReasons.push("external_io_enabled=false");
+        if (blockedCommands.length) blockedReasons.push(`blocked=${blockedCommands.join("/")}`);
+        return {
+          blocked: Boolean(
+            autonomySettings.external_io_enabled === false
+            || blockedCommands.includes("network")
+            || blockedCommands.includes("external write")
+            || blockedCommands.includes("shell")
+          ),
+          summary: blockedReasons.join(" · "),
+        };
       }
 
       function extractMonologueStreamTrace(value) {
@@ -3221,10 +3260,12 @@
 
       function observeCachedPayload(path) {
         if (path.startsWith("/initiative/status")) return initiativeState;
-        if (path.startsWith("/initiative/distribution")) return initiativeDistributionState;
+        if (path.startsWith("/initiative/distribution")) {
+          return currentInitiativeView();
+        }
         if (path.startsWith("/thought/")) return thoughtState;
         if (path.startsWith("/diagnostics/why-no-change/")) return whyNoChangeState;
-        if (path.startsWith("/speak/status")) return speakStatusState;
+        if (path.startsWith("/speak/status")) return speakState;
         if (path.startsWith("/speak/")) return speakState;
         if (path.startsWith("/monologue/status")) return monologueStatusState;
         if (path.startsWith("/monologue/show")) return monologueShowState;
@@ -3328,7 +3369,7 @@
         const nameKey = channel === "monologue" ? "expression.monologue" : "expression.speak";
         const current = (payload && payload.actual) || {};
         const preview = (payload && payload.preview) || {};
-        const status = channel === "monologue" ? (monologueStatusState || {}) : (speakStatusState || {});
+        const status = channel === "monologue" ? (monologueStatusState || {}) : {};
         const fragments = channel === "monologue" ? ((monologueShowState || {}).fragments || []) : [];
         const actualText = payload && payload.active ? prettify(current.text, t("status.none")) : t("status.none");
         const route = prettify(current.route, t("status.none"));
@@ -3337,6 +3378,8 @@
         const primaryPath = channel === "monologue" ? `/monologue/${encodeURIComponent(roundRef)}` : `/speak/${encodeURIComponent(roundRef)}`;
         const statusPath = channel === "monologue" ? "/monologue/status" : "/speak/status";
         const streamPath = channel === "monologue" ? "/monologue/show?limit=6" : "/initiative/status";
+        const initiative = channel === "monologue" ? {} : resolveInitiativeView((payload || {}).initiative || initiativeState || {});
+        const memoryBacking = initiative.memory_backing || {};
         return `
           <article class="expression-card">
             <h4>${escapeHtml(t(nameKey))}</h4>
@@ -3349,9 +3392,13 @@
             ${channel === "monologue" ? `
               <div class="muted">${escapeHtml(currentLanguage === "zh" ? "累计独白片段" : "Total fragments")}：${escapeHtml(prettify(status.generated_total || 0))}</div>
               <div class="muted">${escapeHtml(currentLanguage === "zh" ? "下次脉冲" : "Next pulse")}：${escapeHtml(localDateTimeText(status.next_pulse_at, t("status.none")))}</div>
+              <div class="muted">${escapeHtml(currentLanguage === "zh" ? "独白后台" : "Monologue background")}：${escapeHtml(status.stale ? `${currentLanguage === "zh" ? "独白后台过期" : "Background overdue"} (${prettify(status.overdue_seconds || 0)}s)` : (currentLanguage === "zh" ? "正常" : "Healthy"))}</div>
             ` : `
-              <div class="muted">${escapeHtml(currentLanguage === "zh" ? "触发意图" : "Top intent")}：${escapeHtml(humanizeLabel((((payload || {}).initiative || {}).top_intent) || ((initiativeDistributionState || {}).top_intent) || ""))}</div>
-              <div class="muted">${escapeHtml(currentLanguage === "zh" ? "抑制原因" : "Suppression")}：${escapeHtml(humanizeLabel((((payload || {}).initiative || {}).suppression_reason) || ((initiativeDistributionState || {}).suppression_reason) || ""))}</div>
+              <div class="muted">${escapeHtml(currentLanguage === "zh" ? "触发意图" : "Top intent")}：${escapeHtml(humanizeLabel(initiative.top_intent || ""))}</div>
+              <div class="muted">${escapeHtml(currentLanguage === "zh" ? "允许外发" : "Should send")}：${escapeHtml(prettify(initiative.should_send, t("status.none")))}</div>
+              <div class="muted">${escapeHtml(currentLanguage === "zh" ? "抑制原因" : "Suppression")}：${escapeHtml(humanizeLabel(initiative.suppression_reason || ""))}</div>
+              <div class="muted">${escapeHtml(currentLanguage === "zh" ? "目标会话" : "Selected session")}：${escapeHtml(prettify(initiative.selected_session_id || "", t("status.none")))}</div>
+              <div class="muted">${escapeHtml(currentLanguage === "zh" ? "记忆牵引" : "Memory backing")}：${escapeHtml(prettify(memoryBacking.summary || memoryBacking.cue || "", t("status.none")))}</div>
             `}
             <div class="expression-links">
               <button class="chip" data-observe-path="${escapeHtml(primaryPath)}" data-observe-title="${escapeHtml(t(nameKey))}">${escapeHtml(t("expression.links"))}</button>
@@ -3486,24 +3533,40 @@
           };
         }
         if (path.startsWith("/initiative/status")) {
+          const initiative = resolveInitiativeView(payload);
+          const memoryBacking = initiative.memory_backing || {};
           return {
             title: currentLanguage === "zh" ? "主动性状态" : "Initiative status",
             html: `
               <div>ready：${escapeHtml(prettify(payload.ready))}</div>
-              <div>top intent：${escapeHtml(humanizeLabel(((payload.proposal || {}).top_intent) || ""))}</div>
-              <div>expression mode：${escapeHtml(humanizeLabel(((payload.proposal || {}).expression_mode) || ""))}</div>
+              <div>top intent：${escapeHtml(humanizeLabel(initiative.top_intent || ""))}</div>
+              <div>expression mode：${escapeHtml(humanizeLabel(initiative.expression_mode || ""))}</div>
+              <div>should send：${escapeHtml(prettify(initiative.should_send))}</div>
+              <div>suppression：${escapeHtml(humanizeLabel(initiative.suppression_reason || ""))}</div>
+              <div>selected session：${escapeHtml(prettify(payload.selected_session_id || ""))}</div>
+              <div>session fresh：${escapeHtml(prettify(payload.session_fresh))}</div>
+              <div>memory backing：${escapeHtml(prettify(memoryBacking.summary || memoryBacking.cue || ""))}</div>
+              <div>topic source：${escapeHtml(prettify(memoryBacking.topic_source || ""))}</div>
+              <div>topic relevance：${escapeHtml(prettify(memoryBacking.topic_relevance ?? ""))}</div>
               <div>cooldown：${escapeHtml(prettify(((payload.history_stats || {}).cooldown_remaining_seconds) || 0))}</div>
             `,
           };
         }
         if (path.startsWith("/initiative/distribution")) {
+          const initiative = resolveInitiativeView(payload);
+          const memoryBacking = initiative.memory_backing || {};
           return {
             title: currentLanguage === "zh" ? "主动性分布" : "Initiative distribution",
             html: `
-              <div>top intent：${escapeHtml(humanizeLabel(payload.top_intent || ""))}</div>
-              <div>should send：${escapeHtml(prettify(payload.should_send))}</div>
-              <div>speech cost：${escapeHtml(prettify(payload.speech_cost || 0))}</div>
-              <div>monologue score：${escapeHtml(prettify(payload.monologue_score || 0))}</div>
+              <div>top intent：${escapeHtml(humanizeLabel(initiative.top_intent || ""))}</div>
+              <div>should send：${escapeHtml(prettify(initiative.should_send))}</div>
+              <div>suppression：${escapeHtml(humanizeLabel(initiative.suppression_reason || ""))}</div>
+              <div>speech cost：${escapeHtml(prettify(initiative.speech_cost || 0))}</div>
+              <div>monologue score：${escapeHtml(prettify(initiative.monologue_score || 0))}</div>
+              <div>selected session：${escapeHtml(prettify(payload.selected_session_id || ""))}</div>
+              <div>memory backing：${escapeHtml(prettify(memoryBacking.summary || memoryBacking.cue || ""))}</div>
+              <div>topic source：${escapeHtml(prettify(memoryBacking.topic_source || ""))}</div>
+              <div>topic relevance：${escapeHtml(prettify(memoryBacking.topic_relevance ?? ""))}</div>
             `,
           };
         }
@@ -3522,6 +3585,8 @@
             title: currentLanguage === "zh" ? "内部独白状态" : "Monologue status",
             html: `
               <div>${escapeHtml(currentLanguage === "zh" ? "已生成总数" : "Generated total")}：${escapeHtml(prettify(payload.generated_total || 0))}</div>
+              <div>${escapeHtml(currentLanguage === "zh" ? "独白后台" : "Background")}：${escapeHtml(payload.stale ? (currentLanguage === "zh" ? "独白后台过期" : "Background overdue") : (currentLanguage === "zh" ? "正常" : "Healthy"))}</div>
+              <div>${escapeHtml(currentLanguage === "zh" ? "超时秒数" : "Overdue seconds")}：${escapeHtml(prettify(payload.overdue_seconds || 0))}</div>
               <div>${escapeHtml(currentLanguage === "zh" ? "下次脉冲时间" : "Next pulse")}：${escapeHtml(localDateTimeText(payload.next_pulse_at, t("status.none")))}</div>
               <div>${escapeHtml(currentLanguage === "zh" ? "最近生成时间" : "Last generated")}：${escapeHtml(localDateTimeText(payload.last_generated_at, t("status.none")))}</div>
               <div>${escapeHtml(currentLanguage === "zh" ? "高频类别" : "Top categories")}：${escapeHtml(prettify((payload.top_categories || []).map((item) => item.category)))}</div>
@@ -3663,13 +3728,14 @@
         const tlh = ((state.cognitive_snapshot || {}).tlh || {});
         const body = tlh.body_state || {};
         const subjective = tlh.subjective_state || state.subjective_state || {};
-        const initiative = initiativeDistributionState || initiativeState || {};
-        const thought = thoughtState || {};
+        const initiative = currentInitiativeView();
+        const internalLearning = internalLearningView(state);
+        const externalLearning = externalLearningView(state);
         const latestSpeak = ((speakState || {}).actual || {}).text || "";
         const latestMonologue = (((monologueShowState || {}).fragments || [])[0] || {}).text || (((monologueState || {}).actual || {}).text || "");
         const displayName = assistantDisplayName();
         const summaryParts = [];
-        if (((thought.thought_summary || {}).top_intent)) summaryParts.push(`${currentLanguage === "zh" ? "当前主意图偏向" : "Current top intent leans toward"} ${humanizeLabel((thought.thought_summary || {}).top_intent)}`);
+        if (currentInitiativeTopIntent()) summaryParts.push(`${currentLanguage === "zh" ? "当前主意图偏向" : "Current top intent leans toward"} ${humanizeLabel(currentInitiativeTopIntent())}`);
         if (subjective.felt && subjective.felt.length) summaryParts.push(`${currentLanguage === "zh" ? "主观感受里仍挂着" : "Subjective felt markers still hold"} ${subjective.felt.join("、")}`);
         if ((initiative.memory_backing || {}).summary) summaryParts.push(`${currentLanguage === "zh" ? "最强记忆牵引来自" : "Strongest memory pull comes from"} ${(initiative.memory_backing || {}).summary}`);
         if (latestSpeak) summaryParts.push(`${currentLanguage === "zh" ? "最近一次对外说话是" : "Latest spoken line is"} ${latestSpeak}`);
@@ -3692,13 +3758,18 @@
         `;
         el("profile-self").innerHTML = `
           <div>${escapeHtml(currentLanguage === "zh" ? "自我认知" : "Self concept")}：${escapeHtml(prettify(summary))}</div>
-          <div>${escapeHtml(currentLanguage === "zh" ? "主动性顶层意图" : "Top initiative intent")}：${escapeHtml(humanizeLabel(initiative.top_intent || ((thought.thought_summary || {}).top_intent) || ""))}</div>
+          <div>${escapeHtml(currentLanguage === "zh" ? "主动性顶层意图" : "Top initiative intent")}：${escapeHtml(humanizeLabel(initiative.top_intent || currentInitiativeTopIntent()))}</div>
           <div>${escapeHtml(currentLanguage === "zh" ? "边界感" : "Boundary")}：${escapeHtml(prettify(subjective.boundary ?? 0))}</div>
           <div>${escapeHtml(currentLanguage === "zh" ? "自发性" : "Spontaneity")}：${escapeHtml(prettify(subjective.spontaneous ?? 0))}</div>
+          <div>${escapeHtml(currentLanguage === "zh" ? "内部学习" : "Internal learning")}：${escapeHtml(`${internalLearning.recent_feedback_count}${currentLanguage === "zh" ? " 次反馈" : " feedback signals"}`)}</div>
+          <div>${escapeHtml(currentLanguage === "zh" ? "外部主动学习" : "External active learning")}：${escapeHtml(externalLearning.blocked ? `${currentLanguage === "zh" ? "被策略阻断" : "Blocked by policy"}${externalLearning.summary ? ` (${externalLearning.summary})` : ""}` : (currentLanguage === "zh" ? "已允许" : "Allowed"))}</div>
         `;
         el("profile-drift").innerHTML = `
           <div>${escapeHtml(currentLanguage === "zh" ? "证据锚点" : "Evidence anchors")}：${escapeHtml(prettify((identity.evidence_anchors || []).map((item) => evidenceAnchorLabel(item))))}</div>
-          <div>${escapeHtml(currentLanguage === "zh" ? "记忆牵引" : "Memory backing")}：${escapeHtml(prettify((initiative.memory_backing || {}).summary || ""))}</div>
+          <div>${escapeHtml(currentLanguage === "zh" ? "记忆牵引" : "Memory backing")}：${escapeHtml(prettify((initiative.memory_backing || {}).summary || (initiative.memory_backing || {}).cue || ""))}</div>
+          <div>${escapeHtml(currentLanguage === "zh" ? "牵引来源" : "Topic source")}：${escapeHtml(prettify((initiative.memory_backing || {}).topic_source || ""))}</div>
+          <div>${escapeHtml(currentLanguage === "zh" ? "相关性" : "Topic relevance")}：${escapeHtml(prettify((initiative.memory_backing || {}).topic_relevance ?? ""))}</div>
+          <div>${escapeHtml(currentLanguage === "zh" ? "monologue score" : "Monologue score")}：${escapeHtml(prettify(initiative.monologue_score ?? ""))}</div>
           <div>${escapeHtml(currentLanguage === "zh" ? "最近对外说话" : "Latest speak")}：${escapeHtml(prettify(latestSpeak || ""))}</div>
           <div>${escapeHtml(currentLanguage === "zh" ? "最近内部独白" : "Latest monologue")}：${escapeHtml(prettify(latestMonologue || ""))}</div>
           <div>${escapeHtml(currentLanguage === "zh" ? "漂移信用" : "Drift credit")}：${escapeHtml(prettify(identity.drift_credit || 0))}</div>
@@ -3793,6 +3864,38 @@
         }
       }
 
+      function currentInitiativeTopIntent() {
+        return currentInitiativeView().top_intent || "";
+      }
+
+      function resolveInitiativeView(source) {
+        const initiative = source && typeof source === "object" ? source : {};
+        const proposal = initiative.proposal && typeof initiative.proposal === "object" ? initiative.proposal : {};
+        const memoryBacking =
+          initiative.memory_backing && typeof initiative.memory_backing === "object"
+            ? initiative.memory_backing
+            : proposal.memory_backing && typeof proposal.memory_backing === "object"
+              ? proposal.memory_backing
+              : {};
+        return {
+          top_intent: initiative.top_intent || proposal.top_intent || "",
+          should_send: typeof initiative.should_send === "boolean" ? initiative.should_send : (typeof proposal.should_send === "boolean" ? proposal.should_send : null),
+          suppression_reason: initiative.suppression_reason || proposal.suppression_reason || "",
+          speech_cost: initiative.speech_cost ?? proposal.speech_cost ?? null,
+          monologue_score: initiative.monologue_score ?? proposal.monologue_score ?? null,
+          expression_mode: initiative.expression_mode || proposal.expression_mode || "",
+          proposal_type: initiative.proposal_type || proposal.proposal_type || "",
+          selected_session_id: initiative.selected_session_id ?? proposal.target_session_id ?? "",
+          selected_session_age_seconds: initiative.selected_session_age_seconds ?? null,
+          session_fresh: initiative.session_fresh ?? null,
+          memory_backing: memoryBacking,
+        };
+      }
+
+      function currentInitiativeView() {
+        return resolveInitiativeView(initiativeState || {});
+      }
+
       function openOverlay(id, focusId = "") {
         const dialog = el(id);
         if (!dialog) return;
@@ -3853,24 +3956,7 @@
 
       function hydrateSnapshot(payload) {
         if (!payload || payload.type !== "sidebar_snapshot") return;
-        sessionState = {
-          ...(sessionState || {}),
-          goal_summary: payload.goal_summary,
-          current_step: payload.current_step,
-          reason_summary: payload.reason_summary,
-          last_tool: payload.last_tool,
-          status: payload.status,
-          why: payload.why,
-          steps: payload.steps || [],
-          tools: payload.tools || [],
-          approvals: payload.approvals || { pending: [], pending_count: 0 },
-          ui_actions: payload.ui_actions,
-          statusline: payload.statusline,
-          cognitive_snapshot: payload.cognitive_snapshot,
-          console: payload.console,
-          session: payload.session || ((sessionState || {}).session) || {},
-          workbench: (sessionState || {}).workbench || { cards: [] },
-        };
+        sessionState = mergeSessionPayload(payload);
         const transcriptLines = (((sessionState || {}).session || {}).transcript_lines || []);
         if (transcriptLines.length && transcriptLines[transcriptLines.length - 1].kind === "assistant") {
           awaitingAssistant = false;
@@ -4018,18 +4104,187 @@
         return sessions;
       }
 
+      function hasItems(value) {
+        return Array.isArray(value) && value.length > 0;
+      }
+
+      function mergeSessionPayload(payload, previous = sessionState) {
+        if (!payload) return previous || null;
+        const prev = previous || {};
+        const prevSession = prev.session || {};
+        const nextSession = payload.session || {};
+        const nextWorkbench = payload.workbench || {};
+        const prevWorkbench = prev.workbench || {};
+        const nextStatus = payload.status || {};
+        const prevStatus = prev.status || {};
+        const nextStatusline = payload.statusline || {};
+        const prevStatusline = prev.statusline || {};
+        const nextUiActions = payload.ui_actions || {};
+        const prevUiActions = prev.ui_actions || {};
+        return {
+          ...prev,
+          ...payload,
+          status: {
+            ...prevStatus,
+            ...nextStatus,
+          },
+          why: payload.why || prev.why || null,
+          runtime_truth: payload.runtime_truth || prev.runtime_truth || null,
+          controlled_learning: payload.controlled_learning || prev.controlled_learning || null,
+          ui_actions: (hasItems(nextUiActions.primary) || hasItems(nextUiActions.secondary))
+            ? nextUiActions
+            : (prevUiActions || { primary: [], secondary: [] }),
+          statusline: {
+            ...prevStatusline,
+            ...nextStatusline,
+          },
+          cognitive_snapshot: payload.cognitive_snapshot || prev.cognitive_snapshot || null,
+          console: payload.console || prev.console || null,
+          session: {
+            ...prevSession,
+            ...nextSession,
+            transcript_lines: Array.isArray(nextSession.transcript_lines)
+              ? nextSession.transcript_lines
+              : (Array.isArray(prevSession.transcript_lines) ? prevSession.transcript_lines : []),
+          },
+          steps: hasItems(payload.steps) ? payload.steps : (prev.steps || []),
+          tools: hasItems(payload.tools) ? payload.tools : (prev.tools || []),
+          approvals: payload.approvals || prev.approvals || { pending: [], pending_count: 0 },
+          workbench: hasItems(nextWorkbench.cards) ? nextWorkbench : (prevWorkbench || { cards: [] }),
+        };
+      }
+
+      function syntheticSteps() {
+        const title = String((sessionState || {}).current_step || "").trim();
+        if (!title) return [];
+        return [{
+          title,
+          status: String((((sessionState || {}).status || {}).status) || (sessionState || {}).run_status || "active").trim() || "active",
+          detail: String((sessionState || {}).reason_summary || "").trim(),
+        }];
+      }
+
+      function syntheticTools() {
+        const toolName = String((sessionState || {}).last_tool || "").trim();
+        if (!toolName) return [];
+        return [{
+          tool_name: toolName,
+          status: String((((sessionState || {}).status || {}).status) || "done").trim() || "done",
+          summary: String((sessionState || {}).reason_summary || "").trim() || (currentLanguage === "zh" ? "最近工具调用" : "Recent tool call"),
+        }];
+      }
+
+      function fallbackWorkbenchCards() {
+        const currentRound = (((consoleState || {}).state || {}).current_round) || {};
+        const actionField = (consoleState || {}).action_field || {};
+        const whyCurrent = (((consoleState || {}).why_current || {}).why) || {};
+        const sourceLinks = (consoleState || {}).source_links || [];
+        const topActions = (actionField.top_actions || []).slice(0, 3).map((item) =>
+          `${actionLabel(item.action || "")} ${prettify(item.score ?? item.posterior ?? "")}`
+        );
+        const drivers = (whyCurrent.top_drivers || []).slice(0, 3).map((item) =>
+          `${humanizeLabel(item.label || item.owner || item.name || "")} ${prettify(item.score ?? item.weight ?? "")}`
+        );
+        const linkRows = sourceLinks.slice(0, 4).map((item) => ({
+          label: item.panel_id || (currentLanguage === "zh" ? "观测入口" : "Observe link"),
+          transform: item.controller_method || (currentLanguage === "zh" ? "控制器入口" : "Controller method"),
+          output: item.api_path || (currentLanguage === "zh" ? "暂无 API 路径" : "No API path"),
+        }));
+        return [
+          {
+            panel_id: "cognitive_chain",
+            title: currentLanguage === "zh" ? "认知链路" : "Cognitive Chain",
+            summary: whyCurrent.summary || (currentLanguage === "zh" ? "当前使用 console 轻量链路摘要。" : "Using console lightweight chain summary."),
+            explanation: currentLanguage === "zh" ? "该卡片由当前 console/why_current 与 action_field 组合生成。" : "This card is composed from console/why_current and action_field.",
+            rows: [
+              {
+                label: currentLanguage === "zh" ? "当前动作" : "Current action",
+                transform: currentLanguage === "zh" ? "当前轮次优胜动作" : "Winning action for the current round",
+                output: actionLabel((actionField.winner || {}).action || currentRound.sampled_action || ""),
+              },
+              {
+                label: currentLanguage === "zh" ? "主要驱动" : "Top drivers",
+                transform: currentLanguage === "zh" ? "why_current 摘要" : "why_current summary",
+                output: prettify(drivers, t("status.none")),
+              },
+              {
+                label: currentLanguage === "zh" ? "候选动作" : "Top actions",
+                transform: currentLanguage === "zh" ? "action_field top_actions" : "action_field top_actions",
+                output: prettify(topActions, t("status.none")),
+              },
+            ],
+          },
+          {
+            panel_id: "controls",
+            title: currentLanguage === "zh" ? "层级配置" : "Controls",
+            summary: currentLanguage === "zh" ? "当前会话与运行状态轻量摘要。" : "Lightweight summary of current session and runtime status.",
+            explanation: currentLanguage === "zh" ? "该卡片由轻 session state 与 runtime truth 组合生成。" : "Composed from light session state and runtime truth.",
+            rows: [
+              {
+                label: currentLanguage === "zh" ? "权限模式" : "Permission mode",
+                transform: currentLanguage === "zh" ? "session.permission_mode" : "session.permission_mode",
+                output: prettify((((sessionState || {}).session || {}).permission_mode), t("status.none")),
+              },
+              {
+                label: currentLanguage === "zh" ? "运行状态" : "Run status",
+                transform: currentLanguage === "zh" ? "run status summary" : "run status summary",
+                output: prettify((sessionState || {}).run_status || (((sessionState || {}).status || {}).status), t("status.none")),
+              },
+              {
+                label: currentLanguage === "zh" ? "当前步骤" : "Current step",
+                transform: currentLanguage === "zh" ? "light session current_step" : "light session current_step",
+                output: prettify((sessionState || {}).current_step, t("status.none")),
+              },
+            ],
+          },
+          {
+            panel_id: "alerts",
+            title: currentLanguage === "zh" ? "应急熔断" : "Alerts",
+            summary: currentLanguage === "zh" ? "展示当前 runner 与待审批状态。" : "Shows runner and pending approval state.",
+            explanation: currentLanguage === "zh" ? "该卡片避免依赖 full session snapshot。" : "This card avoids depending on the full session snapshot.",
+            rows: [
+              {
+                label: currentLanguage === "zh" ? "待审批数量" : "Pending approvals",
+                transform: currentLanguage === "zh" ? "light session approvals" : "light session approvals",
+                output: String((((sessionState || {}).approvals || {}).pending_count) || ((((sessionState || {}).approvals || {}).pending || []).length || 0)),
+              },
+              {
+                label: currentLanguage === "zh" ? "自治状态" : "Autonomy status",
+                transform: currentLanguage === "zh" ? "autonomy status" : "autonomy status",
+                output: autonomySummaryLabel((autonomyState || {}).last_action_summary, autonomyState || {}),
+              },
+              {
+                label: currentLanguage === "zh" ? "服务停滞原因" : "Stall reason",
+                transform: currentLanguage === "zh" ? "service status" : "service status",
+                output: prettify((serviceStatusState || {}).stall_reason_detail || (serviceStatusState || {}).stall_reason, t("status.none")),
+              },
+            ],
+          },
+          {
+            panel_id: "dashboards",
+            title: currentLanguage === "zh" ? "仪表总览" : "Dashboards",
+            summary: currentLanguage === "zh" ? "保留现有观测入口。" : "Preserves existing observe entry points.",
+            explanation: currentLanguage === "zh" ? "该卡片由 console source links 生成。" : "This card is derived from console source links.",
+            rows: linkRows,
+          },
+        ];
+      }
+
       function hasMeaningfulValue(value) {
         const text = String(value ?? "").trim();
         return Boolean(text && text !== "暂无" && text !== "None");
       }
 
       function deriveOperationalSummary() {
-        const payload = sessionState || {};
+        const payload = sessionState || {
+          console: consoleState || {},
+          workbench: (consoleState || {}).workbench || { cards: [] },
+        };
         const currentRound = (((consoleState || {}).state || {}).current_round) || {};
         const whyCurrent = ((consoleState || {}).why_current || {}).why || {};
         const roundAction = actionLabel(currentRound.sampled_action || (autonomyState || {}).last_action_type || "");
         const renderModel = prettify(currentRound.render_model, "");
-        const topIntent = (((thoughtState || {}).thought_summary || {}).top_intent || ((initiativeState || {}).latest_proposal || {}).top_intent || "");
+        const topIntent = currentInitiativeTopIntent();
         let goal = hasMeaningfulValue(payload.goal_summary) ? payload.goal_summary : "";
         let step = hasMeaningfulValue(payload.current_step) ? payload.current_step : "";
         let tool = hasMeaningfulValue(payload.last_tool) ? payload.last_tool : "";
@@ -4093,7 +4348,7 @@
       }
 
       function renderSteps() {
-        const steps = (sessionState && sessionState.steps) || [];
+        const steps = hasItems((sessionState && sessionState.steps) || []) ? sessionState.steps : syntheticSteps();
         el("step-list").innerHTML = steps.length ? steps.slice(-6).map((step) => `
           <div class="timeline-item">
             <strong>${escapeHtml(step.title || step.step_id || "未命名步骤")}</strong>
@@ -4104,7 +4359,7 @@
       }
 
       function renderTools() {
-        const tools = (sessionState && sessionState.tools) || [];
+        const tools = hasItems((sessionState && sessionState.tools) || []) ? sessionState.tools : syntheticTools();
         el("tool-list").innerHTML = tools.length ? tools.slice(-6).map((tool) => `
           <div class="timeline-item">
             <strong>${escapeHtml(toolLabel(tool.tool_name || tool.tool || ""))}</strong>
@@ -4114,99 +4369,44 @@
         `).join("") : '<div class="empty-state">当前没有工具调用。</div>';
       }
 
+      function renderWorkbenchRows(rows = []) {
+        if (!rows.length) {
+          return '<div class="empty-state">当前没有可展示的只读摘要。</div>';
+        }
+        return `<div class="trace-list">${rows.map((row) => `
+          <div>
+            <strong>${escapeHtml(row.label || "未命名层")}</strong>
+            <div class="muted" style="margin-top: 4px;">${escapeHtml(row.transform || row.summary || "暂无 transform 摘要")}</div>
+            <div style="margin-top: 6px;">${escapeHtml(row.output || row.vector || "暂无 output vector 摘要")}</div>
+          </div>
+        `).join("")}</div>`;
+      }
+
       function renderWorkbench() {
         if (!sessionState && !consoleState) {
           el("workbench-panel").innerHTML = '<div class="empty-state">等待会话状态。</div>';
           return;
         }
         const payload = sessionState || {};
-        const cards = ((payload.workbench || {}).cards) || [];
+        const cards = hasItems(((payload.workbench || {}).cards) || [])
+          ? ((payload.workbench || {}).cards || [])
+          : fallbackWorkbenchCards();
         const cardById = Object.fromEntries(cards.map((card) => [card.panel_id, card]));
-        const sessionConsole = payload.console || consoleState || {};
-        const whyCurrent = (sessionConsole.why_current || {}).why || {};
-        const whyNot = (sessionConsole.why_not || {}).why_not || {};
-        const autonomy = sessionConsole.autonomy || ((sessionConsole.state || {}).autonomy_policy) || autonomyState || {};
-        const controlledLearningCard = {
-          title: currentLanguage === "zh" ? "受控学习" : "Controlled learning",
-          summary: currentLanguage === "zh"
-            ? `学习模式：${controlledLearningModeLabel(autonomy.learning_mode)} · 追踪：${autonomy.trace_external_learning ? "开启" : "关闭"}`
-            : `Learning mode: ${controlledLearningModeLabel(autonomy.learning_mode)} · Trace: ${autonomy.trace_external_learning ? "on" : "off"}`,
-          explanation: currentLanguage === "zh"
-            ? "这块只读展示当前 observer/state 里已有的学习边界，不会修改任何策略。"
-            : "This read-only block surfaces the learning boundary already present in observer/state data.",
-          drivers: [
-            currentLanguage === "zh"
-              ? `学习模式：${controlledLearningModeLabel(autonomy.learning_mode)}`
-              : `Learning mode: ${controlledLearningModeLabel(autonomy.learning_mode)}`,
-            currentLanguage === "zh"
-              ? `允许域名：${compactListText(autonomy.allowed_network_domains)}`
-              : `Allowlisted domains: ${compactListText(autonomy.allowed_network_domains)}`,
-            currentLanguage === "zh"
-              ? `可写根目录：${compactListText(autonomy.writable_roots)}`
-              : `Writable roots: ${compactListText(autonomy.writable_roots)}`,
-            currentLanguage === "zh"
-              ? `追踪状态：${autonomy.trace_external_learning ? "开启" : "关闭"}`
-              : `Trace status: ${autonomy.trace_external_learning ? "enabled" : "disabled"}`,
-          ],
-          next_paths: [
-            currentLanguage === "zh"
-              ? "仅读取已加载的 /state.autonomy_policy 与 /settings.autonomy。"
-              : "Reads only the loaded /state.autonomy_policy and /settings.autonomy.",
-          ],
+        const selectedByTab = {
+          "cognitive-chain": [cardById.cognitive_chain].filter(Boolean),
+          controls: [cardById.controls].filter(Boolean),
+          alerts: [cardById.alerts].filter(Boolean),
+          dashboards: [cardById.dashboards].filter(Boolean),
         };
-        const instinctField = (((sessionConsole.state || {}).cognitive_snapshot || {}).tlh || {}).instinct_field || {};
-        const instinctAxes = instinctField.axis_values || {};
-        const mappings = {
-          state: [controlledLearningCard, cardById.current_state, cardById.action_tendency].filter(Boolean),
-          why: [{
-            title: "当前解释",
-            summary: joinSummaryWithMonologue(whyCurrent.summary || "当前没有 why 摘要。", whyCurrent.expressive_trace),
-            explanation: "这一栏把本轮为什么这么做翻成可读语言，而不是直接暴露内部字段。",
-            drivers: Array.isArray(whyCurrent.drivers) ? whyCurrent.drivers : (Array.isArray(whyCurrent.top_drivers) ? whyCurrent.top_drivers.map((item) => humanizeLabel((item || {}).agent_name || (item || {}).module_name || (item || {}).name || "")) : []),
-            blockers: Array.isArray(whyCurrent.inhibitors) ? whyCurrent.inhibitors : [],
-            next_paths: [
-              `当前优胜动作：${actionLabel((((sessionConsole.action_field || {}).winner) || {}).action)}`,
-              ...monologueTraceLines(whyCurrent.expressive_trace),
-            ]
-          }],
-          instinct: [cardById.instinct_space].filter(Boolean),
-          probability: [cardById.probability_layers].filter(Boolean),
-          "why-not": [{
-            title: "为什么不是",
-            summary: joinSummaryWithMonologue(whyNot.summary || "当前没有 why-not 摘要。", whyNot.expressive_trace),
-            explanation: "这不是原始阻断字段，而是当前没走另一条路的原因解释。",
-            drivers: Array.isArray(whyNot.blocked_by) ? whyNot.blocked_by : [],
-            blockers: Array.isArray(whyNot.missing_support) ? whyNot.missing_support : [],
-            next_paths: [
-              `反事实预览：${(sessionConsole.counterfactual_preview) ? "已生成" : "暂无"}`,
-              `自治状态：${autonomy.enabled ? "运行中" : "关闭"}`,
-              ...monologueTraceLines(whyNot.expressive_trace),
-            ]
-          }]
-        };
-        const selected = mappings[activeWorkbenchTab] || mappings.state;
-        if (activeWorkbenchTab === "instinct") {
-          const plot = (probabilitySpaceState.plots || [])[0];
-          el("workbench-panel").innerHTML = `
-            <section class="workbench-card">
-              <h3>${escapeHtml(currentLanguage === "zh" ? "四维空间" : "Four-dimensional Space")}</h3>
-              ${spaceViewMode === "3d" ? renderSpace3d(probabilitySpaceState.space_3d) : renderProjectionPlot(plot)}
-            </section>
-          `;
-          return;
-        }
-        el("workbench-panel").innerHTML = selected.map((card) => `
+        const selected = selectedByTab[activeWorkbenchTab] || selectedByTab["cognitive-chain"];
+        el("workbench-panel").innerHTML = selected.length ? selected.map((card) => `
           <section class="workbench-card">
             <h3>${escapeHtml(card.title || "未命名卡片")}</h3>
             <div class="muted">${escapeHtml(card.summary || "暂无摘要")}</div>
             <div style="margin-top: 8px; line-height: 1.7;">${escapeHtml(card.explanation || "")}</div>
-            <ul>
-              ${(card.drivers || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
-              ${(card.blockers || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
-              ${(card.next_paths || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
-            </ul>
+            <div style="margin-top: 12px;">${renderWorkbenchRows(card.rows || [])}</div>
           </section>
-        `).join("");
+        `).join("") : '<div class="empty-state">当前没有匹配的只读读模型。</div>';
       }
 
       function renderStatusSummary() {
@@ -4240,13 +4440,27 @@
 
       function renderRouteStatus() {
         const currentRound = (((consoleState || {}).state || {}).current_round) || {};
-        const route = prettify(currentRound.render_route, t("route.none"));
+        const route = prettify(currentRound.route_type || currentRound.render_route, t("route.none"));
         const model = prettify(currentRound.render_model, "");
         const degraded = Boolean(currentRound.render_degraded);
         const failure = prettify(currentRound.failure_policy_applied, "");
+        const budget = prettify(currentRound.route_budget_ms, "");
+        const activation = Array.isArray(currentRound.activation_set) && currentRound.activation_set.length
+          ? currentRound.activation_set.join(" · ")
+          : "";
+        const memoryTiers = Array.isArray(currentRound.memory_tiers_read) && currentRound.memory_tiers_read.length
+          ? currentRound.memory_tiers_read.join(" → ")
+          : "";
+        const backgroundJobs = Array.isArray(currentRound.background_jobs) ? currentRound.background_jobs.length : 0;
+        const deepenReason = prettify(currentRound.deepen_reason, "");
         const noneText = t("status.none");
-        const pieces = [`${t("label.expression")}: ${route}`];
+        const pieces = [`${t("route.label")}: ${route}`];
         if (model && model !== noneText) pieces.push(model);
+        if (budget && budget !== noneText) pieces.push(`${budget}ms`);
+        if (activation) pieces.push(`${t("route.activation")}: ${activation}`);
+        if (memoryTiers) pieces.push(memoryTiers);
+        if (backgroundJobs) pieces.push(currentLanguage === "zh" ? `后台 ${backgroundJobs}` : `jobs ${backgroundJobs}`);
+        if (deepenReason && deepenReason !== noneText) pieces.push(deepenReason);
         if (degraded) pieces.push(currentLanguage === "zh" ? "已走回退" : "fallback");
         if (failure && failure !== noneText) pieces.push(currentLanguage === "zh" ? humanizeLabel(failure) : failure);
         const text = pieces.join(" · ");
@@ -4311,7 +4525,7 @@
         const subjective = newborn.subjective_state || {};
         const models = settingsState.models || {};
         const autonomy = settingsState.autonomy || {};
-        const bindings = models.agent_model_bindings || {};
+        const bindings = models.module_model_bindings || {};
         const routes = models.model_routes || {};
         const tiers = models.model_tiers || {};
         const localTier = tiers.local_model || {};
@@ -4340,10 +4554,11 @@
         renderCommandCheckboxList("setting-allowed-commands", autonomy.allowed_commands || []);
         renderCommandCheckboxList("setting-blocked-commands", autonomy.blocked_commands || []);
 
-        populateSelect("setting-binding-renderer", tierOptions, bindings.Renderer || "large_model");
-        populateSelect("setting-binding-planner", tierOptions, bindings.planner || "medium_model");
-        populateSelect("setting-binding-pfc", tierOptions, bindings.PFCAgent || "medium_model");
-        populateSelect("setting-binding-perspective", tierOptions, bindings.PerspectiveModel || "medium_model");
+        populateSelect("setting-binding-renderer", tierOptions, bindings.cognitive_packet || "medium_model");
+        populateSelect("setting-binding-planner", tierOptions, bindings.deliberation || "large_model");
+        populateSelect("setting-binding-pfc", tierOptions, bindings.tool_planner || "medium_model");
+        populateSelect("setting-binding-perspective", tierOptions, bindings.deep_renderer || "large_model");
+        populateSelect("setting-binding-consolidation", tierOptions, bindings.consolidation_summarizer || "small_model");
         populateSelect("setting-chat-fast-backend", supportedBackends, (routes.chat_fast || {}).backend || "deepseek");
         populateSelect("setting-medium-backend", supportedBackends, mediumTier.backend || "deepseek");
         populateSelect("setting-large-api-backend", supportedBackends, largeProvider.backend || "doubao");
@@ -4458,11 +4673,12 @@
                 enabled: true,
               },
             },
-            agent_model_bindings: {
-              Renderer: el("setting-binding-renderer").value,
-              planner: el("setting-binding-planner").value,
-              PFCAgent: el("setting-binding-pfc").value,
-              PerspectiveModel: el("setting-binding-perspective").value,
+            module_model_bindings: {
+              cognitive_packet: el("setting-binding-renderer").value,
+              deliberation: el("setting-binding-planner").value,
+              tool_planner: el("setting-binding-pfc").value,
+              deep_renderer: el("setting-binding-perspective").value,
+              consolidation_summarizer: el("setting-binding-consolidation").value,
             },
           },
         });
@@ -4580,8 +4796,8 @@
           { label: currentLanguage === "zh" ? "反事实回放" : "Replay", path: `/replay/${encodeURIComponent(roundRef)}?seed=${encodeURIComponent(roundRef === "last" ? "1" : roundRef)}` },
         ];
         el("analysis-observability").innerHTML = `
-          <div>${escapeHtml(currentLanguage === "zh" ? "当前想法" : "Thought")}：${escapeHtml((((thoughtState || {}).thought_summary || {}).top_intent) ? humanizeLabel(((thoughtState || {}).thought_summary || {}).top_intent) : t("status.none"))}</div>
-          <div>${escapeHtml(currentLanguage === "zh" ? "主动性触发" : "Initiative trigger")}：${escapeHtml(humanizeLabel(prettify((((initiativeState || {}).latest_trigger || {}).trigger_type) || (((initiativeDistributionState || {}).latest_trigger || {}).trigger_type), t("status.none"))))}</div>
+          <div>${escapeHtml(currentLanguage === "zh" ? "当前想法" : "Thought")}：${escapeHtml(currentInitiativeTopIntent() ? humanizeLabel(currentInitiativeTopIntent()) : t("status.none"))}</div>
+          <div>${escapeHtml(currentLanguage === "zh" ? "主动性触发" : "Initiative trigger")}：${escapeHtml(humanizeLabel(prettify((((initiativeState || {}).latest_trigger || {}).trigger_type), t("status.none"))))}</div>
           <div>${escapeHtml(currentLanguage === "zh" ? "为何未变化" : "Why no change")}：${escapeHtml(prettify((whyNoChangeState || {}).summary, t("analysis.observability_empty")))}</div>
           <div class="observe-grid">
             ${observabilityLinks.map((item) => `<button class="chip" data-observe-path="${escapeHtml(item.path)}" data-observe-title="${escapeHtml(item.label)}">${escapeHtml(item.label)}</button>`).join("")}
@@ -4602,6 +4818,11 @@
           <div>最近一步时间：${escapeHtml(localDateTimeText(autonomy.last_step_at, t("status.none")))}</div>
           <div>最近动作类型：${escapeHtml(actionLabel(autonomy.last_action_type || ""))}</div>
           <div>最近动作摘要：${escapeHtml(autonomySummaryLabel(autonomy.last_action_summary, autonomy))}</div>
+          <div>fresh session：${escapeHtml(prettify((serviceStatusState || {}).fresh_session_available))}</div>
+          <div>selected session：${escapeHtml(prettify((serviceStatusState || {}).selected_session_id || "", t("status.none")))}${escapeHtml((serviceStatusState || {}).selected_session_age_seconds !== undefined && (serviceStatusState || {}).selected_session_age_seconds !== null ? ` (${prettify((serviceStatusState || {}).selected_session_age_seconds)}s)` : "")}</div>
+          <div>monologue overdue：${escapeHtml(prettify((serviceStatusState || {}).monologue_overdue_seconds || 0))}</div>
+          <div>initiative runtime busy：${escapeHtml(prettify((serviceStatusState || {}).initiative_runtime_busy))}</div>
+          <div>monologue runtime busy：${escapeHtml(prettify((serviceStatusState || {}).monologue_runtime_busy))}</div>
         `;
 
         const autonomyRecentActions = autonomy.recent_actions || [];
@@ -4610,12 +4831,17 @@
         `).join("") : `<div>${escapeHtml(t("analysis.no_autonomy_actions"))}</div>`;
 
         const budget = autonomy.budget_usage || {};
+        const internalLearning = internalLearningView(state);
+        const externalLearning = externalLearningView(state);
+        const topPolicyShifts = (internalLearning.top_policy_shifts || []).map((item) => `${humanizeLabel(item.intent || "")} ${prettify(item.delta ?? 0)}`);
         el("analysis-autonomy-policy").innerHTML = `
           <div>允许命令：${escapeHtml(prettify(translateList(autonomy.allowed_commands || [], commandPolicyLabel)))}</div>
           <div>禁止命令：${escapeHtml(prettify(translateList(autonomy.blocked_commands || [], commandPolicyLabel)))}</div>
           <div>每小时轮次数上限：${escapeHtml(hourlyCapText(budget.max_rounds_per_hour))}</div>
           <div>每小时工具动作上限：${escapeHtml(hourlyCapText(budget.max_tool_actions_per_hour))}</div>
           <div>当前窗口工具动作：${escapeHtml(prettify(budget.tool_actions))}</div>
+          <div>内部学习：${escapeHtml(`${internalLearning.recent_feedback_count} · ${prettify(topPolicyShifts, currentLanguage === "zh" ? "暂无明显策略漂移" : "No notable shifts")} · ${prettify(internalLearning.last_learning_round || "", currentLanguage === "zh" ? "暂无学习轮次" : "No learning round")}`)}</div>
+          <div>外部主动学习：${escapeHtml(externalLearning.blocked ? `被策略阻断${externalLearning.summary ? ` (${externalLearning.summary})` : ""}` : "已允许")}</div>
         `;
       }
 
@@ -4808,7 +5034,7 @@
         };
         if (payload.session_attached && payload.session) {
           sessionId = MAIN_SESSION_ID;
-          sessionState = payload.session;
+          sessionState = mergeSessionPayload(payload.session);
         } else if (!payload.session_attached) {
           sessionId = "";
           sessionState = null;
@@ -4856,26 +5082,35 @@
           consoleState.state = statePayload;
           consoleState.autonomy = autonomyState;
         }
+        initiativeState = (statePayload || {}).initiative || null;
         const roundId = (((consoleState || {}).state || {}).current_round || {}).round_id;
         const probabilityPath = roundId
           ? `/console/probability-space?round_ref=${encodeURIComponent(roundId)}`
           : "/console/probability-space";
+        const whyNoChangePath = roundId ? `/diagnostics/why-no-change/${encodeURIComponent(roundId)}` : "/diagnostics/why-no-change/last";
+        const replayPath = roundId ? `/replay/${encodeURIComponent(roundId)}?seed=${encodeURIComponent(roundId)}` : "/replay/0?seed=0";
         const observabilityRequests = [
-          loadJson(probabilityPath),
-          loadJson("/initiative/status"),
-          loadJson("/initiative/distribution"),
-          loadJson(roundId ? `/thought/${encodeURIComponent(roundId)}` : "/thought/last"),
-          loadJson(roundId ? `/diagnostics/why-no-change/${encodeURIComponent(roundId)}` : "/diagnostics/why-no-change/last"),
-          loadJson(roundId ? `/replay/${encodeURIComponent(roundId)}?seed=${encodeURIComponent(roundId)}` : "/replay/0?seed=0"),
-          loadJson("/speak/status"),
           loadJson(roundId ? `/speak/${encodeURIComponent(roundId)}` : "/speak/last"),
           loadJson("/monologue/status"),
           loadJson("/monologue/show?limit=6"),
           loadJson(roundId ? `/monologue/${encodeURIComponent(roundId)}` : "/monologue/last"),
-          loadJson("/dream/overview"),
         ];
         try {
-          [probabilitySpaceState, initiativeState, initiativeDistributionState, thoughtState, whyNoChangeState, replayState, speakStatusState, speakState, monologueStatusState, monologueShowState, monologueState, dreamOverviewState] = await Promise.all(observabilityRequests);
+          [speakState, monologueStatusState, monologueShowState, monologueState] = await Promise.all(observabilityRequests);
+          if ((el("analysis-page") || {}).classList && el("analysis-page").classList.contains("active")) {
+            probabilitySpaceState = await loadJson(probabilityPath);
+          }
+          if ((el("analysis-page") || {}).classList && el("analysis-page").classList.contains("active")) {
+            [whyNoChangeState, replayState] = await Promise.all([
+              loadJson(whyNoChangePath),
+              loadJson(replayPath),
+            ]);
+          } else if ((el("replay-page") || {}).classList && el("replay-page").classList.contains("active")) {
+            replayState = await loadJson(replayPath);
+          }
+          if ((el("dream-page") || {}).classList && el("dream-page").classList.contains("active")) {
+            dreamOverviewState = await loadJson("/dream/overview");
+          }
         } catch (error) {
           console.error(error);
         }
@@ -4896,18 +5131,19 @@
           return;
         }
         try {
-          sessionState = await loadJson(`/web/session/state?session_id=${encodeURIComponent(sessionId)}`);
+          const payload = await loadJson(`/web/session/state?session_id=${encodeURIComponent(sessionId)}`);
+          sessionState = mergeSessionPayload(payload);
         } catch (error) {
           sessionState = null;
           renderStatusSummary();
           renderApprovals();
           renderSteps();
-        renderTools();
-        renderMessages();
-        renderWorkbench();
-        renderProfile();
-        renderDeveloperDetails();
-        return;
+          renderTools();
+          renderMessages();
+          renderWorkbench();
+          renderProfile();
+          renderDeveloperDetails();
+          return;
         }
         const transcriptLines = (((sessionState || {}).session || {}).transcript_lines || []);
         if (transcriptLines.length && transcriptLines[transcriptLines.length - 1].kind === "assistant") {
@@ -5033,7 +5269,7 @@
         try {
           const payload = await postJson("/web/runtime/start", { profile: "tool_level" });
           sessionId = MAIN_SESSION_ID;
-          sessionState = payload.session;
+          sessionState = mergeSessionPayload(payload.session);
           serviceStatusState = payload.service || serviceStatusState;
           if (
             optimisticLines.length &&
@@ -5148,11 +5384,9 @@
         serviceStatusState = payload.service || serviceStatusState;
         autonomyState = payload.autonomy || null;
         initiativeState = null;
-        initiativeDistributionState = null;
         thoughtState = null;
         whyNoChangeState = null;
         replayState = (payload.explainability || {}).replay || null;
-        speakStatusState = null;
         speakState = (payload.explainability || {}).speak || null;
         monologueStatusState = null;
         monologueShowState = null;

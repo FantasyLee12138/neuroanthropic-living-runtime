@@ -6,9 +6,13 @@ import socket
 import subprocess
 import sys
 import time
+import types
+from contextlib import closing
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+import pytest
 
 from nalr import observer_launcher
 
@@ -56,6 +60,27 @@ def test_workbench_command_exposes_observer_launcher_help():
     assert result.returncode == 0
     assert "--no-browser" in result.stdout
     assert "--port" in result.stdout
+
+
+def test_workbench_command_invokes_foreground_by_default(tmp_path):
+    command_path = tmp_path / "Open_NALR_Workbench.command"
+    alive_path = tmp_path / "alive-observer"
+
+    command_path.write_text((REPO_ROOT / "Open_NALR_Workbench.command").read_text(encoding="utf-8"), encoding="utf-8")
+    command_path.chmod(0o755)
+    alive_path.write_text("#!/bin/zsh\nprintf '%s\\n' \"$@\"\n", encoding="utf-8")
+    alive_path.chmod(0o755)
+
+    result = subprocess.run(
+        ["zsh", str(command_path), "--port", "9900"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[:3] == ["foreground", "--port", "9900"]
 
 
 def test_observer_launcher_requires_restart_when_requested_port_is_already_serving_dashboard(monkeypatch):
@@ -115,6 +140,196 @@ def test_observer_launcher_env_autoload_preserves_existing_values(tmp_path, monk
 
     assert loaded == env_path
     assert os.environ["ARK_API_KEY"] == "ark-from-env"
+
+
+def test_observer_launcher_help_lists_public_foreground_command():
+    parser = observer_launcher.build_parser()
+
+    help_text = parser.format_help()
+
+    assert "foreground" in help_text
+    assert "Start the observer service in the foreground." in help_text
+
+
+def test_observer_launcher_normalize_argv_preserves_foreground_command():
+    assert observer_launcher._normalize_argv(["foreground"]) == ["foreground"]
+
+
+def test_observer_launcher_main_dispatches_public_foreground_command(monkeypatch):
+    observed: dict[str, object] = {}
+
+    def fake_serve_foreground(args):
+        observed["command"] = args.command
+        observed["host"] = args.host
+        observed["port"] = args.port
+        observed["instance_id"] = getattr(args, "instance_id", "")
+        observed["started_at"] = getattr(args, "started_at", "")
+        return 0
+
+    monkeypatch.setattr(observer_launcher, "_serve_foreground", fake_serve_foreground)
+
+    with pytest.raises(SystemExit) as exc_info:
+        observer_launcher.main(["foreground", "--host", "127.0.0.1", "--port", "9876"])
+
+    assert exc_info.value.code == 0
+    assert observed["command"] == "foreground"
+    assert observed["host"] == "127.0.0.1"
+    assert observed["port"] == 9876
+    assert observed["instance_id"]
+    assert observed["started_at"]
+
+
+def test_observer_launcher_main_foreground_replaces_existing_same_project_instance(monkeypatch, tmp_path):
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        observer_launcher,
+        "resolve_launch_target",
+        lambda host, port, open_path: {"mode": "restart_required", "port": port, "url": f"http://{host}:{port}{open_path}"},
+    )
+    monkeypatch.setattr(
+        observer_launcher,
+        "_load_json_url",
+        lambda url, timeout_seconds=2.0: {"project_root": str(tmp_path), "pid": 45678},
+    )
+
+    def fake_stop_pid(pid, timeout_seconds=10.0):
+        observed["stopped_pid"] = pid
+        observed["stop_timeout"] = timeout_seconds
+        return True
+
+    def fake_serve_foreground(args):
+        observed["served_port"] = args.port
+        observed["served_project_root"] = args.project_root
+        return 0
+
+    monkeypatch.setattr(observer_launcher, "_stop_pid", fake_stop_pid)
+    monkeypatch.setattr(observer_launcher, "_serve_foreground", fake_serve_foreground)
+
+    with pytest.raises(SystemExit) as exc_info:
+        observer_launcher.main(["foreground", "--project-root", str(tmp_path), "--config-root", str(CONFIG_ROOT)])
+
+    assert exc_info.value.code == 0
+    assert observed["stopped_pid"] == 45678
+    assert observed["stop_timeout"] == 2.0
+    assert observed["served_port"] == 8765
+    assert observed["served_project_root"] == str(tmp_path)
+
+
+def test_serve_foreground_schedules_browser_open(monkeypatch, tmp_path):
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(observer_launcher, "_ensure_repo_imports", lambda: tmp_path)
+    monkeypatch.setattr(observer_launcher, "autoload_repo_env", lambda repo_root: None)
+    monkeypatch.setattr(
+        observer_launcher,
+        "_sync_workbench_dist",
+        lambda repo_root: observed.setdefault("workbench_sync", {"repo_root": str(repo_root), "synced": True}),
+    )
+    monkeypatch.setattr(
+        observer_launcher,
+        "_open_browser_when_ready",
+        lambda url, no_browser: observed.setdefault("browser", (url, no_browser)),
+        raising=False,
+    )
+
+    fake_services = types.ModuleType("services")
+    fake_observer = types.ModuleType("services.observer")
+    fake_api = types.ModuleType("services.observer.api")
+    fake_app = types.ModuleType("services.observer.api.app")
+
+    def fake_create_app(*, project_root, config_root, service_metadata):
+        observed["service_metadata"] = service_metadata
+        return "fake-app"
+
+    fake_app.create_app = fake_create_app
+
+    fake_uvicorn = types.ModuleType("uvicorn")
+
+    def fake_run(app, host, port, log_level):
+        observed["run"] = (app, host, port, log_level)
+
+    fake_uvicorn.run = fake_run
+
+    monkeypatch.setitem(sys.modules, "services", fake_services)
+    monkeypatch.setitem(sys.modules, "services.observer", fake_observer)
+    monkeypatch.setitem(sys.modules, "services.observer.api", fake_api)
+    monkeypatch.setitem(sys.modules, "services.observer.api.app", fake_app)
+    monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+
+    args = type(
+        "Args",
+        (),
+        {
+            "host": "127.0.0.1",
+            "port": 8765,
+            "open_path": "/dashboard",
+            "project_root": str(tmp_path),
+            "config_root": str(CONFIG_ROOT),
+            "instance_id": "foreground-instance",
+            "started_at": "2026-04-11T03:55:00+0800",
+            "no_browser": False,
+        },
+    )()
+
+    result = observer_launcher._serve_foreground(args)
+
+    assert result == 0
+    assert observed["workbench_sync"] == {"repo_root": str(tmp_path), "synced": True}
+    assert observed["browser"] == ("http://127.0.0.1:8765/dashboard", False)
+    assert observed["run"] == ("fake-app", "127.0.0.1", 8765, "warning")
+
+
+def test_sync_workbench_dist_copies_src_when_dist_is_stale(tmp_path):
+    workbench_root = tmp_path / "apps" / "workbench"
+    src = workbench_root / "src"
+    dist = workbench_root / "dist"
+    src.mkdir(parents=True)
+    dist.mkdir(parents=True)
+    (src / "index.html").write_text("<title>new shell</title>", encoding="utf-8")
+    (dist / "index.html").write_text("<title>old shell</title>", encoding="utf-8")
+
+    time.sleep(0.02)
+    (src / "main.js").write_text("console.log('fresh');", encoding="utf-8")
+
+    result = observer_launcher._sync_workbench_dist(tmp_path)
+
+    assert result["synced"] is True
+    assert result["reason"] == "copied"
+    assert (dist / "index.html").read_text(encoding="utf-8") == "<title>new shell</title>"
+    assert (dist / "main.js").read_text(encoding="utf-8") == "console.log('fresh');"
+
+
+def test_open_browser_when_ready_opens_after_tcp_accepts(monkeypatch):
+    observed: dict[str, object] = {}
+
+    class FakeThread:
+        def __init__(self, *, target, name, daemon):
+            self._target = target
+            observed["thread_name"] = name
+            observed["thread_daemon"] = daemon
+
+        def start(self):
+            self._target()
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = int(listener.getsockname()[1])
+
+    monkeypatch.setattr(observer_launcher.threading, "Thread", FakeThread)
+    monkeypatch.setattr(observer_launcher, "_observer_ready_timeout_seconds", lambda: 0.2)
+    monkeypatch.setattr(observer_launcher, "_open_browser", lambda url, no_browser: observed.setdefault("browser", (url, no_browser)))
+
+    try:
+        observer_launcher._open_browser_when_ready(f"http://127.0.0.1:{port}/dashboard", False)
+    finally:
+        listener.close()
+
+    assert observed["thread_name"] == "nalr-observer-browser"
+    assert observed["thread_daemon"] is True
+    assert observed["browser"] == (f"http://127.0.0.1:{port}/dashboard", False)
 
 
 def test_alive_observer_start_status_and_stop_manage_background_service(tmp_path):
@@ -350,7 +565,7 @@ def test_observer_launcher_start_uses_preferred_managed_python_bin_for_serve_pro
 
     monkeypatch.setattr(observer_launcher, "_preferred_managed_python_bin", lambda repo_root: Path("/tmp/python3.11"))
     monkeypatch.setattr(observer_launcher, "resolve_launch_target", lambda host, port, open_path: {"mode": "start", "port": port, "url": f"http://{host}:{port}{open_path}"})
-    monkeypatch.setattr(observer_launcher, "_wait_until_ready", lambda url: None)
+    monkeypatch.setattr(observer_launcher, "_wait_until_ready", lambda url, timeout_seconds=20.0: None)
     monkeypatch.setattr(
         observer_launcher,
         "_load_json_url_with_error",
@@ -394,3 +609,14 @@ def test_observer_launcher_start_uses_preferred_managed_python_bin_for_serve_pro
     assert launched["argv"][0] == "/tmp/python3.11"
     assert launched["argv"][1:4] == ["-m", "nalr.observer_launcher", "serve"]
     assert Path(str(payload["python_bin"])) == Path("/tmp/python3.11")
+
+
+def test_observer_launcher_ready_timeout_is_configurable(monkeypatch):
+    monkeypatch.delenv("NALR_OBSERVER_READY_TIMEOUT_SECONDS", raising=False)
+    assert observer_launcher._observer_ready_timeout_seconds() == 90.0
+
+    monkeypatch.setenv("NALR_OBSERVER_READY_TIMEOUT_SECONDS", "135")
+    assert observer_launcher._observer_ready_timeout_seconds() == 135.0
+
+    monkeypatch.setenv("NALR_OBSERVER_READY_TIMEOUT_SECONDS", "0")
+    assert observer_launcher._observer_ready_timeout_seconds() == 90.0

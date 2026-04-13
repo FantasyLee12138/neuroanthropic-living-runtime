@@ -120,7 +120,7 @@ def test_compact_memory_returns_before_artifact_disk_writes_finish(tmp_path, mon
         if path.parent in {
             controller.memory_store.episodic_hot_dir,
             controller.memory_store.episodic_warm_dir,
-            controller.memory_store.episodic_archive_dir,
+            controller.memory_store.episodic_cold_dir,
         }:
             time.sleep(0.25)
         return original_write_text(path, data, *args, **kwargs)

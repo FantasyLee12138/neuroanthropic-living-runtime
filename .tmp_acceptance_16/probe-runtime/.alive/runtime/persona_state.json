@@ -1,0 +1,1728 @@
+{
+  "session_id": "0db2bcfd4805433394d1b641405ffbef",
+  "subject_core": {
+    "subject_id": "subject-e7e10e02b0fb4a789ba6f4d690d73ee6",
+    "birth_ts": "2026-04-13T03:35:53Z",
+    "continuity_nonce": "continuity-3b441cfb702248a8bc0f6f13fb3c0bc0",
+    "original_vitality_anchor": {
+      "affect_residue": 0.0,
+      "body_energy": 0.7,
+      "budget_remaining": 1.0,
+      "mood": 0.55
+    },
+    "core_boundary_version": 1
+  },
+  "mode": "safe",
+  "safe_mode": true,
+  "round_count": 13,
+  "runtime_revision": 20,
+  "last_mutation_at": "2026-04-13T03:36:10Z",
+  "body_energy": 0.7,
+  "fatigue": 0.0,
+  "memory_fragments": 0.038,
+  "self_continuity": 0.9399,
+  "meaning_strength": 1.0,
+  "base_metabolism": 0.01,
+  "mood": 0.5570588235488512,
+  "affect_residue": 0.0657,
+  "focus": "respond",
+  "focus_lock_count": 8,
+  "focus_nudge": 0.0,
+  "budget_remaining": 1.0,
+  "last_action": "respond",
+  "last_checkpoint_id": "ckpt-0002",
+  "action_ci": {
+    "absorb": 0.3055763561406539,
+    "clarify": 0.3055763561406539,
+    "connect": 0.3055763561406539,
+    "die": 0.3055763561406539,
+    "monologue": 0.3055763561406539,
+    "nothing": 0.3055763561406539,
+    "plan": 0.3055763561406539,
+    "recall": 0.3055763561406539,
+    "respond": 0.3055763561406539,
+    "rest": 0.3055763561406539,
+    "short_reply": 0.3055763561406539,
+    "wander": 0.3055763561406539
+  },
+  "mode_history": [
+    "interactive",
+    "safe",
+    "safe",
+    "safe",
+    "safe",
+    "safe",
+    "safe",
+    "safe",
+    "safe",
+    "safe",
+    "safe",
+    "safe",
+    "safe"
+  ],
+  "agent_weight_overrides": {},
+  "agents_enabled": {
+    "BehaviorPlausibilityGuard": true,
+    "BodyStateAgent": true,
+    "ConflictMonitorAgent": true,
+    "DMNAgent": true,
+    "ForcedModeSwitch": true,
+    "HabitAgent": true,
+    "HippocampusAgent": true,
+    "InitiativeInteractionAgent": true,
+    "OutputStyleLayer": true,
+    "PFCAgent": true,
+    "PerspectiveModel": true,
+    "RelationshipAgent": true,
+    "ResourceAgent": true,
+    "ThalamusAttentionAgent": true,
+    "ValueAgent": true
+  },
+  "critical_conflict_streak": 0,
+  "conflict_hot_rounds": 0,
+  "conflict_recovery_rounds": 0,
+  "last_compromise_template": null,
+  "last_conflict_priority": null,
+  "temperament_state": {
+    "baseline": {
+      "attachment_need": 0.55,
+      "boundary_softness": 0.4,
+      "sensitivity": 0.52,
+      "patience": 0.58,
+      "extraversion": 0.48,
+      "cognitive_bandwidth": 0.62,
+      "desire_priority": 0.55
+    },
+    "drift": {
+      "attachment_need": 0.0014,
+      "boundary_softness": 0.0012,
+      "sensitivity": 0.0021,
+      "patience": -0.0074,
+      "extraversion": -0.0019,
+      "cognitive_bandwidth": -0.0162,
+      "desire_priority": -0.0001
+    },
+    "current": {
+      "attachment_need": 0.5514,
+      "boundary_softness": 0.4012,
+      "sensitivity": 0.5221,
+      "patience": 0.5726,
+      "extraversion": 0.4781,
+      "cognitive_bandwidth": 0.6038,
+      "desire_priority": 0.5499
+    },
+    "correction_window": {
+      "attachment_need": [],
+      "boundary_softness": [],
+      "cognitive_bandwidth": [],
+      "desire_priority": [],
+      "extraversion": [],
+      "patience": [],
+      "sensitivity": []
+    },
+    "freeze_until_round": {},
+    "last_correction_events": [],
+    "drift_diagnostics": {
+      "attachment_need": {
+        "window_support": 0.0002,
+        "recover_rate": 0.02,
+        "effective_push": -0.0002,
+        "delta_reason": "warm_confirmation",
+        "suppressed_by_clip": false,
+        "freeze_reason": "none"
+      },
+      "boundary_softness": {
+        "window_support": 0.0,
+        "recover_rate": 0.025,
+        "effective_push": -0.0002,
+        "delta_reason": "repeated_rejection",
+        "suppressed_by_clip": false,
+        "freeze_reason": "none"
+      },
+      "cognitive_bandwidth": {
+        "window_support": 0.0068,
+        "recover_rate": 0.02,
+        "effective_push": -0.0011,
+        "delta_reason": "resource_pressure",
+        "suppressed_by_clip": false,
+        "freeze_reason": "none"
+      },
+      "desire_priority": {
+        "window_support": 0.0001,
+        "recover_rate": 0.02,
+        "effective_push": -0.0002,
+        "delta_reason": "identity_repetition",
+        "suppressed_by_clip": false,
+        "freeze_reason": "none"
+      },
+      "extraversion": {
+        "window_support": 0.0,
+        "recover_rate": 0.02,
+        "effective_push": -0.0002,
+        "delta_reason": "withdrawal_pressure",
+        "suppressed_by_clip": false,
+        "freeze_reason": "none"
+      },
+      "patience": {
+        "window_support": 0.0068,
+        "recover_rate": 0.03,
+        "effective_push": -0.0009,
+        "delta_reason": "sustained_friction",
+        "suppressed_by_clip": false,
+        "freeze_reason": "none"
+      },
+      "sensitivity": {
+        "window_support": 0.0,
+        "recover_rate": 0.02,
+        "effective_push": -0.0002,
+        "delta_reason": "repeated_rejection",
+        "suppressed_by_clip": false,
+        "freeze_reason": "none"
+      }
+    }
+  },
+  "resource_state": {
+    "burn_rate_ratio": 0.005,
+    "low_balance_ratio": 0.001,
+    "queue_pressure": 0.0,
+    "latency_pressure": 0.0984,
+    "scarcity_index": 0.0121,
+    "resource_mode": "abundant",
+    "scarcity_pressure": 0.0825,
+    "body_hunger_bias": 0.1454,
+    "effort_avoidance_bias": 0.0871,
+    "deliberation_compress": 0.9587,
+    "rumination_bias": 0.0789,
+    "action_shrink_scale": 0.967,
+    "queue_depth": 0,
+    "average_latency_ms": 24.6
+  },
+  "repair_mode": null,
+  "repair_state": {
+    "stage": "idle",
+    "active": false,
+    "last_reason": "idle",
+    "last_transition_round": 13,
+    "cooldown_rounds_remaining": 0,
+    "last_template": null,
+    "last_winning_priority": null
+  },
+  "repair_ledger": [],
+  "conflict_safe_mode_owner": null,
+  "last_post_error_adjustment": null,
+  "conflict_learning_state": {},
+  "entropy_health_state": {
+    "state": "ready",
+    "provider_class": "MacOSSystemEntropyProvider",
+    "endpoint": "file:///dev/urandom",
+    "available_bytes": 144,
+    "last_failure": {}
+  },
+  "last_entropy_failure": {},
+  "session_metadata": {
+    "autonomy_default_enabled_at": "2026-04-13T03:35:53Z",
+    "initiative": {
+      "feedback": {
+        "recent": []
+      },
+      "history": [],
+      "last_evaluated_at": "",
+      "last_evaluation": {},
+      "last_evaluation_source": "",
+      "settings": {
+        "idle_seconds_threshold": 300,
+        "vitality_threshold": 0.8,
+        "relation_strength_threshold": 0.6,
+        "habit_strength_threshold": 0.45,
+        "proposal_posterior_threshold": 0.7,
+        "hourly_limit": 0,
+        "cooldown_seconds": 600,
+        "require_memory_backing": true,
+        "auto_send_enabled": true
+      }
+    },
+    "monologue_stream": {
+      "seed": "e9f8a7e9c55f405f84e77bf4ab3f2be4",
+      "started_at": "2026-04-13T03:35:47Z",
+      "next_pulse_at": "2026-04-13T03:35:47Z",
+      "last_generated_at": "",
+      "last_viewed_at": "",
+      "pulse_index": 0,
+      "generated_total": 0,
+      "category_counts": {},
+      "settings": {
+        "hidden_by_default": true,
+        "bootstrap_seconds": 6,
+        "min_interval_ms": 120,
+        "max_interval_ms": 900,
+        "max_catch_up_pulses": 24,
+        "min_fragments_per_pulse": 1,
+        "max_fragments_per_pulse": 3,
+        "default_show_limit": 12,
+        "generator_mode": "model"
+      }
+    },
+    "last_appraisal_band": "muted"
+  },
+  "identity_state": {
+    "internal_handle": "nalr-0db2bcfd",
+    "display_name": "霁禾",
+    "aliases": [],
+    "name_source": "generated",
+    "provider_disclosure_mode": "adaptive",
+    "evidence_signature": "575fadbcd410c79f78f9cba3cd2e60337c7815d0",
+    "evidence_anchors": [
+      "affect:quiet",
+      "cue:alphaa7f452",
+      "cue:alphba7f452",
+      "energy:steady",
+      "habit:alphba7f452",
+      "memory:alphba7f452",
+      "mood:steady",
+      "relation:user",
+      "resource:open"
+    ],
+    "drift_credit": 0.1136,
+    "last_name_change_round": 5
+  },
+  "body_state": {
+    "energy": 0.7,
+    "fatigue": 0.0,
+    "memory_fragments": 0.038,
+    "self_continuity": 0.9399,
+    "meaning_strength": 1.0,
+    "metabolism": 0.01
+  },
+  "subjective_state": {
+    "felt": [],
+    "spontaneous": 0.08,
+    "boundary": 0.179,
+    "reject_all": 0.0588,
+    "meaning_made": []
+  },
+  "emotion_state": {
+    "valence": 0.0157,
+    "arousal": 0.0453,
+    "residue": 0.0657,
+    "appraisal_band": "muted"
+  },
+  "desire_state": {
+    "latent_drives": {
+      "comfort": 0.159855,
+      "meaning": 0.65,
+      "relation": 0.54179,
+      "exploration": 0.06132,
+      "completion": 0.835152
+    },
+    "dominant_drive": "completion",
+    "drive_tension": 0.8352
+  },
+  "instinct_field": {
+    "axis_values": {
+      "E": 0.893459,
+      "F": 0.476891,
+      "S": 0.571844,
+      "M": 0.877423
+    },
+    "region_scores": {
+      "express": 0.976782,
+      "withdraw": 0.095853,
+      "hibernate": 0.176358,
+      "dissolve": 0.078783,
+      "absorb": 0.707793
+    },
+    "candidate_actions": [
+      "respond",
+      "connect",
+      "plan",
+      "clarify",
+      "monologue",
+      "recall"
+    ],
+    "winner_region": "express",
+    "collapse_trace": {
+      "v_main": {
+        "E": 0.893459,
+        "F": 0.476891,
+        "S": 0.571844,
+        "M": 0.877423
+      },
+      "v_mod": {
+        "memory_fragments": 0.0323,
+        "spontaneous": 0.08,
+        "reject_all": 0.0623,
+        "emergent_growth": 1.0
+      },
+      "v_anchor": {
+        "E": 0.808471,
+        "F": 0.468804,
+        "S": 0.574325,
+        "M": 0.793132
+      },
+      "normalized_axes": {
+        "E": 0.893459,
+        "F": 0.476891,
+        "S": 0.571844,
+        "M": 0.877423
+      },
+      "subject_vector": {
+        "E": 0.856258,
+        "F": 0.462236,
+        "S": 0.556403,
+        "M": 0.844199
+      },
+      "coupled_axes": {
+        "E": 0.856258,
+        "F": 0.462236,
+        "S": 0.556403,
+        "M": 0.844199
+      },
+      "random_point": {
+        "E": 0.856258,
+        "F": 0.462236,
+        "S": 0.556403,
+        "M": 0.844199
+      },
+      "action_vectors": {
+        "respond": {
+          "E": 0.76,
+          "F": 0.34,
+          "S": 0.46,
+          "M": 0.68
+        },
+        "plan": {
+          "E": 0.62,
+          "F": 0.3,
+          "S": 0.42,
+          "M": 0.84
+        },
+        "recall": {
+          "E": 0.42,
+          "F": 0.46,
+          "S": 0.66,
+          "M": 0.7
+        },
+        "rest": {
+          "E": 0.2,
+          "F": 0.84,
+          "S": 0.22,
+          "M": 0.38
+        },
+        "connect": {
+          "E": 0.84,
+          "F": 0.3,
+          "S": 0.48,
+          "M": 0.6
+        },
+        "clarify": {
+          "E": 0.52,
+          "F": 0.26,
+          "S": 0.34,
+          "M": 0.78
+        },
+        "wander": {
+          "E": 0.36,
+          "F": 0.42,
+          "S": 0.84,
+          "M": 0.46
+        },
+        "absorb": {
+          "E": 0.3,
+          "F": 0.58,
+          "S": 0.74,
+          "M": 0.72
+        },
+        "monologue": {
+          "E": 0.48,
+          "F": 0.44,
+          "S": 0.72,
+          "M": 0.64
+        },
+        "nothing": {
+          "E": 0.18,
+          "F": 0.66,
+          "S": 0.34,
+          "M": 0.4
+        },
+        "die": {
+          "E": 0.08,
+          "F": 0.88,
+          "S": 0.22,
+          "M": 0.12
+        },
+        "short_reply": {
+          "E": 0.54,
+          "F": 0.36,
+          "S": 0.32,
+          "M": 0.54
+        }
+      },
+      "modulation_directions": {
+        "memory_fragments": {
+          "E": 0.3,
+          "F": 0.566667,
+          "S": 0.58,
+          "M": 0.606667
+        },
+        "spontaneous": {
+          "E": 0.39,
+          "F": 0.475,
+          "S": 0.74,
+          "M": 0.63
+        },
+        "reject_all": {
+          "E": 0.153333,
+          "F": 0.793333,
+          "S": 0.26,
+          "M": 0.3
+        },
+        "emergent_growth": {
+          "E": 0.723314,
+          "F": 0.329338,
+          "S": 0.452427,
+          "M": 0.69151
+        }
+      },
+      "match_scores": {
+        "respond": 0.953565,
+        "plan": 0.778923,
+        "recall": 0.407116,
+        "rest": -0.647284,
+        "connect": 0.795789,
+        "clarify": 0.516206,
+        "wander": -0.219013,
+        "absorb": 0.076971,
+        "monologue": 0.415585,
+        "nothing": -0.808295,
+        "die": -0.842434,
+        "short_reply": 0.197503
+      },
+      "action_regions": {
+        "respond": {
+          "vector": {
+            "E": 0.76,
+            "F": 0.34,
+            "S": 0.46,
+            "M": 0.68
+          },
+          "cosine_similarity": 0.953565,
+          "match_strength": 0.976782
+        },
+        "plan": {
+          "vector": {
+            "E": 0.62,
+            "F": 0.3,
+            "S": 0.42,
+            "M": 0.84
+          },
+          "cosine_similarity": 0.778923,
+          "match_strength": 0.889462
+        },
+        "recall": {
+          "vector": {
+            "E": 0.42,
+            "F": 0.46,
+            "S": 0.66,
+            "M": 0.7
+          },
+          "cosine_similarity": 0.407116,
+          "match_strength": 0.703558
+        },
+        "rest": {
+          "vector": {
+            "E": 0.2,
+            "F": 0.84,
+            "S": 0.22,
+            "M": 0.38
+          },
+          "cosine_similarity": -0.647284,
+          "match_strength": 0.176358
+        },
+        "connect": {
+          "vector": {
+            "E": 0.84,
+            "F": 0.3,
+            "S": 0.48,
+            "M": 0.6
+          },
+          "cosine_similarity": 0.795789,
+          "match_strength": 0.897895
+        },
+        "clarify": {
+          "vector": {
+            "E": 0.52,
+            "F": 0.26,
+            "S": 0.34,
+            "M": 0.78
+          },
+          "cosine_similarity": 0.516206,
+          "match_strength": 0.758103
+        },
+        "wander": {
+          "vector": {
+            "E": 0.36,
+            "F": 0.42,
+            "S": 0.84,
+            "M": 0.46
+          },
+          "cosine_similarity": -0.219013,
+          "match_strength": 0.390493
+        },
+        "absorb": {
+          "vector": {
+            "E": 0.3,
+            "F": 0.58,
+            "S": 0.74,
+            "M": 0.72
+          },
+          "cosine_similarity": 0.076971,
+          "match_strength": 0.538485
+        },
+        "monologue": {
+          "vector": {
+            "E": 0.48,
+            "F": 0.44,
+            "S": 0.72,
+            "M": 0.64
+          },
+          "cosine_similarity": 0.415585,
+          "match_strength": 0.707793
+        },
+        "nothing": {
+          "vector": {
+            "E": 0.18,
+            "F": 0.66,
+            "S": 0.34,
+            "M": 0.4
+          },
+          "cosine_similarity": -0.808295,
+          "match_strength": 0.095853
+        },
+        "die": {
+          "vector": {
+            "E": 0.08,
+            "F": 0.88,
+            "S": 0.22,
+            "M": 0.12
+          },
+          "cosine_similarity": -0.842434,
+          "match_strength": 0.078783
+        },
+        "short_reply": {
+          "vector": {
+            "E": 0.54,
+            "F": 0.36,
+            "S": 0.32,
+            "M": 0.54
+          },
+          "cosine_similarity": 0.197503,
+          "match_strength": 0.598751
+        }
+      },
+      "selected_action": "respond",
+      "collapse_delta": {
+        "respond": 0.622634,
+        "plan": 0.489732,
+        "recall": 0.206787,
+        "rest": -0.595612,
+        "connect": 0.502567,
+        "clarify": 0.289804,
+        "wander": -0.269698,
+        "absorb": -0.044454,
+        "monologue": 0.213231,
+        "nothing": -0.718141,
+        "die": -0.744121,
+        "short_reply": 0.047271
+      },
+      "modulated_delta": {
+        "respond": 0.622634,
+        "plan": 0.489732,
+        "recall": 0.206787,
+        "rest": -0.595612,
+        "connect": 0.502567,
+        "clarify": 0.289804,
+        "wander": -0.269698,
+        "absorb": -0.044454,
+        "monologue": 0.213231,
+        "nothing": -0.718141,
+        "die": -0.744121,
+        "short_reply": 0.047271
+      },
+      "raw_axes": {
+        "E": 1.063285,
+        "F": -0.04625,
+        "S": 0.14469,
+        "M": 0.984125
+      },
+      "body_energy": 0.7,
+      "fatigue": 0.0,
+      "reject_all": 0.0623,
+      "meaning_strength": 1.0,
+      "boundary": 0.2944,
+      "anchor_axes": {
+        "E": 0.808471,
+        "F": 0.468804,
+        "S": 0.574325,
+        "M": 0.793132
+      }
+    }
+  },
+  "organic_mode": {
+    "enabled": true,
+    "instinct_first": true,
+    "body_weight": 1.15,
+    "subjective_weight": 1.2,
+    "guard_relaxation": 0.35,
+    "endogenous_autonomy": 0.75
+  },
+  "emergent_action_sketches": [
+    {
+      "name": "express:respond+connect",
+      "signal_sources": [
+        "action:connect",
+        "action:plan",
+        "action:respond",
+        "sampled:recall",
+        "sampled:respond",
+        "winner_region:express"
+      ],
+      "support_actions": {
+        "respond": 0.882044,
+        "connect": 0.011976,
+        "plan": 0.054083,
+        "monologue": 0.001825,
+        "clarify": 0.024137
+      },
+      "growth_score": 1.0,
+      "upgrade_threshold": 0.66,
+      "status": "formalized",
+      "target_action_map": {
+        "respond": 0.882044,
+        "plan": 0.054083,
+        "clarify": 0.024137
+      },
+      "anchor_alignment": 0.9152,
+      "stability": 12
+    },
+    {
+      "name": "express:respond+plan",
+      "signal_sources": [
+        "winner_region:express",
+        "action:respond",
+        "action:plan",
+        "action:connect",
+        "sampled:respond"
+      ],
+      "support_actions": {
+        "respond": 0.680304,
+        "plan": 0.070175,
+        "connect": 0.005061,
+        "clarify": 0.03367
+      },
+      "growth_score": 0.339,
+      "upgrade_threshold": 0.66,
+      "status": "latent",
+      "target_action_map": {
+        "respond": 0.680304,
+        "plan": 0.070175,
+        "clarify": 0.03367
+      },
+      "anchor_alignment": 0.4528,
+      "stability": 1
+    }
+  ],
+  "personality_anchor": {
+    "axis_baseline": {
+      "E": 0.808471,
+      "F": 0.468804,
+      "S": 0.574325,
+      "M": 0.793132
+    },
+    "action_bias": {
+      "respond": 0.545631,
+      "plan": 0.029946,
+      "recall": 0.267227,
+      "rest": 0.00064,
+      "connect": 0.005816,
+      "clarify": 0.014277,
+      "wander": 0.000302,
+      "absorb": 0.001549,
+      "monologue": 0.00121,
+      "nothing": 0.000893,
+      "die": 0.000157,
+      "short_reply": 0.003446
+    },
+    "evidence_anchors": [
+      "affect:quiet",
+      "cue:alphba7f452",
+      "cue:topic-0",
+      "energy:steady",
+      "habit:alphba7f452",
+      "memory:alphba7f452",
+      "mood:steady",
+      "relation:sim-user",
+      "resource:open"
+    ],
+    "anchor_signature": "04420fdd8b2928370d33adf79febe6cf68683797",
+    "stability": 0.9332,
+    "drift": 0.003,
+    "alignment": 0.9152,
+    "updated_round": 13,
+    "continuity_derivation": {
+      "anchor_alignment": 0.915243,
+      "memory_integration": 0.962,
+      "meaning_strength": 1.0,
+      "anchor_stability": 0.9332,
+      "continuity_target": 0.944235,
+      "sampled_action": "respond"
+    }
+  },
+  "subject_kernel": {
+    "display_name": "霁禾",
+    "current_narrative": "霁禾 正在围绕“completion”维持自我延续，并把注意力收束在 respond。",
+    "continuity_score": 0.9399,
+    "continuity_summary": "主体连续性稳定，当前自我叙述保持连贯。",
+    "boundary_principles": [
+      "优先维持主体连续性，不让短期成功直接改写核心身份。",
+      "外部反馈只能进入二级评估，不能绕过主体内核。",
+      "保留拒绝与延后响应的边界权。",
+      "当前边界允许有限接近，但仍保留主体自我保护。"
+    ],
+    "core_commitments": [
+      "继续围绕“completion”维持当前轨迹。",
+      "持续维护可解释的自我叙述。",
+      "把意义感不足和连续性下降视为需要修复的运行事实。"
+    ],
+    "integrity_source": "subject_core"
+  },
+  "meaning_system": {
+    "survival_narrative": "当前存在叙事相对稳定，主体仍能解释自己为什么继续。",
+    "sources": [
+      {
+        "label": "completion",
+        "kind": "purpose_memory",
+        "strength": 0.8354,
+        "source": "purpose_memory",
+        "evidence": "持续保留的目的记忆仍在塑形当前判断。"
+      },
+      {
+        "label": "alphba7f452",
+        "kind": "memory_pull",
+        "strength": 1.0,
+        "source": "initiative.memory_backing",
+        "evidence": "最近的主动性评估仍被这条线索牵引。"
+      }
+    ],
+    "conflicts": [],
+    "debts": [],
+    "repairs": []
+  },
+  "agency_loop": {
+    "summary": "当前主动性仍在运转，但至少一条对外动作被运行时边界抑制。",
+    "outward_channel": {
+      "top_intent": "share_memory",
+      "should_send": false,
+      "suppression_reason": "safe_mode"
+    },
+    "internal_channel": {
+      "monologue_due": true,
+      "monologue_stale": true,
+      "monologue_generated_total": 0
+    },
+    "budget": {
+      "outward_dispatch_remaining": 0,
+      "cooldown_remaining_seconds": 0,
+      "autonomy_tool_actions": 0,
+      "autonomy_endogenous_rounds": 0,
+      "scheduled_due": 0,
+      "scheduled_running": 0,
+      "scheduled_total": 0,
+      "backlog_size": 2
+    },
+    "suppressed_actions": [
+      {
+        "kind": "share_memory",
+        "summary": "当前存在对外主动动作，但被运行时边界抑制。",
+        "priority": 0.4246,
+        "channel": "outward",
+        "status": "suppressed",
+        "suppression_reason": "safe_mode"
+      }
+    ]
+  },
+  "history_burden": {
+    "repair_scars": [],
+    "suppressed_but_recoverable_patterns": [],
+    "unfinished_commitments": [
+      {
+        "kind": "self_dialogue",
+        "summary": "继续内部独白并整理刚才残留的线索。",
+        "status": "pending",
+        "priority": 0.45
+      },
+      {
+        "kind": "relationship_maintenance",
+        "summary": "维持关系脉冲，避免在重要关系上完全沉默。",
+        "status": "queued",
+        "priority": 0.5083
+      },
+      {
+        "kind": "relationship_commitment",
+        "summary": "维持关系脉冲，避免在重要关系上完全沉默。",
+        "status": "active",
+        "priority": 0.5083
+      }
+    ],
+    "meaning_debts": [],
+    "conflict_residues": {
+      "repair_mode": "",
+      "safe_mode_owner": "",
+      "critical_conflict_streak": 0,
+      "conflict_hot_rounds": 0,
+      "conflict_recovery_rounds": 0,
+      "last_conflict_priority": "",
+      "last_compromise_template": "",
+      "repair_stage": "idle"
+    },
+    "continuity_residues": {
+      "continuity_nonce": "continuity-3b441cfb702248a8bc0f6f13fb3c0bc0",
+      "self_continuity": 0.9399,
+      "meaning_strength": 1.0,
+      "memory_fragments": 0.038,
+      "last_checkpoint_id": "ckpt-0002",
+      "active_run_id": null,
+      "run_status": "idle"
+    },
+    "history_inertia_score": 0.201
+  },
+  "arbitration_state": {
+    "round": {
+      "competing_proposals": [
+        {
+          "agent_name": "SalienceAgent",
+          "stage": "salience",
+          "top_action": "respond",
+          "selected": true,
+          "gated_actions": []
+        },
+        {
+          "agent_name": "BodyStateAgent",
+          "stage": "body",
+          "top_action": "respond",
+          "selected": true,
+          "gated_actions": []
+        },
+        {
+          "agent_name": "EmotionAgent",
+          "stage": "emotion",
+          "top_action": "",
+          "selected": false,
+          "gated_actions": []
+        },
+        {
+          "agent_name": "RelationshipAgent",
+          "stage": "relationship",
+          "top_action": "respond",
+          "selected": true,
+          "gated_actions": []
+        },
+        {
+          "agent_name": "ResourceAgent",
+          "stage": "resource",
+          "top_action": "respond",
+          "selected": true,
+          "gated_actions": []
+        },
+        {
+          "agent_name": "PFCAgent",
+          "stage": "pfc",
+          "top_action": "recall",
+          "selected": false,
+          "gated_actions": []
+        },
+        {
+          "agent_name": "HabitAgent",
+          "stage": "habit",
+          "top_action": "respond",
+          "selected": true,
+          "gated_actions": []
+        },
+        {
+          "agent_name": "DesireAgent",
+          "stage": "desire",
+          "top_action": "absorb",
+          "selected": false,
+          "gated_actions": []
+        },
+        {
+          "agent_name": "DMNAgent",
+          "stage": "dmn",
+          "top_action": "",
+          "selected": false,
+          "gated_actions": []
+        },
+        {
+          "agent_name": "HippocampusAgent",
+          "stage": "hippocampus",
+          "top_action": "recall",
+          "selected": false,
+          "gated_actions": []
+        },
+        {
+          "agent_name": "PerspectiveModel",
+          "stage": "perspective",
+          "top_action": "clarify",
+          "selected": false,
+          "gated_actions": []
+        },
+        {
+          "agent_name": "ValueAgent",
+          "stage": "value",
+          "top_action": "respond",
+          "selected": true,
+          "gated_actions": []
+        },
+        {
+          "agent_name": "UnconsciousAgent",
+          "stage": "unconscious",
+          "top_action": "respond",
+          "selected": true,
+          "gated_actions": []
+        },
+        {
+          "agent_name": "CerebellarPredictor",
+          "stage": "cerebellar",
+          "top_action": "",
+          "selected": false,
+          "gated_actions": []
+        },
+        {
+          "agent_name": "EndogenousMotivationPool",
+          "stage": "motivation",
+          "top_action": "wander",
+          "selected": false,
+          "gated_actions": []
+        },
+        {
+          "agent_name": "InstinctField",
+          "stage": "instinct",
+          "top_action": "respond",
+          "selected": true,
+          "gated_actions": []
+        },
+        {
+          "agent_name": "EmergentActionSketch",
+          "stage": "emergent",
+          "top_action": "respond",
+          "selected": true,
+          "gated_actions": []
+        }
+      ],
+      "evidence_sources": [
+        "BodyStateAgent",
+        "CerebellarPredictor",
+        "DMNAgent",
+        "DesireAgent",
+        "EmergentActionSketch",
+        "EmotionAgent",
+        "EndogenousMotivationPool",
+        "HabitAgent",
+        "HippocampusAgent",
+        "InstinctField",
+        "PFCAgent",
+        "PerspectiveModel",
+        "RelationshipAgent",
+        "ResourceAgent",
+        "SalienceAgent",
+        "UnconsciousAgent",
+        "ValueAgent"
+      ],
+      "priority_scores": {
+        "SalienceAgent": 0.64,
+        "BodyStateAgent": 0.64,
+        "EmotionAgent": 0.6,
+        "RelationshipAgent": 0.406,
+        "ResourceAgent": 0.58,
+        "PFCAgent": 0.84,
+        "HabitAgent": 0.48,
+        "DesireAgent": 0.54,
+        "DMNAgent": 0.184,
+        "HippocampusAgent": 0.594,
+        "PerspectiveModel": 0.245,
+        "ValueAgent": 0.531,
+        "UnconsciousAgent": 0.42,
+        "CerebellarPredictor": 0.35,
+        "EndogenousMotivationPool": 0.6195,
+        "InstinctField": 0.7919,
+        "EmergentActionSketch": 0.77
+      },
+      "budget_consumption": {
+        "budget_remaining": 1.0,
+        "resample_count": 0,
+        "window_tool_actions": 0,
+        "window_endogenous_rounds": 0
+      },
+      "selected_winner": "respond",
+      "rejected_options": [
+        {
+          "agent_name": "PFCAgent",
+          "top_action": "recall",
+          "reason": "not_selected"
+        },
+        {
+          "agent_name": "DesireAgent",
+          "top_action": "absorb",
+          "reason": "not_selected"
+        },
+        {
+          "agent_name": "HippocampusAgent",
+          "top_action": "recall",
+          "reason": "not_selected"
+        },
+        {
+          "agent_name": "PerspectiveModel",
+          "top_action": "clarify",
+          "reason": "not_selected"
+        },
+        {
+          "agent_name": "EndogenousMotivationPool",
+          "top_action": "wander",
+          "reason": "not_selected"
+        }
+      ],
+      "hard_masks": [],
+      "consequence_patch": {
+        "repair_state": {
+          "stage": "idle",
+          "active": false,
+          "last_reason": "idle",
+          "last_transition_round": 13,
+          "cooldown_rounds_remaining": 0,
+          "last_template": null,
+          "last_winning_priority": null
+        },
+        "suppressed_actions": [
+          {
+            "kind": "share_memory",
+            "summary": "当前存在对外主动动作，但被运行时边界抑制。",
+            "priority": 0.4246,
+            "channel": "outward",
+            "status": "suppressed",
+            "suppression_reason": "safe_mode"
+          }
+        ],
+        "budget_residue": 1.0,
+        "scheduled_task_residue": 0,
+        "history_inertia_score": 0.201,
+        "safe_mode_owner": ""
+      }
+    },
+    "autonomy": {
+      "competing_proposals": [
+        {
+          "proposal_id": "self_dialogue:1",
+          "kind": "self_dialogue",
+          "summary": "继续内部独白并整理刚才残留的线索。",
+          "channel": "internal",
+          "status": "pending"
+        },
+        {
+          "proposal_id": "relationship_maintenance:2",
+          "kind": "relationship_maintenance",
+          "summary": "维持关系脉冲，避免在重要关系上完全沉默。",
+          "channel": "outward",
+          "status": "queued"
+        }
+      ],
+      "evidence_sources": [
+        "proactive_backlog",
+        "scheduled_tasks",
+        "agency_loop",
+        "initiative"
+      ],
+      "priority_scores": {
+        "self_dialogue:1": 0.45,
+        "relationship_maintenance:2": 0.5083
+      },
+      "budget_consumption": {
+        "budget_remaining": 1.0,
+        "window_tool_actions": 0,
+        "window_endogenous_rounds": 0,
+        "scheduled_due": 0
+      },
+      "selected_winner": "self_dialogue:1",
+      "rejected_options": [
+        {
+          "kind": "share_memory",
+          "summary": "当前存在对外主动动作，但被运行时边界抑制。",
+          "reason": "safe_mode"
+        }
+      ],
+      "hard_masks": [
+        "safe_mode_active"
+      ],
+      "consequence_patch": {
+        "safe_mode_owner": "",
+        "budget_remaining": 1.0,
+        "scheduled_task_residue": 0,
+        "run_status": "idle",
+        "last_action_type": "",
+        "last_round_id": 0
+      }
+    }
+  },
+  "purpose_memory": [
+    {
+      "summary": "主导驱力：completion",
+      "source": "desire_state",
+      "strength": 0.8354,
+      "recorded_at": "2026-04-13T03:35:53Z",
+      "status": "background"
+    }
+  ],
+  "proactive_backlog": [
+    {
+      "kind": "self_dialogue",
+      "summary": "继续内部独白并整理刚才残留的线索。",
+      "priority": 0.45,
+      "channel": "internal",
+      "status": "pending",
+      "suppression_reason": ""
+    },
+    {
+      "kind": "relationship_maintenance",
+      "summary": "维持关系脉冲，避免在重要关系上完全沉默。",
+      "priority": 0.5083,
+      "channel": "outward",
+      "status": "queued",
+      "suppression_reason": ""
+    }
+  ],
+  "relationship_commitments": [
+    {
+      "target": "user",
+      "commitment": "维持关系脉冲，避免在重要关系上完全沉默。",
+      "strength": 0.5083,
+      "status": "active",
+      "evidence": "closeness=0.51, top_intent=share_memory"
+    }
+  ],
+  "autonomy_policy": {
+    "enabled": true,
+    "profile": "tool_level",
+    "learning_mode": "guided-learn",
+    "network_enabled": false,
+    "external_io_enabled": false,
+    "allow_commit": false,
+    "allowed_network_domains": [],
+    "writable_roots": [],
+    "knowledge_roots": [],
+    "learning_log_dir": "",
+    "trace_external_learning": true,
+    "allowed_operator_levels": [
+      "read_only",
+      "soft_intervene"
+    ],
+    "allowed_commands": [
+      "endogenous tick",
+      "endogenous status",
+      "dream status",
+      "dream run",
+      "replay",
+      "memory recall",
+      "memory top",
+      "trace why",
+      "why not",
+      "body rest",
+      "mood calm",
+      "nudge focus",
+      "nudge relation",
+      "mode set safe",
+      "mode set idle",
+      "mode set sleep",
+      "mode set interactive"
+    ],
+    "blocked_commands": [
+      "shell",
+      "git commit",
+      "git push",
+      "checkpoint rewind",
+      "budget set",
+      "network",
+      "external write",
+      "destructive"
+    ],
+    "max_rounds_per_hour": 0,
+    "max_tool_actions_per_hour": 0,
+    "quiet_hours": [],
+    "failure_trip_threshold": 3,
+    "auto_safe_mode": true
+  },
+  "autonomy_loop": {
+    "running": true,
+    "profile": "tool_level",
+    "last_step_at": null,
+    "last_action_type": "",
+    "last_action_summary": "",
+    "last_round_id": null,
+    "last_trace_ref": null,
+    "window_started_at": "2026-04-13T03:35:53.634492+00:00",
+    "window_tool_actions": 0,
+    "window_endogenous_rounds": 0,
+    "heartbeat_count": 0,
+    "total_tool_actions": 0,
+    "total_endogenous_rounds": 0,
+    "failure_count": 0,
+    "stop_reason": "",
+    "last_error": "",
+    "recent_actions": []
+  },
+  "motivation_pool_state": {
+    "active_motivations": [
+      {
+        "motivation_id": "memory_exploration",
+        "motivation_type": "memory_exploration",
+        "raw_drive": 0.534795,
+        "source_features": {
+          "recall_strength": 0.1175,
+          "memory_activation": 0.1175,
+          "interference": 0.1039,
+          "meaning_drive": 0.65,
+          "exploration_drive": 0.060005
+        },
+        "target_actions": {
+          "recall": 0.24,
+          "clarify": 0.08,
+          "plan": 0.06
+        },
+        "state_tags": [
+          "memory",
+          "exploration"
+        ],
+        "audit_reason": "memory prior weak or interference remains elevated"
+      },
+      {
+        "motivation_id": "behavior_exploration",
+        "motivation_type": "behavior_exploration",
+        "raw_drive": 1.0,
+        "source_features": {
+          "focus_lock_count": 7.0,
+          "self_consistency_score": 0.8,
+          "exploration_drive": 0.060005,
+          "emotion_arousal": 0.0453
+        },
+        "target_actions": {
+          "plan": 0.08,
+          "clarify": 0.12,
+          "wander": 0.18
+        },
+        "state_tags": [
+          "action",
+          "variation"
+        ],
+        "audit_reason": "action field shows lock-in or low novelty tolerance"
+      },
+      {
+        "motivation_id": "relation_calibration",
+        "motivation_type": "relation_calibration",
+        "raw_drive": 0.398215,
+        "source_features": {
+          "relationship_risk": 0.3188,
+          "closeness": 0.5096,
+          "relation_drive": 0.539375
+        },
+        "target_actions": {
+          "connect": 0.12,
+          "clarify": 0.09,
+          "respond": 0.05
+        },
+        "state_tags": [
+          "relation",
+          "boundary"
+        ],
+        "audit_reason": "relation risk remains elevated and needs calibration"
+      },
+      {
+        "motivation_id": "internal_replay",
+        "motivation_type": "internal_replay",
+        "raw_drive": 0.225111,
+        "source_features": {
+          "interference": 0.1039,
+          "affect_residue": 0.0657,
+          "relationship_drift": 0.0016,
+          "meaning_drive": 0.65,
+          "completion_drive": 0.835307
+        },
+        "target_actions": {
+          "recall": 0.12,
+          "rest": 0.08,
+          "wander": 0.1
+        },
+        "state_tags": [
+          "replay",
+          "internal"
+        ],
+        "audit_reason": "residual conflict and replay pressure stay active"
+      }
+    ],
+    "pool_weight_snapshot": {
+      "memory_exploration": 1.211724,
+      "behavior_exploration": 1.350993,
+      "affect_regulation": 1.021359,
+      "relation_calibration": 1.372352,
+      "internal_replay": 1.350993
+    },
+    "endogenous_activation_score": 0.539084,
+    "last_feedback_update_at": "2026-04-13T03:36:09Z"
+  },
+  "motivation_learning_state": {
+    "motivation_weights": {
+      "memory_exploration": 1.235743,
+      "affect_regulation": 1.021359,
+      "relation_calibration": 1.396371,
+      "behavior_exploration": 1.375012,
+      "internal_replay": 1.375012
+    },
+    "recent_feedback": [
+      {
+        "round_id": "9",
+        "motivation_id": "memory_exploration",
+        "sampled_action": "respond",
+        "user_response": null,
+        "response_latency_ms": null,
+        "affect_delta": {
+          "affect_residue": -0.0442,
+          "body_energy": 0.7
+        },
+        "memory_activation_delta": 0.0229,
+        "relation_delta": -0.0016,
+        "reward_signal": 0.177188,
+        "update_reason": "memory=0.02; grounding=0.80; penalty=0.00"
+      },
+      {
+        "round_id": "9",
+        "motivation_id": "behavior_exploration",
+        "sampled_action": "respond",
+        "user_response": null,
+        "response_latency_ms": null,
+        "affect_delta": {
+          "affect_residue": -0.0442,
+          "body_energy": 0.7
+        },
+        "memory_activation_delta": 0.0229,
+        "relation_delta": -0.0016,
+        "reward_signal": 0.177188,
+        "update_reason": "memory=0.02; grounding=0.80; penalty=0.00"
+      },
+      {
+        "round_id": "9",
+        "motivation_id": "relation_calibration",
+        "sampled_action": "respond",
+        "user_response": null,
+        "response_latency_ms": null,
+        "affect_delta": {
+          "affect_residue": -0.0442,
+          "body_energy": 0.7
+        },
+        "memory_activation_delta": 0.0229,
+        "relation_delta": -0.0016,
+        "reward_signal": 0.177188,
+        "update_reason": "memory=0.02; grounding=0.80; penalty=0.00"
+      },
+      {
+        "round_id": "9",
+        "motivation_id": "internal_replay",
+        "sampled_action": "respond",
+        "user_response": null,
+        "response_latency_ms": null,
+        "affect_delta": {
+          "affect_residue": -0.0442,
+          "body_energy": 0.7
+        },
+        "memory_activation_delta": 0.0229,
+        "relation_delta": -0.0016,
+        "reward_signal": 0.177188,
+        "update_reason": "memory=0.02; grounding=0.80; penalty=0.00"
+      },
+      {
+        "round_id": "10",
+        "motivation_id": "memory_exploration",
+        "sampled_action": "respond",
+        "user_response": null,
+        "response_latency_ms": null,
+        "affect_delta": {
+          "affect_residue": -0.0564,
+          "body_energy": 0.7
+        },
+        "memory_activation_delta": 0.0244,
+        "relation_delta": -0.004,
+        "reward_signal": 0.175003,
+        "update_reason": "memory=0.02; grounding=0.80; penalty=0.00"
+      },
+      {
+        "round_id": "10",
+        "motivation_id": "behavior_exploration",
+        "sampled_action": "respond",
+        "user_response": null,
+        "response_latency_ms": null,
+        "affect_delta": {
+          "affect_residue": -0.0564,
+          "body_energy": 0.7
+        },
+        "memory_activation_delta": 0.0244,
+        "relation_delta": -0.004,
+        "reward_signal": 0.175003,
+        "update_reason": "memory=0.02; grounding=0.80; penalty=0.00"
+      },
+      {
+        "round_id": "10",
+        "motivation_id": "relation_calibration",
+        "sampled_action": "respond",
+        "user_response": null,
+        "response_latency_ms": null,
+        "affect_delta": {
+          "affect_residue": -0.0564,
+          "body_energy": 0.7
+        },
+        "memory_activation_delta": 0.0244,
+        "relation_delta": -0.004,
+        "reward_signal": 0.175003,
+        "update_reason": "memory=0.02; grounding=0.80; penalty=0.00"
+      },
+      {
+        "round_id": "10",
+        "motivation_id": "internal_replay",
+        "sampled_action": "respond",
+        "user_response": null,
+        "response_latency_ms": null,
+        "affect_delta": {
+          "affect_residue": -0.0564,
+          "body_energy": 0.7
+        },
+        "memory_activation_delta": 0.0244,
+        "relation_delta": -0.004,
+        "reward_signal": 0.175003,
+        "update_reason": "memory=0.02; grounding=0.80; penalty=0.00"
+      },
+      {
+        "round_id": "11",
+        "motivation_id": "memory_exploration",
+        "sampled_action": "respond",
+        "user_response": null,
+        "response_latency_ms": null,
+        "affect_delta": {
+          "affect_residue": -0.0568,
+          "body_energy": 0.7
+        },
+        "memory_activation_delta": 0.0225,
+        "relation_delta": -0.0016,
+        "reward_signal": 0.174935,
+        "update_reason": "memory=0.02; grounding=0.80; penalty=0.00"
+      },
+      {
+        "round_id": "11",
+        "motivation_id": "behavior_exploration",
+        "sampled_action": "respond",
+        "user_response": null,
+        "response_latency_ms": null,
+        "affect_delta": {
+          "affect_residue": -0.0568,
+          "body_energy": 0.7
+        },
+        "memory_activation_delta": 0.0225,
+        "relation_delta": -0.0016,
+        "reward_signal": 0.174935,
+        "update_reason": "memory=0.02; grounding=0.80; penalty=0.00"
+      },
+      {
+        "round_id": "11",
+        "motivation_id": "relation_calibration",
+        "sampled_action": "respond",
+        "user_response": null,
+        "response_latency_ms": null,
+        "affect_delta": {
+          "affect_residue": -0.0568,
+          "body_energy": 0.7
+        },
+        "memory_activation_delta": 0.0225,
+        "relation_delta": -0.0016,
+        "reward_signal": 0.174935,
+        "update_reason": "memory=0.02; grounding=0.80; penalty=0.00"
+      },
+      {
+        "round_id": "11",
+        "motivation_id": "internal_replay",
+        "sampled_action": "respond",
+        "user_response": null,
+        "response_latency_ms": null,
+        "affect_delta": {
+          "affect_residue": -0.0568,
+          "body_energy": 0.7
+        },
+        "memory_activation_delta": 0.0225,
+        "relation_delta": -0.0016,
+        "reward_signal": 0.174935,
+        "update_reason": "memory=0.02; grounding=0.80; penalty=0.00"
+      },
+      {
+        "round_id": "12",
+        "motivation_id": "memory_exploration",
+        "sampled_action": "respond",
+        "user_response": null,
+        "response_latency_ms": null,
+        "affect_delta": {
+          "affect_residue": -0.067,
+          "body_energy": 0.7
+        },
+        "memory_activation_delta": 0.0243,
+        "relation_delta": -0.004,
+        "reward_signal": 0.173404,
+        "update_reason": "memory=0.02; grounding=0.80; penalty=0.00"
+      },
+      {
+        "round_id": "12",
+        "motivation_id": "behavior_exploration",
+        "sampled_action": "respond",
+        "user_response": null,
+        "response_latency_ms": null,
+        "affect_delta": {
+          "affect_residue": -0.067,
+          "body_energy": 0.7
+        },
+        "memory_activation_delta": 0.0243,
+        "relation_delta": -0.004,
+        "reward_signal": 0.173404,
+        "update_reason": "memory=0.02; grounding=0.80; penalty=0.00"
+      },
+      {
+        "round_id": "12",
+        "motivation_id": "relation_calibration",
+        "sampled_action": "respond",
+        "user_response": null,
+        "response_latency_ms": null,
+        "affect_delta": {
+          "affect_residue": -0.067,
+          "body_energy": 0.7
+        },
+        "memory_activation_delta": 0.0243,
+        "relation_delta": -0.004,
+        "reward_signal": 0.173404,
+        "update_reason": "memory=0.02; grounding=0.80; penalty=0.00"
+      },
+      {
+        "round_id": "12",
+        "motivation_id": "internal_replay",
+        "sampled_action": "respond",
+        "user_response": null,
+        "response_latency_ms": null,
+        "affect_delta": {
+          "affect_residue": -0.067,
+          "body_energy": 0.7
+        },
+        "memory_activation_delta": 0.0243,
+        "relation_delta": -0.004,
+        "reward_signal": 0.173404,
+        "update_reason": "memory=0.02; grounding=0.80; penalty=0.00"
+      },
+      {
+        "round_id": "13",
+        "motivation_id": "memory_exploration",
+        "sampled_action": "respond",
+        "user_response": null,
+        "response_latency_ms": null,
+        "affect_delta": {
+          "affect_residue": -0.0657,
+          "body_energy": 0.7
+        },
+        "memory_activation_delta": 0.1175,
+        "relation_delta": -0.0016,
+        "reward_signal": 0.200161,
+        "update_reason": "memory=0.12; grounding=0.80; penalty=0.00"
+      },
+      {
+        "round_id": "13",
+        "motivation_id": "behavior_exploration",
+        "sampled_action": "respond",
+        "user_response": null,
+        "response_latency_ms": null,
+        "affect_delta": {
+          "affect_residue": -0.0657,
+          "body_energy": 0.7
+        },
+        "memory_activation_delta": 0.1175,
+        "relation_delta": -0.0016,
+        "reward_signal": 0.200161,
+        "update_reason": "memory=0.12; grounding=0.80; penalty=0.00"
+      },
+      {
+        "round_id": "13",
+        "motivation_id": "relation_calibration",
+        "sampled_action": "respond",
+        "user_response": null,
+        "response_latency_ms": null,
+        "affect_delta": {
+          "affect_residue": -0.0657,
+          "body_energy": 0.7
+        },
+        "memory_activation_delta": 0.1175,
+        "relation_delta": -0.0016,
+        "reward_signal": 0.200161,
+        "update_reason": "memory=0.12; grounding=0.80; penalty=0.00"
+      },
+      {
+        "round_id": "13",
+        "motivation_id": "internal_replay",
+        "sampled_action": "respond",
+        "user_response": null,
+        "response_latency_ms": null,
+        "affect_delta": {
+          "affect_residue": -0.0657,
+          "body_energy": 0.7
+        },
+        "memory_activation_delta": 0.1175,
+        "relation_delta": -0.0016,
+        "reward_signal": 0.200161,
+        "update_reason": "memory=0.12; grounding=0.80; penalty=0.00"
+      }
+    ],
+    "endogenous_policy_shift": {
+      "recall": 0.423249,
+      "clarify": 0.418286,
+      "plan": 0.183939,
+      "rest": 0.142802,
+      "respond": 0.078127,
+      "connect": 0.198186,
+      "wander": 0.437513
+    }
+  },
+  "endogenous_scheduler_state": {
+    "last_endogenous_tick_at": null,
+    "recent_triggers": [],
+    "suppression_reason": "non_user_or_non_interactive_turn"
+  },
+  "endogenous_state": {
+    "current_intent": null,
+    "stability": 0,
+    "history": [],
+    "last_trigger": "",
+    "last_suppression": {
+      "suppressed": true,
+      "reason": "non_user_or_non_interactive_turn",
+      "details": {
+        "event_source": "simulation",
+        "mode": "safe"
+      }
+    }
+  },
+  "active_run_id": null,
+  "run_status": "idle",
+  "run_mode": null,
+  "current_goal": null,
+  "current_step_id": null,
+  "pending_steps": [],
+  "completed_steps": [],
+  "last_tool_result": {},
+  "stop_reason": {},
+  "dirty_worktree_detected": false,
+  "commit_permission_required": true
+}

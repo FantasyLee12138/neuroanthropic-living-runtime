@@ -34,9 +34,9 @@ def test_memory_compaction_writes_raw_evidence_and_tier_artifacts(tmp_path):
     assert raw_rows[0]["recorded_date"] == raw_rows[0]["recorded_at"][:10]
     assert summary["tiers"]["hot"]["artifact_count"] > 0
     assert summary["tiers"]["warm"]["artifact_count"] > 0
-    assert summary["tiers"]["archive"]["artifact_count"] > 0
+    assert summary["tiers"]["cold"]["artifact_count"] > 0
     assert sample
     assert all(item["tier"] == "warm" for item in sample)
     assert (tmp_path / ".alive" / "memory" / "episodic_hot").exists()
     assert (tmp_path / ".alive" / "memory" / "episodic_warm").exists()
-    assert (tmp_path / ".alive" / "memory" / "episodic_archive").exists()
+    assert (tmp_path / ".alive" / "memory" / "episodic_cold").exists()

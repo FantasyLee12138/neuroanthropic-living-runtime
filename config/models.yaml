@@ -63,6 +63,42 @@ model_routes:
     enabled: true
     base_url: https://api.deepseek.com
     api_key_env: DEEPSEEK_API_KEY
+  cognitive_packet:
+    backend: deepseek
+    model: deepseek-chat
+    timeout_ms: 12000
+    retries: 0
+    enabled: true
+    base_url: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
+  deliberation:
+    backend: doubao
+    model: doubao-seed-2-0-pro-260215
+    timeout_ms: 60000
+    retries: 0
+    enabled: true
+  tool_planner:
+    backend: deepseek
+    model: deepseek-chat
+    timeout_ms: 12000
+    retries: 0
+    enabled: true
+    base_url: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
+  deep_renderer:
+    backend: doubao
+    model: doubao-seed-2-0-pro-260215
+    timeout_ms: 60000
+    retries: 0
+    enabled: true
+  consolidation_summarizer:
+    backend: doubao
+    model: ep-20260404191810-qfn7s
+    timeout_ms: 12000
+    retries: 0
+    enabled: true
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    api_key_env: ARK_SMALL_MODEL_API_KEY
   tool_policy:
     backend: doubao
     model: doubao-seed-2-0-pro-260215
@@ -120,31 +156,53 @@ model_tiers:
     timeout_ms: 60000
     retries: 0
     api_key_env: ARK_API_KEY
-agent_model_bindings:
-  planner: medium_model
-  PFCAgent: medium_model
-  InitiativeInteractionAgent: state_machine
-  PerspectiveModel: medium_model
-  Renderer: large_model
-  MonologueStream: small_model
-  AutonomySelfRun: small_model
-  SalienceAgent: small_model
-  ValueAgent: small_model
-  BodyStateAgent: state_machine
-  RelationshipAgent: state_machine
-  DesireAgent: state_machine
-  EmotionAgent: state_machine
-  DMNAgent: state_machine
-  UnconsciousAgent: state_machine
-  HippocampusAgent: state_machine
-  ThalamusAttentionAgent: state_machine
-  HabitAgent: state_machine
-  ConflictMonitorAgent: state_machine
-  ResourceAgent: state_machine
-  CerebellarPredictor: state_machine
-  BehaviorPlausibilityGuard: state_machine
-  ForcedModeSwitch: state_machine
-  OutputGate: state_machine
+module_model_bindings:
+  cognitive_packet: medium_model
+  deliberation: large_model
+  tool_planner: medium_model
+  deep_renderer: large_model
+  consolidation_summarizer: small_model
+route_policies:
+  chat_micro:
+    latency_budget_ms: 250
+  chat_fast:
+    latency_budget_ms: 700
+  chat_standard:
+    latency_budget_ms: 1200
+  chat_deep:
+    latency_budget_ms: 2200
+activation_thresholds:
+  salience_high: 0.72
+  uncertainty_high: 0.58
+  conflict_high: 0.62
+  tool_need_high: 0.5
+memory_tier_policy:
+  chat_fast:
+    - hot
+  chat_standard_default:
+    - hot
+  chat_standard_on_cue:
+    - hot
+    - warm
+  chat_deep:
+    - hot
+    - warm
+    - cold
+consolidation_policy:
+  enabled: true
+  queue: dream_sidecar
+  write_inline:
+    - state_patch
+    - obligations
+    - habit_delta
+    - relation_delta
+    - event_index
+  write_deferred:
+    - long_term_summarization
+    - memory_consolidation
+    - topic_clustering
+    - compaction
+    - replay
 perspective:
   enabled: true
   risk_threshold: 0.33

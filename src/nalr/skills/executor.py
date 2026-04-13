@@ -5,10 +5,11 @@ import inspect
 import json
 import threading
 import time
-from dataclasses import MISSING, is_dataclass
+from dataclasses import MISSING, fields, is_dataclass
 from pathlib import Path
 from typing import Any, get_args, get_origin
 
+from nalr.providers import MissingModelCredentialError
 from nalr.schemas.models import (
     ActionCandidate,
     CircuitBreakerState,
@@ -21,8 +22,171 @@ from nalr.schemas.models import (
 from nalr.skills.contracts import coerce_contract, dataclass_contract_metadata, serialize_contract_value
 
 
+_HASH_SUMMARY_MAX_DEPTH = 2
+_HASH_SUMMARY_MAX_ITEMS = 16
+_HASH_SUMMARY_MAX_STRING = 160
+_HASH_SUMMARY_MAX_NODES = 512
+
+
+def _truncate_text(text: str) -> dict[str, Any]:
+    if len(text) <= _HASH_SUMMARY_MAX_STRING:
+        return {"value": text, "truncated": False}
+    return {
+        "value": text[:_HASH_SUMMARY_MAX_STRING],
+        "length": len(text),
+        "tail_hash": hashlib.sha1(text.encode("utf-8")).hexdigest()[:12],
+        "truncated": True,
+    }
+
+
+def _terminal_hash_summary(payload: Any) -> Any:
+    if payload is None or isinstance(payload, (bool, int, float)):
+        return payload
+    if isinstance(payload, str):
+        summary = _truncate_text(payload)
+        if not summary["truncated"]:
+            return summary["value"]
+        return {"__type__": "str", **summary}
+    if isinstance(payload, Path):
+        return {"__type__": "Path", **_truncate_text(str(payload))}
+    if isinstance(payload, dict):
+        items = sorted(((str(key), value) for key, value in payload.items()), key=lambda item: item[0])
+        return {
+            "__type__": "dict",
+            "size": len(items),
+            "keys": [key for key, _ in items[:_HASH_SUMMARY_MAX_ITEMS]],
+        }
+    if isinstance(payload, (list, tuple)):
+        return {
+            "__type__": type(payload).__name__,
+            "size": len(payload),
+        }
+    if is_dataclass(payload) and not isinstance(payload, type):
+        return {
+            "__type__": type(payload).__name__,
+            "field_count": len(fields(payload)),
+        }
+    return {"__type__": type(payload).__name__, **_truncate_text(str(payload))}
+
+
+def _hash_payload_summary(
+    payload: Any,
+    *,
+    depth: int = 0,
+    nodes_seen: list[int] | None = None,
+    seen: set[int] | None = None,
+) -> Any:
+    if payload is None or isinstance(payload, (bool, int, float)):
+        return payload
+
+    if nodes_seen is None:
+        nodes_seen = [0]
+    if seen is None:
+        seen = set()
+
+    if nodes_seen[0] >= _HASH_SUMMARY_MAX_NODES:
+        return {"__type__": type(payload).__name__, "truncated": "node_budget"}
+    nodes_seen[0] += 1
+
+    if isinstance(payload, str):
+        return _terminal_hash_summary(payload)
+    if isinstance(payload, Path):
+        return _terminal_hash_summary(payload)
+    if depth >= _HASH_SUMMARY_MAX_DEPTH:
+        return _terminal_hash_summary(payload)
+
+    if isinstance(payload, ProbabilisticContribution):
+        payload = {
+            "module_name": payload.module_name,
+            "module_type": payload.module_type,
+            "level": payload.level,
+            "target_space": payload.target_space,
+            "raw_signal": payload.raw_signal,
+            "modulated_delta": payload.modulated_delta,
+            "inhibitory_drive": payload.inhibitory_drive,
+            "confidence": payload.confidence,
+            "native_operator": payload.native_operator,
+        }
+
+    if isinstance(payload, dict):
+        object_id = id(payload)
+        if object_id in seen:
+            return {"__type__": "dict", "cycle": True}
+        seen.add(object_id)
+        try:
+            items = sorted(((str(key), value) for key, value in payload.items()), key=lambda item: item[0])
+            summary: dict[str, Any] = {
+                "__type__": "dict",
+                "size": len(items),
+                "items": {
+                    key: _hash_payload_summary(
+                        value,
+                        depth=depth + 1,
+                        nodes_seen=nodes_seen,
+                        seen=seen,
+                    )
+                    for key, value in items[:_HASH_SUMMARY_MAX_ITEMS]
+                },
+            }
+            if len(items) > _HASH_SUMMARY_MAX_ITEMS:
+                summary["truncated_items"] = len(items) - _HASH_SUMMARY_MAX_ITEMS
+            return summary
+        finally:
+            seen.remove(object_id)
+
+    if isinstance(payload, (list, tuple)):
+        object_id = id(payload)
+        if object_id in seen:
+            return {"__type__": type(payload).__name__, "cycle": True}
+        seen.add(object_id)
+        try:
+            items = list(payload[:_HASH_SUMMARY_MAX_ITEMS])
+            summary = {
+                "__type__": type(payload).__name__,
+                "size": len(payload),
+                "items": [
+                    _hash_payload_summary(
+                        value,
+                        depth=depth + 1,
+                        nodes_seen=nodes_seen,
+                        seen=seen,
+                    )
+                    for value in items
+                ],
+            }
+            if len(payload) > _HASH_SUMMARY_MAX_ITEMS:
+                summary["truncated_items"] = len(payload) - _HASH_SUMMARY_MAX_ITEMS
+            return summary
+        finally:
+            seen.remove(object_id)
+
+    if is_dataclass(payload) and not isinstance(payload, type):
+        object_id = id(payload)
+        if object_id in seen:
+            return {"__type__": type(payload).__name__, "cycle": True}
+        seen.add(object_id)
+        try:
+            field_values = {}
+            for field in fields(payload):
+                field_values[field.name] = _hash_payload_summary(
+                    getattr(payload, field.name),
+                    depth=depth + 1,
+                    nodes_seen=nodes_seen,
+                    seen=seen,
+                )
+            return {
+                "__type__": type(payload).__name__,
+                "fields": field_values,
+            }
+        finally:
+            seen.remove(object_id)
+
+    return _terminal_hash_summary(payload)
+
+
 def _hash_payload(payload: Any) -> str:
-    return hashlib.sha1(json.dumps(serialize_contract_value(payload), ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    summary = _hash_payload_summary(payload)
+    return hashlib.sha1(json.dumps(summary, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 class PolicyViolation(Exception):
@@ -402,6 +566,9 @@ class SkillExecutor:
                         if isinstance(last_error, PolicyViolation):
                             failure_policy_applied = spec.failure_policy
                             policy_rejection_reason = str(last_error)
+                        elif isinstance(last_error, MissingModelCredentialError):
+                            failure_policy_applied = spec.failure_policy
+                            policy_rejection_reason = "missing_model_credentials"
                         elif isinstance(last_error, ValueError):
                             failure_policy_applied = "output_validation_failed"
                         else:

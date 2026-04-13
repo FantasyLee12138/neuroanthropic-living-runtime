@@ -35,7 +35,7 @@ def test_dream_bridge_stdio_returns_dream_result(tmp_path):
                     "sleep_session_id": "sleep-1",
                     "mode": "sleep",
                     "trigger": "sleep_full",
-                    "memory_refs": {"hot": ["tea"], "warm": [], "archive_sample_pool": []},
+                    "memory_refs": {"hot": ["tea"], "warm": [], "cold_sample_pool": []},
                     "resource_state": {"daily_token_surplus_rate": 0.6, "fatigue_level": 0.2, "resource_scarcity": 0.1},
                     "emotional_baseline": {"valence": 0.1, "arousal": 0.2, "dominant_emotion": "平静"},
                     "relationship_state": {"closeness": 0.6, "trust": 0.58, "boundary_tension": 0.12},

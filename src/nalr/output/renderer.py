@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from nalr.schemas.models import RenderPlan
 
 
 def _clean_summary(summary: str) -> str:
     return summary.strip().strip("。！？!?；;，, ")
+
+
+def _compact_summary(summary: str) -> str:
+    return _clean_summary(summary).replace(" ", "").replace("\n", "").lower()
 
 
 def _is_open_probe_question(summary: str) -> bool:
@@ -19,6 +25,55 @@ def _is_open_probe_question(summary: str) -> bool:
             "what can you do",
         )
     )
+
+
+def _matches_short_phrase(summary: str, phrase: str) -> bool:
+    compact = _compact_summary(summary)
+    return compact == phrase or (compact.startswith(phrase) and len(compact) <= len(phrase) + 2)
+
+
+def _greeting_reply(summary: str) -> str:
+    for phrase, reply in (
+        ("晚上好", "晚上好，我在。"),
+        ("早上好", "早上好，我在。"),
+        ("下午好", "下午好，我在。"),
+        ("中午好", "中午好，我在。"),
+        ("你好", "你好，我在。"),
+        ("嗨", "嗨，我在。"),
+        ("hi", "Hi, I'm here."),
+        ("hello", "Hello, I'm here."),
+    ):
+        if _matches_short_phrase(summary, phrase):
+            return reply
+    return ""
+
+
+def _is_time_question(summary: str) -> bool:
+    compact = _compact_summary(summary)
+    return compact in {
+        "现在几点了",
+        "现在几点了呀",
+        "现在几点了啊",
+        "现在是几点",
+        "当前时间",
+        "现在时间",
+        "几点了",
+        "几点",
+    }
+
+
+def _time_reply() -> str:
+    local_now = datetime.now().astimezone()
+    return f"现在是 {local_now.strftime('%H:%M')}。"
+
+
+def deterministic_short_chat_reply(text: str) -> str:
+    greeting_reply = _greeting_reply(text)
+    if greeting_reply:
+        return greeting_reply
+    if _is_time_question(text):
+        return _time_reply()
+    return ""
 
 def _remember_clause(summary: str) -> str:
     if any(token in summary for token in ("晚饭", "吃面", "面")):
@@ -119,6 +174,20 @@ def _action_line(plan: RenderPlan) -> str:
     if expression.directness_level >= 0.72:
         return "先给你一个能直接发出去的回应方向。"
     return _build_followup(plan) or "我先顺着你刚才提到的内容继续回应。"
+
+
+def _memory_anchor_line(plan: RenderPlan, summary: str) -> str:
+    memory_cue = _clean_summary(str(plan.message_plan.get("memory_cue") or ""))
+    recall_strength = float(plan.message_plan.get("recall_strength", 0.0) or 0.0)
+    compact_summary = _compact_summary(summary)
+    compact_cue = _compact_summary(memory_cue)
+    if not memory_cue or recall_strength < 0.18:
+        return ""
+    if compact_cue and compact_cue in compact_summary:
+        return ""
+    if plan.delivery_mode == "monologue":
+        return f"我脑子里还挂着“{memory_cue}”这条线。"
+    return f"我还挂着“{memory_cue}”这条线。"
 
 
 def _safety_line(plan: RenderPlan) -> str:
@@ -239,6 +308,10 @@ def fallback_render_text(plan: RenderPlan) -> str:
     if _is_open_probe_question(plan.event_summary):
         return _open_probe_line(plan)
 
+    short_chat_reply = deterministic_short_chat_reply(plan.event_summary)
+    if short_chat_reply:
+        return short_chat_reply
+
     summary = _clean_summary(plan.event_summary)
     resource_scarcity = float(plan.message_plan.get("slow_variables", {}).get("resource_scarcity", 0.0) or 0.0)
     if summary:
@@ -248,7 +321,7 @@ def fallback_render_text(plan: RenderPlan) -> str:
             context_text = f"你刚才提到“{summary}”。 "
     else:
         context_text = ""
-    parts = [part for part in (_opening_from_expression(plan), _action_line(plan), _safety_line(plan)) if part]
+    parts = [part for part in (_memory_anchor_line(plan, summary), _opening_from_expression(plan), _action_line(plan), _safety_line(plan)) if part]
     if plan.action == "short_reply" or resource_scarcity >= 0.75:
         parts = parts[:2]
     text = f"{context_text}{' '.join(parts)}".strip()

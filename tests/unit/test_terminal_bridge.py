@@ -130,12 +130,13 @@ def test_sidebar_snapshot_surfaces_controlled_learning_policy(tmp_path):
     assert snapshot["controlled_learning"]["learning_log_dir"] == str(tmp_path / ".alive" / "learning-cache")
 
 
-def test_greeting_user_turn_uses_direct_chat_without_starting_run(tmp_path):
+def test_greeting_user_turn_uses_fast_chat_without_backfill_tick(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     _seed_entropy(controller)
     handler = TerminalEventHandler(controller)
 
     handler.handle({"type": "start_session", "session_id": "sess-greet", "cwd": str(tmp_path)})
+    controller.tick = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("fast chat should not backfill a full tick"))
     events = handler.handle({"type": "user_turn", "session_id": "sess-greet", "text": "你好"})
     session_state = TerminalSessionStore(controller.runtime_dir).read("sess-greet")
 
@@ -143,23 +144,25 @@ def test_greeting_user_turn_uses_direct_chat_without_starting_run(tmp_path):
     snapshot_event = next(item for item in events if item["type"] == "sidebar_snapshot")
     assert "你好" in events[-1]["message"]
     assert snapshot_event["console"]["state"]["brain_state"]["mode"] == "interactive"
-    assert snapshot_event["console"]["state"]["current_round"]["round_id"] is not None
-    assert snapshot_event["console"]["timeline"]["round_id"] is not None
-    assert snapshot_event["console"]["why_current"]["round_id"] is not None
-    assert snapshot_event["console"]["why_current"]["why"]["summary"] != "暂无"
+    assert snapshot_event["console"]["state"]["current_round"]["round_id"] is None
+    assert snapshot_event["console"]["timeline"]["events"] == []
+    assert snapshot_event["console"]["why_current"]["why"]["summary"] == "按需加载"
     assert session_state.active_run_id is None
-    assert session_state.transcript_lines == [
-        {"kind": "user", "text": "你好"},
-        {"kind": "assistant", "text": events[0]["message"]},
-    ]
+    assert session_state.transcript_lines[0] == {"kind": "user", "text": "你好"}
+    assert session_state.transcript_lines[1]["kind"] == "assistant"
+    assert session_state.transcript_lines[1]["text"] == events[0]["message"]
+    final_event = next(item for item in events if item["type"] == "assistant_final")
+    assert final_event.get("event_log_ref", {}) == {}
+    assert "event_log_ref" not in session_state.transcript_lines[1]
 
 
-def test_identity_compound_user_turn_uses_direct_chat_without_starting_run(tmp_path):
+def test_identity_compound_user_turn_uses_fast_chat_without_backfill_tick(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     _seed_entropy(controller)
     handler = TerminalEventHandler(controller)
 
     handler.handle({"type": "start_session", "session_id": "sess-identity", "cwd": str(tmp_path)})
+    controller.tick = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("fast chat should not backfill a full tick"))
     events = handler.handle({"type": "user_turn", "session_id": "sess-identity", "text": "你好，你是谁？你有名字吗？"})
     session_state = TerminalSessionStore(controller.runtime_dir).read("sess-identity")
 
@@ -168,10 +171,9 @@ def test_identity_compound_user_turn_uses_direct_chat_without_starting_run(tmp_p
     assert "runtime_instance" not in events[-1]["message"]
     assert "我是" in events[-1]["message"]
     assert snapshot_event["console"]["state"]["brain_state"]["mode"] == "interactive"
-    assert snapshot_event["console"]["state"]["current_round"]["round_id"] is not None
-    assert snapshot_event["console"]["timeline"]["round_id"] is not None
-    assert snapshot_event["console"]["why_current"]["round_id"] is not None
-    assert snapshot_event["console"]["why_current"]["why"]["summary"] != "暂无"
+    assert snapshot_event["console"]["state"]["current_round"]["round_id"] is None
+    assert snapshot_event["console"]["timeline"]["events"] == []
+    assert snapshot_event["console"]["why_current"]["why"]["summary"] == "按需加载"
     assert session_state.active_run_id is None
 
 
@@ -197,6 +199,11 @@ def test_fast_chat_user_turn_streams_tokens_without_starting_run(tmp_path, monke
             },
         ),
     )
+    monkeypatch.setattr(
+        controller,
+        "tick",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("fast chat should not trigger sidebar backfill tick")),
+    )
 
     events = handler.handle({"type": "user_turn", "session_id": "sess-fast", "text": "你是谁？"})
 
@@ -204,10 +211,9 @@ def test_fast_chat_user_turn_streams_tokens_without_starting_run(tmp_path, monke
     snapshot_event = next(item for item in events if item["type"] == "sidebar_snapshot")
     assert "".join(item["delta"] for item in events if item["type"] == "assistant_token") == "你好，我是当前运行体实例。"
     assert snapshot_event["console"]["state"]["brain_state"]["mode"] == "interactive"
-    assert snapshot_event["console"]["state"]["current_round"]["round_id"] is not None
-    assert snapshot_event["console"]["timeline"]["round_id"] is not None
-    assert snapshot_event["console"]["why_current"]["round_id"] is not None
-    assert snapshot_event["console"]["why_current"]["why"]["summary"] != "暂无"
+    assert snapshot_event["console"]["state"]["current_round"]["round_id"] is None
+    assert snapshot_event["console"]["timeline"]["events"] == []
+    assert snapshot_event["console"]["why_current"]["why"]["summary"] == "按需加载"
 
 
 def test_substantive_direct_chat_turn_refreshes_console_round(tmp_path):
@@ -478,14 +484,14 @@ def test_terminal_control_command_surfaces_initiative_views(tmp_path, monkeypatc
     monkeypatch.setattr(
         controller,
         "initiative_why",
-        lambda round_ref="last": {"summary": "initiative why", "round_id": 7},
+        lambda round_ref="last": {"summary": "follow_up_task via 写作业", "round_id": 7},
     )
 
     cases = [
         ("status", "initiative status"),
         ("distribution", "initiative distribution"),
         ("trigger", "initiative trigger"),
-        ("why", "initiative why"),
+        ("why", "follow_up_task via 写作业"),
     ]
 
     for subcommand, marker in cases:
@@ -628,13 +634,13 @@ def test_model_control_command_reports_tiers_and_bindings(tmp_path):
     assert "small_model" in final_event["message"]
     assert "medium_model" in final_event["message"]
     assert "large_model" in final_event["message"]
-    assert "SalienceAgent -> small_model" in final_event["message"]
-    assert "PerspectiveModel -> medium_model" in final_event["message"]
-    assert "Renderer -> large_model" in final_event["message"]
+    assert "主要模块模型绑定" in final_event["message"]
+    assert "cognitive_packet -> medium_model" in final_event["message"]
+    assert "deep_renderer -> large_model" in final_event["message"]
     assert "model_status" in snapshot_event
     assert snapshot_event["model_status"]["tiers"]["small_model"]["model"] == "ep-20260404191810-qfn7s"
     assert snapshot_event["model_status"]["tiers"]["medium_model"]["model"] == "deepseek-chat"
-    assert snapshot_event["model_status"]["route_policies"]["chat_standard"]["hot_path"] == "full_tick"
+    assert snapshot_event["model_status"]["route_policies"]["chat_standard"]["latency_budget_ms"] == 1200
 
 
 def test_control_command_mode_permissions_state_and_compact(tmp_path):
@@ -708,6 +714,8 @@ def test_ask_permissions_emit_approval_request_and_persist_pending_approvals(tmp
     assert persisted.approvals_pending
     assert persisted.approvals_pending[0]["call_id"] == approval["call_id"]
     assert persisted.approvals_pending[0]["trace_ref"] == approval["trace_ref"]
+    assert persisted.approvals_pending[0]["event_log_ref"]["run_tool_trace_ref"] == approval["event_log_ref"]["run_tool_trace_ref"]
+    assert approval["event_log_ref"]["run_trace_ref"].startswith("run://")
 
     approved_events = handler.handle(
         {
@@ -726,6 +734,52 @@ def test_ask_permissions_emit_approval_request_and_persist_pending_approvals(tmp
         item["kind"] == "result" and item["callId"] == approval["call_id"] and item["traceRef"]
         for item in approved_persisted.tool_timeline
     )
+    assert any(
+        item["kind"] == "result"
+        and item["callId"] == approval["call_id"]
+        and item["event_log_ref"]["run_tool_trace_ref"] == approval["event_log_ref"]["run_tool_trace_ref"]
+        for item in approved_persisted.tool_timeline
+    )
+
+
+def test_approval_round_trip_survives_corrupted_current_pointer_after_multi_session_activity(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "worker.py").write_text("VALUE = 1\n", encoding="utf-8")
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    _seed_entropy(controller)
+    handler = TerminalEventHandler(controller)
+    session_store = TerminalSessionStore(controller.runtime_dir)
+
+    for session_id, text in {
+        "sess-identity": "你是谁，你有名字吗？",
+        "sess-companion": "我现在很乱，你觉得我先做什么？",
+        "sess-task": "检查 worker.py 并规划下一步",
+    }.items():
+        handler.handle({"type": "start_session", "session_id": session_id, "cwd": str(tmp_path)})
+        handler.handle({"type": "user_turn", "session_id": session_id, "text": text})
+
+    session_store.current_path.write_text("{", encoding="utf-8")
+
+    handler.handle({"type": "control_command", "session_id": "sess-task", "command": "permissions", "value": "ask"})
+    turn_events = handler.handle({"type": "user_turn", "session_id": "sess-task", "text": "检查 worker.py"})
+    approval = next(item for item in turn_events if item["type"] == "approval_request")
+    persisted = session_store.read("sess-task")
+
+    assert persisted.approvals_pending
+    assert persisted.approvals_pending[0]["call_id"] == approval["call_id"]
+
+    approved_events = handler.handle(
+        {
+            "type": "approve",
+            "session_id": "sess-task",
+            "call_id": approval["call_id"],
+            "approved": True,
+        }
+    )
+
+    approved_types = [item["type"] for item in approved_events]
+    assert "tool_result" in approved_types
+    assert "assistant_final" in approved_types
 
 
 def test_user_turn_uses_plan_and_execute_paths_instead_of_legacy_route_and_trace_refetch(tmp_path, monkeypatch):
@@ -917,10 +971,10 @@ def test_detach_session_preserves_transcript_and_restarts_same_session(tmp_path)
     assert detached_state.status == "detached"
     assert detached_state.transcript_mode == "compact"
     assert detached_state.compact is True
-    assert detached_state.transcript_lines == [
-        {"kind": "user", "text": "你好"},
-        {"kind": "assistant", "text": next(item for item in turn_events if item["type"] == "assistant_final")["message"]},
-    ]
+    assert detached_state.transcript_lines[0] == {"kind": "user", "text": "你好"}
+    assert detached_state.transcript_lines[1]["kind"] == "assistant"
+    assert detached_state.transcript_lines[1]["text"] == next(item for item in turn_events if item["type"] == "assistant_final")["message"]
+    assert "event_log_ref" not in detached_state.transcript_lines[1]
 
     restarted = handler.handle({"type": "start_session", "session_id": "sess-detach", "cwd": str(tmp_path)})
     restarted_state = session_store.read("sess-detach")
@@ -958,6 +1012,33 @@ def test_close_session_marks_session_ended(tmp_path):
 
     assert events[0]["type"] == "session_ended"
     assert session_state.status == "ended"
+
+
+def test_close_session_can_purge_current_and_cleanup_old_sessions(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    handler = TerminalEventHandler(controller)
+    session_store = TerminalSessionStore(controller.runtime_dir)
+
+    handler.handle({"type": "start_session", "session_id": "sess-old-ended", "cwd": str(tmp_path)})
+    handler.handle({"type": "close_session", "session_id": "sess-old-ended"})
+    handler.handle({"type": "start_session", "session_id": "sess-old-detached", "cwd": str(tmp_path)})
+    handler.handle({"type": "close_session", "session_id": "sess-old-detached", "detach": True})
+    handler.handle({"type": "start_session", "session_id": "sess-live", "cwd": str(tmp_path)})
+
+    events = handler.handle(
+        {
+            "type": "close_session",
+            "session_id": "sess-live",
+            "purge": True,
+            "cleanup_old": True,
+        }
+    )
+
+    assert events[0]["type"] == "session_ended"
+    assert set(events[0]["cleaned_session_ids"]) == {"sess-old-ended", "sess-old-detached"}
+    assert [session.session_id for session in session_store.list_sessions()] == []
+    with pytest.raises(FileNotFoundError):
+        session_store.read_current()
 
 
 def test_why_summary_labels_bootstrap_planning_without_runtime_evidence(tmp_path):

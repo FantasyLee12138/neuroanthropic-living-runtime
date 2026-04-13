@@ -17,7 +17,7 @@
 - **Acceptance artifacts**
   1.5 acceptance plan、matrix、local client / self-hosted deployment 文档已建立。
 - **Bounded long-run acceptance report**
-  `nalr eval acceptance-report` 已提供 terminal-facing 的 release acceptance report 入口，并补齐了 [`docs/testing/2026-04-08-self-hosted-equivalent-longrun.md`](/Users/fantasylee/类脑架构/docs/testing/2026-04-08-self-hosted-equivalent-longrun.md) 这份等价长跑报告。
+  `nalr eval acceptance-report` 已提供 terminal-facing 的 release acceptance report 入口，`release_15.bounded_long_run` 作为统一 bounded 面向收口，并补齐了 [`docs/testing/2026-04-08-self-hosted-equivalent-longrun.md`](/Users/fantasylee/类脑架构/docs/testing/2026-04-08-self-hosted-equivalent-longrun.md) 这份阶段性证据。
 
 ## In Flight Before 1.5 Freeze
 
@@ -67,6 +67,7 @@
 - `PYTHONPATH='/Users/fantasylee/类脑架构:/Users/fantasylee/类脑架构/src' pytest tests/unit/test_local_client_packager.py tests/unit/test_acceptance_15_runner.py tests/unit/test_terminal_bridge.py tests/integration/test_terminal_bridge_stdio.py -q`
 - `python3 /Users/fantasylee/类脑架构/scripts/acceptance_15.py --run --group controlled-learning`
 - `python3 /Users/fantasylee/类脑架构/scripts/acceptance_15.py --run --group self-hosted`
+- `python3 -m nalr.cli.app eval acceptance-report --window 20`
 
 ## Feature Matrix Summary
 

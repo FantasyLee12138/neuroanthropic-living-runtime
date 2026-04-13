@@ -9,6 +9,8 @@ from nalr.providers.router import (
     ModelRouteConfig,
     ModelRouter,
     MissingModelCredentialError,
+    ModelProviderError,
+    ModelResponse,
 )
 
 
@@ -483,3 +485,121 @@ def test_deepseek_backend_streams_text_deltas():
     assert chunks == ["你好", "，我在。"]
     assert stream_client.stream_calls[0]["path"] == "/chat/completions"
     assert stream_client.stream_calls[0]["json"]["stream"] is True
+
+
+def test_model_router_activates_global_failover_after_remote_generation_failure():
+    class _FailingBackend:
+        def generate(self, *, route, request, api_key=None):
+            del route, request, api_key
+            raise ModelProviderError("primary route failed")
+
+    class _FallbackBackend:
+        def generate(self, *, route, request, api_key=None):
+            del request, api_key
+            return ModelResponse(
+                route=route.name,
+                model=route.model,
+                payload={"text": "fallback ok"},
+                backend=route.backend,
+            )
+
+    router = ModelRouter(
+        {
+            "chat_fast": ModelRouteConfig(
+                name="chat_fast",
+                backend="deepseek",
+                model="deepseek-chat",
+                timeout_ms=300,
+                retries=0,
+                enabled=True,
+                base_url="https://api.deepseek.com",
+                api_key_env="DEEPSEEK_API_KEY",
+            )
+        },
+        backends={
+            "deepseek": _FailingBackend(),
+            "openai_compatible": _FallbackBackend(),
+        },
+        failover={
+            "enabled": True,
+            "mode": "global_cutover",
+            "backend": "openai_compatible",
+            "base_url": "https://ruishiglobal.com/v1",
+            "model": "gpt-5.4",
+            "api_key_env": "GPT54_FALLBACK_API_KEY",
+        },
+    )
+
+    response = router.generate(
+        "chat_fast",
+        ModelRequest(
+            system_prompt="You are a fast chat model.",
+            user_prompt="你好",
+            response_schema={"text": "str"},
+        ),
+    )
+
+    status = router.failover_status()
+    effective = router.effective_route_config(router.route_configs["chat_fast"])
+
+    assert response.payload["text"] == "fallback ok"
+    assert response.backend == "openai_compatible"
+    assert response.model == "gpt-5.4"
+    assert status["active"] is True
+    assert "chat_fast" in status["reason"]
+    assert effective.backend == "openai_compatible"
+    assert effective.model == "gpt-5.4"
+
+
+def test_model_router_stream_generate_uses_global_failover_once_activated():
+    class _FailingBackend:
+        def stream_generate(self, *, route, request, api_key=None):
+            del route, request, api_key
+            raise ModelProviderError("stream failed")
+
+    class _FallbackBackend:
+        def stream_generate(self, *, route, request, api_key=None):
+            del route, request, api_key
+            yield "fallback "
+            yield "stream"
+
+    router = ModelRouter(
+        {
+            "chat_fast": ModelRouteConfig(
+                name="chat_fast",
+                backend="deepseek",
+                model="deepseek-chat",
+                timeout_ms=300,
+                retries=0,
+                enabled=True,
+                base_url="https://api.deepseek.com",
+                api_key_env="DEEPSEEK_API_KEY",
+            )
+        },
+        backends={
+            "deepseek": _FailingBackend(),
+            "openai_compatible": _FallbackBackend(),
+        },
+        failover={
+            "enabled": True,
+            "mode": "global_cutover",
+            "backend": "openai_compatible",
+            "base_url": "https://ruishiglobal.com/v1",
+            "model": "gpt-5.4",
+            "api_key_env": "GPT54_FALLBACK_API_KEY",
+        },
+    )
+
+    chunks = list(
+        router.stream_generate(
+            "chat_fast",
+            ModelRequest(
+                system_prompt="You are a fast chat model.",
+                user_prompt="你好",
+                response_schema={"text": "str"},
+            ),
+        )
+    )
+
+    assert chunks == ["fallback ", "stream"]
+    assert router.failover_status()["active"] is True

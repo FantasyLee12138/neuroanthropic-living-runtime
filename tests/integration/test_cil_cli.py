@@ -242,7 +242,7 @@ def test_cil_legacy_mutations_are_boundary_mediated_and_traced(tmp_path):
 
     assert recall["cue"] == "coffee"
     assert recall["strength"] > 0.0
-    assert recall["tier"] in {"hot", "warm", "archive"}
+    assert recall["tier"] in {"hot", "warm", "cold"}
     assert reset.applied is True
     assert reset.boundary_action == "proposal_route"
     assert reset.cause_type == "external_stimulus"

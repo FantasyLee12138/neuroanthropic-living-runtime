@@ -93,6 +93,8 @@ def _latency_breakdown(runtime_metrics: dict[str, Any]) -> dict[str, Any]:
 class DiagnosticsRuntimeService:
     def __init__(self, controller: "RuntimeController") -> None:
         self.controller = controller
+        self._cached_latest_runtime_trace_round_id: int | None = None
+        self._cached_latest_runtime_trace: dict[str, Any] | None = None
 
     def latest_runtime_metrics(self) -> dict[str, Any]:
         controller = self.controller
@@ -100,6 +102,13 @@ class DiagnosticsRuntimeService:
         if round_id is None:
             return {
                 "route_type": "",
+                "route_budget_ms": 0,
+                "activation_set": [],
+                "activation_reason": [],
+                "memory_tiers_read": [],
+                "packet_summary": {},
+                "background_jobs": [],
+                "deepen_reason": "",
                 "model_call_count": 0,
                 "parallel_task_count": 0,
                 "parallel_groups": [],
@@ -112,10 +121,19 @@ class DiagnosticsRuntimeService:
                 "latency_summary": "暂无运行时性能数据",
             }
         latest_trace = controller.trace_round(round_id)
+        self._cached_latest_runtime_trace_round_id = int(round_id)
+        self._cached_latest_runtime_trace = latest_trace
         runtime_metrics = dict(latest_trace.get("runtime_metrics", {}) or {})
         timing = _latency_breakdown(runtime_metrics)
         return {
             **runtime_metrics,
+            "route_budget_ms": int(runtime_metrics.get("route_budget_ms", latest_trace.get("route_budget_ms", 0)) or 0),
+            "activation_set": list(runtime_metrics.get("activation_set", latest_trace.get("activation_set", [])) or []),
+            "activation_reason": list(runtime_metrics.get("activation_reason", latest_trace.get("activation_reason", [])) or []),
+            "memory_tiers_read": list(runtime_metrics.get("memory_tiers_read", latest_trace.get("memory_tiers_read", [])) or []),
+            "packet_summary": dict(runtime_metrics.get("packet_summary", latest_trace.get("packet_summary", {})) or {}),
+            "background_jobs": list(runtime_metrics.get("background_jobs", latest_trace.get("background_jobs", [])) or []),
+            "deepen_reason": str(runtime_metrics.get("deepen_reason", latest_trace.get("deepen_reason", "")) or ""),
             "model_call_count": int(runtime_metrics.get("model_call_count", len(list(latest_trace.get("model_call_traces", []) or [])))),
             "parallel_task_count": int(runtime_metrics.get("parallel_task_count", 0) or 0),
             "parallel_groups": list(runtime_metrics.get("parallel_groups", []) or []),
@@ -124,6 +142,9 @@ class DiagnosticsRuntimeService:
 
     def performance_payload(self) -> dict[str, Any]:
         runtime_metrics = self.latest_runtime_metrics()
+        return self.performance_payload_from_runtime_metrics(runtime_metrics)
+
+    def performance_payload_from_runtime_metrics(self, runtime_metrics: dict[str, Any]) -> dict[str, Any]:
         return {
             "runtime_metrics": runtime_metrics,
             "latency": {
@@ -135,40 +156,89 @@ class DiagnosticsRuntimeService:
             },
         }
 
-    def console_state(self) -> dict[str, Any]:
+    def _cached_trace_for_round(self, round_id: int | None) -> dict[str, Any] | None:
+        if round_id is None:
+            return None
+        if self._cached_latest_runtime_trace_round_id != int(round_id):
+            return None
+        if isinstance(self._cached_latest_runtime_trace, dict):
+            return self._cached_latest_runtime_trace
+        return None
+
+    def _current_round_from_trace(
+        self,
+        latest_trace: dict[str, Any],
+        *,
+        runtime_metrics: dict[str, Any],
+    ) -> dict[str, Any]:
+        rendered_expression = dict(latest_trace.get("rendered_expression", {}) or {})
+        timing = {
+            "total_turn_ms": int(runtime_metrics.get("total_turn_ms", 0) or 0),
+            "model_wait_ms": int(runtime_metrics.get("total_model_wait_ms", runtime_metrics.get("model_wait_ms", 0)) or 0),
+            "local_compute_ms": int(runtime_metrics.get("local_compute_ms", 0) or 0),
+            "latency_dominant": str(runtime_metrics.get("latency_dominant") or "mixed"),
+            "latency_summary": str(runtime_metrics.get("latency_summary") or ""),
+        }
+        cause_type = str(latest_trace.get("cause_type") or "")
+        mode = str(latest_trace.get("mode") or "")
+        return {
+            "round_id": latest_trace["round_id"],
+            "sampled_action": latest_trace.get("sampled_action"),
+            "trace_ref": latest_trace.get("trace_ref"),
+            "route_type": runtime_metrics.get("route_type"),
+            "cause_type": cause_type,
+            "cause_label": _cause_label(cause_type, mode),
+            "mode": mode,
+            "mode_label": _mode_label(mode, cause_type),
+            "render_route": rendered_expression.get("route"),
+            "render_model": rendered_expression.get("model"),
+            "render_degraded": bool(rendered_expression.get("degraded", False)),
+            "failure_policy_applied": rendered_expression.get("failure_policy_applied"),
+            "model_call_count": len(list(latest_trace.get("model_call_traces", []) or [])),
+            "route_budget_ms": int(runtime_metrics.get("route_budget_ms", latest_trace.get("route_budget_ms", 0)) or 0),
+            "activation_set": list(runtime_metrics.get("activation_set", latest_trace.get("activation_set", [])) or []),
+            "activation_reason": list(runtime_metrics.get("activation_reason", latest_trace.get("activation_reason", [])) or []),
+            "memory_tiers_read": list(runtime_metrics.get("memory_tiers_read", latest_trace.get("memory_tiers_read", [])) or []),
+            "packet_summary": dict(runtime_metrics.get("packet_summary", latest_trace.get("packet_summary", {})) or {}),
+            "background_jobs": list(runtime_metrics.get("background_jobs", latest_trace.get("background_jobs", [])) or []),
+            "deepen_reason": str(runtime_metrics.get("deepen_reason", latest_trace.get("deepen_reason", "")) or ""),
+            "parallel_task_count": int(runtime_metrics.get("parallel_task_count", 0) or 0),
+            **timing,
+        }
+
+    def console_state(
+        self,
+        *,
+        state_payload: dict[str, Any] | None = None,
+        latest_trace: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         controller = self.controller
-        payload = controller.state_payload()
+        payload = state_payload or controller.state_hot_payload()
+        truth_payload = {
+            "runtime_revision": int(payload.get("runtime_revision", 0) or 0),
+            "last_mutation_at": str(payload.get("last_mutation_at") or ""),
+            "run_visible": bool(payload.get("run_visible", False)),
+            "run_id": str(payload.get("run_id") or ""),
+            "run_status": str(payload.get("run_status") or ""),
+            "run_blocking": bool(payload.get("run_blocking", False)),
+            "run_block_reason": str(payload.get("run_block_reason") or ""),
+            "run_block_run_id": str(payload.get("run_block_run_id") or ""),
+            "run_pending_approval": bool(payload.get("run_pending_approval", False)),
+            "run_dirty_worktree": bool(payload.get("run_dirty_worktree", False)),
+            "run_stop_reason": str(payload.get("run_stop_reason") or ""),
+            "run_stale_dirty_worktree": bool(payload.get("run_stale_dirty_worktree", False)),
+        }
         cognitive = dict(payload.get("cognitive_snapshot", {}) or {})
         vital_signs = dict(cognitive.get("vital_signs", {}) or {})
         identity = dict(cognitive.get("identity", {}) or {})
         authenticity = dict(cognitive.get("authenticity", {}) or {})
+        runtime_metrics = dict(payload.get("runtime_metrics", {}) or {})
         round_id = controller.console_round_or_none()
         current_round = None
-        latest_trace = None
+        current_round_trace: dict[str, Any] | None = None
         if round_id is not None:
-            latest_trace = controller.trace_round(round_id)
-            rendered_expression = dict(latest_trace.get("rendered_expression", {}) or {})
-            runtime_metrics = dict(latest_trace.get("runtime_metrics", {}) or {})
-            timing = _latency_breakdown(runtime_metrics)
-            cause_type = str(latest_trace.get("cause_type") or "")
-            mode = str(latest_trace.get("mode") or "")
-            current_round = {
-                "round_id": latest_trace["round_id"],
-                "sampled_action": latest_trace.get("sampled_action"),
-                "trace_ref": latest_trace.get("trace_ref"),
-                "route_type": runtime_metrics.get("route_type"),
-                "cause_type": cause_type,
-                "cause_label": _cause_label(cause_type, mode),
-                "mode": mode,
-                "mode_label": _mode_label(mode, cause_type),
-                "render_route": rendered_expression.get("route"),
-                "render_model": rendered_expression.get("model"),
-                "render_degraded": bool(rendered_expression.get("degraded", False)),
-                "failure_policy_applied": rendered_expression.get("failure_policy_applied"),
-                "model_call_count": len(list(latest_trace.get("model_call_traces", []) or [])),
-                "parallel_task_count": int(runtime_metrics.get("parallel_task_count", 0) or 0),
-                **timing,
-            }
+            current_round_trace = latest_trace or self._cached_trace_for_round(round_id) or controller.trace_round(round_id)
+            current_round = self._current_round_from_trace(current_round_trace, runtime_metrics=runtime_metrics)
         try:
             run = controller.run_status()
         except FileNotFoundError:
@@ -181,6 +251,7 @@ class DiagnosticsRuntimeService:
             else:
                 run = {"status": "idle", "round_id": None, "trace_ref": None}
         return {
+            **truth_payload,
             "brain_state": {
                 "mode": vital_signs.get("mode") or payload.get("mode"),
                 "vitality": vital_signs.get("body_energy"),
@@ -195,13 +266,17 @@ class DiagnosticsRuntimeService:
                 "acetylcholine": None,
                 "gaba": None,
             },
-            "motivation_pool": dict(latest_trace.get("motivation_pool", {}) or {}) if isinstance(latest_trace, dict) else {},
+            "motivation_pool": (
+                dict(current_round_trace.get("motivation_pool", {}) or {})
+                if isinstance(current_round_trace, dict)
+                else {}
+            ),
             "long_run": {
                 "dream": payload.get("dream", {}),
                 "trace_storage": payload.get("trace_storage", {}),
             },
             "current_round": current_round,
-            "performance": self.performance_payload(),
+            "performance": dict(payload.get("performance", {}) or self.performance_payload_from_runtime_metrics(runtime_metrics)),
             "session": {
                 "session_id": payload.get("session_id"),
                 "mode": payload.get("mode"),
@@ -214,8 +289,13 @@ class DiagnosticsRuntimeService:
     def console_refresh_payload(self, round_ref: int | str | None = None) -> dict[str, Any]:
         controller = self.controller
         effective_round = round_ref if round_ref is not None else controller.console_round_or_none()
+        state_payload = controller.state_hot_payload()
+        current_round_ref = controller.console_round_or_none()
+        latest_trace = self._cached_trace_for_round(current_round_ref)
+        if latest_trace is None and current_round_ref is not None:
+            latest_trace = controller.trace_round(current_round_ref)
         payload: dict[str, Any] = {
-            "state": controller.console_state(),
+            "state": self.console_state(state_payload=state_payload, latest_trace=latest_trace),
             "autonomy": controller.autonomy_runtime_status(),
         }
         if effective_round is None:
@@ -259,7 +339,6 @@ class DiagnosticsRuntimeService:
 
     def console_recent_actions(self, *, limit: int = 8) -> dict[str, Any]:
         controller = self.controller
-        controller.trace_store.flush(raise_on_error=False)
         rows = controller.trace_store.recent_rounds(limit=limit)
         actions = [
             {
@@ -282,19 +361,16 @@ class DiagnosticsRuntimeService:
         controller = self.controller
         latest_round = controller.resolve_round_ref(round_ref) if round_ref is not None else controller.console_round_or_none()
         if latest_round is not None:
-            latest_trace = controller.trace_round(latest_round)
+            latest_trace = self._cached_trace_for_round(latest_round) or controller.trace_round(latest_round)
             instinct_field = dict(latest_trace.get("state_snapshot", {}).get("instinct_field", {}) or {})
             anchor = dict(latest_trace.get("state_snapshot", {}).get("personality_anchor", {}) or {})
+            probability_field = dict(latest_trace.get("probability_field", {}) or {})
         else:
             state = controller.load_runtime_state()
             controller.sync_tlh_state(state)
             instinct_field = to_dict(state.instinct_field)
             anchor = to_dict(state.personality_anchor)
-        probability_field = (
-            controller.trace_probability_field(latest_round).get("probability_field", {})
-            if latest_round is not None
-            else {}
-        )
+            probability_field = {}
         region_scores = dict(instinct_field.get("region_scores", {}) or {})
         winner_region = str(instinct_field.get("winner_region") or "")
         axis_values = {

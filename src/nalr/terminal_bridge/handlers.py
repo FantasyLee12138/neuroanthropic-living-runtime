@@ -46,6 +46,8 @@ class TerminalEventHandler:
             return self._close_session(
                 event["session_id"],
                 detach=bool(event.get("detach", False)),
+                purge=bool(event.get("purge", False)),
+                cleanup_old=bool(event.get("cleanup_old", False)),
                 transcript_mode=event.get("transcript_mode"),
             )
         raise ProtocolError(f"unhandled event type: {event_type}")
@@ -85,18 +87,20 @@ class TerminalEventHandler:
         status: str | None,
         round_id: int | None = None,
         trace_ref: str | None = None,
+        event_log_ref: dict[str, Any] | None = None,
     ) -> None:
-        session.tool_timeline.append(
-            {
-                "kind": kind,
-                "callId": call_id,
-                "tool": tool,
-                "summary": summary,
-                "status": status,
-                "roundId": round_id,
-                "traceRef": trace_ref,
-            }
-        )
+        entry = {
+            "kind": kind,
+            "callId": call_id,
+            "tool": tool,
+            "summary": summary,
+            "status": status,
+            "roundId": round_id,
+            "traceRef": trace_ref,
+        }
+        if event_log_ref:
+            entry["event_log_ref"] = dict(event_log_ref)
+        session.tool_timeline.append(entry)
 
     def _permission_policy(self, permission_mode: str) -> dict[str, Any]:
         if permission_mode == "acceptEdits":
@@ -123,31 +127,133 @@ class TerminalEventHandler:
                 return value.strip()
             return None
 
-        def _search(payload: dict[str, Any] | None, depth: int = 0) -> dict[str, Any]:
-            if not isinstance(payload, dict) or depth > 2:
+        def _normalize_event_log_ref(payload: Any) -> dict[str, Any]:
+            if not isinstance(payload, dict):
                 return {}
-            round_id = _round_id(payload.get("round_id") or payload.get("roundId"))
-            trace_ref = _trace_ref(payload.get("trace_ref") or payload.get("traceRef"))
-            if round_id is not None or trace_ref is not None:
-                result: dict[str, Any] = {}
-                if round_id is not None:
-                    result["round_id"] = round_id
-                if trace_ref is not None:
-                    result["trace_ref"] = trace_ref
-                return result
-            for nested_key in ("run", "result", "status", "why", "explain", "payload", "trace", "storage", "session"):
-                nested = payload.get(nested_key)
-                if isinstance(nested, dict):
-                    found = _search(nested, depth + 1)
-                    if found:
-                        return found
+            normalized: dict[str, Any] = {}
+            for key, value in payload.items():
+                if not isinstance(key, str):
+                    continue
+                if key.endswith("_ref") or key.endswith("_jsonl"):
+                    text = str(value or "").strip()
+                    if text:
+                        normalized[key] = text
+            return normalized
+
+        def _derive_event_log_ref_from_trace(trace_ref: str) -> dict[str, Any]:
+            if trace_ref.startswith("run://"):
+                if "/tools/" in trace_ref:
+                    run_ref, _, _ = trace_ref.partition("/tools/")
+                    return {
+                        "run_trace_ref": run_ref,
+                        "run_tool_trace_ref": trace_ref,
+                    }
+                if "/steps/" in trace_ref:
+                    run_ref, _, _ = trace_ref.partition("/steps/")
+                    return {
+                        "run_trace_ref": run_ref,
+                        "run_step_trace_ref": trace_ref,
+                    }
+                return {"run_trace_ref": trace_ref}
+            if trace_ref.startswith("round://"):
+                return {"round_trace_ref": trace_ref}
+            if trace_ref.startswith("dream://"):
+                return {"dream_trace_ref": trace_ref}
+            if trace_ref.startswith("command://"):
+                return {"command_trace_ref": trace_ref}
             return {}
 
+        def _merge_linkage(result: dict[str, Any], candidate: dict[str, Any]) -> None:
+            round_id = candidate.get("round_id")
+            if result.get("round_id") is None and isinstance(round_id, int):
+                result["round_id"] = round_id
+            trace_ref = _trace_ref(candidate.get("trace_ref"))
+            if trace_ref:
+                result["trace_ref"] = trace_ref
+                result["event_log_ref"].update(_derive_event_log_ref_from_trace(trace_ref))
+            event_log_ref = _normalize_event_log_ref(candidate.get("event_log_ref"))
+            if event_log_ref:
+                result["event_log_ref"].update(event_log_ref)
+
+        def _search(payload: Any, result: dict[str, Any], depth: int = 0) -> None:
+            if depth > 3:
+                return
+            if isinstance(payload, dict):
+                candidate: dict[str, Any] = {}
+                round_id = _round_id(payload.get("round_id") or payload.get("roundId"))
+                if round_id is not None:
+                    candidate["round_id"] = round_id
+                trace_ref = _trace_ref(payload.get("trace_ref") or payload.get("traceRef"))
+                if trace_ref is not None:
+                    candidate["trace_ref"] = trace_ref
+                event_log_ref = _normalize_event_log_ref(payload.get("event_log_ref") or payload.get("eventLogRef"))
+                if event_log_ref:
+                    candidate["event_log_ref"] = event_log_ref
+                run_id = str(payload.get("run_id") or payload.get("runId") or "").strip()
+                if run_id:
+                    candidate.setdefault("event_log_ref", {})["run_trace_ref"] = self.controller._run_trace_ref(run_id)
+                    step_id = str(payload.get("step_id") or payload.get("stepId") or "").strip()
+                    if step_id:
+                        candidate["event_log_ref"]["run_step_trace_ref"] = self.controller._run_step_trace_ref(run_id, step_id)
+                    call_id = str(payload.get("call_id") or payload.get("callId") or "").strip()
+                    if call_id:
+                        candidate["event_log_ref"]["run_tool_trace_ref"] = self.controller._run_tool_trace_ref(run_id, call_id)
+                command_id = str(payload.get("command_id") or payload.get("commandId") or "").strip()
+                if command_id:
+                    candidate.setdefault("event_log_ref", {})["command_trace_ref"] = f"command://{command_id}"
+                dream_run_id = str(payload.get("dream_run_id") or payload.get("dreamRunId") or "").strip()
+                if dream_run_id:
+                    candidate.setdefault("event_log_ref", {})["dream_trace_ref"] = f"dream://runs/{dream_run_id}"
+                _merge_linkage(result, candidate)
+                for value in payload.values():
+                    if isinstance(value, dict):
+                        _search(value, result, depth + 1)
+                    elif isinstance(value, list):
+                        for item in value:
+                            if isinstance(item, dict):
+                                _search(item, result, depth + 1)
+
+        result: dict[str, Any] = {
+            "round_id": None,
+            "trace_ref": None,
+            "event_log_ref": {},
+        }
         for payload in payloads:
-            found = _search(payload)
-            if found:
-                return found
-        return {}
+            _search(payload, result)
+        event_log_ref = dict(result.get("event_log_ref") or {})
+        if not event_log_ref:
+            event_log_ref = {}
+        if "run_tool_trace_ref" in event_log_ref and "run_trace_ref" not in event_log_ref:
+            event_log_ref["run_trace_ref"] = str(event_log_ref["run_tool_trace_ref"]).partition("/tools/")[0]
+        if "run_step_trace_ref" in event_log_ref and "run_trace_ref" not in event_log_ref:
+            event_log_ref["run_trace_ref"] = str(event_log_ref["run_step_trace_ref"]).partition("/steps/")[0]
+        round_trace_ref = str(event_log_ref.get("round_trace_ref") or "").strip()
+        if not round_trace_ref and isinstance(result.get("round_id"), int):
+            round_trace_ref = f"round://{int(result['round_id'])}"
+            event_log_ref["round_trace_ref"] = round_trace_ref
+        if result.get("round_id") is None and round_trace_ref.startswith("round://"):
+            result["round_id"] = _round_id(round_trace_ref.removeprefix("round://"))
+        trace_ref = _trace_ref(result.get("trace_ref"))
+        if not trace_ref:
+            for key in (
+                "run_tool_trace_ref",
+                "run_step_trace_ref",
+                "run_trace_ref",
+                "round_trace_ref",
+                "dream_trace_ref",
+                "command_trace_ref",
+            ):
+                trace_ref = _trace_ref(event_log_ref.get(key))
+                if trace_ref:
+                    break
+        linkage: dict[str, Any] = {}
+        if isinstance(result.get("round_id"), int):
+            linkage["round_id"] = int(result["round_id"])
+        if trace_ref is not None:
+            linkage["trace_ref"] = trace_ref
+        if event_log_ref:
+            linkage["event_log_ref"] = event_log_ref
+        return linkage
 
     def _apply_event_to_session(self, session: TerminalSessionState, event: dict[str, Any]) -> None:
         event_type = str(event.get("type") or "")
@@ -162,6 +268,7 @@ class TerminalEventHandler:
                 status=event.get("status") if event.get("status") is None else str(event.get("status")),
                 round_id=linkage.get("round_id"),
                 trace_ref=linkage.get("trace_ref"),
+                event_log_ref=linkage.get("event_log_ref"),
             )
             self._append_transcript(session, "system", f"Tool: {event.get('tool') or 'unknown'}")
             return
@@ -182,6 +289,7 @@ class TerminalEventHandler:
                     "choices": event.get("choices", []),
                     "round_id": linkage.get("round_id"),
                     "trace_ref": linkage.get("trace_ref"),
+                    "event_log_ref": linkage.get("event_log_ref"),
                 }
             )
             session.approvals_pending = pending
@@ -194,6 +302,7 @@ class TerminalEventHandler:
                 status=str(event.get("status") or "pending"),
                 round_id=linkage.get("round_id"),
                 trace_ref=linkage.get("trace_ref"),
+                event_log_ref=linkage.get("event_log_ref"),
             )
             self._append_transcript(session, "system", f"Approval: {event.get('tool') or 'unknown'} - {event.get('summary') or ''}")
             return
@@ -209,11 +318,20 @@ class TerminalEventHandler:
                 status=(event.get("result") or {}).get("status") if (event.get("result") or {}).get("status") is None else str((event.get("result") or {}).get("status")),
                 round_id=linkage.get("round_id"),
                 trace_ref=linkage.get("trace_ref"),
+                event_log_ref=linkage.get("event_log_ref"),
             )
             self._append_transcript(session, "system", f"Result: {(event.get('result') or {}).get('tool_name') or 'unknown'}")
             return
         if event_type == "assistant_final":
-            self._append_transcript(session, "assistant", str(event.get("message") or ""))
+            linkage = self._linkage_fields(event)
+            self._append_transcript(
+                session,
+                "assistant",
+                str(event.get("message") or ""),
+                round_id=linkage.get("round_id"),
+                trace_ref=linkage.get("trace_ref"),
+                event_log_ref=linkage.get("event_log_ref"),
+            )
 
     def _gated_tool_result_event(self, event: dict[str, Any]) -> dict[str, Any]:
         result = dict(event.get("result") or {})
@@ -367,16 +485,50 @@ class TerminalEventHandler:
         target: str,
         mode: str,
         previous_round_count: int,
+        allow_tick_backfill: bool = True,
     ) -> int | None:
         current_round_count = int(self.controller.load_runtime_state().round_count or 0)
         if current_round_count > previous_round_count:
             return current_round_count
+        if not allow_tick_backfill:
+            return None
         result = self.controller.tick(
             RoundEvent(source="user", content=text, target=target),
             scenario="chat",
             mode=mode,
         )
         return int(result.round_id)
+
+    def _light_console_payload(self, *, runtime_state: Any, round_id: int | None = None) -> dict[str, Any]:
+        current_round_id = int(round_id or getattr(runtime_state, "round_count", 0) or 0) or None
+        return {
+            "state": {
+                "brain_state": {
+                    "mode": str(getattr(runtime_state, "mode", "") or ""),
+                    "focus": str(getattr(runtime_state, "focus", "") or ""),
+                    "mood": round(float(getattr(runtime_state, "mood", 0.0) or 0.0), 4),
+                    "body_energy": round(float(getattr(runtime_state, "body_energy", 0.0) or 0.0), 4),
+                    "affect_residue": round(float(getattr(runtime_state, "affect_residue", 0.0) or 0.0), 4),
+                },
+                "current_round": {
+                    "round_id": current_round_id,
+                    "trace_ref": f"round://{current_round_id}" if current_round_id else "",
+                },
+            },
+            "action_field": {},
+            "timeline": {
+                "round_id": current_round_id,
+                "trace_ref": f"round://{current_round_id}" if current_round_id else "",
+                "events": [],
+            },
+            "why_current": {
+                "round_id": current_round_id,
+                "why": {
+                    "summary": "按需加载",
+                },
+            },
+            "why_not": {},
+        }
 
     def _user_turn_stream(self, session_id: str, text: str) -> Iterable[dict[str, Any]]:
         session = self._load_session(session_id)
@@ -418,18 +570,41 @@ class TerminalEventHandler:
         if getattr(plan, "route", "") == "fast_chat":
             deltas, execution = self.controller.stream_fast_chat_turn(plan)
             message = execution["assistant_final"] if isinstance(execution, dict) else execution.assistant_final
-            self._append_transcript(session, "assistant", message)
-            self.session_store.write(session)
-            self._ensure_chat_sidebar_round(
+            round_id = self._ensure_chat_sidebar_round(
                 text=normalized_text,
                 target=getattr(plan, "target", "user"),
                 mode=getattr(plan, "mode", "interactive"),
                 previous_round_count=previous_round_count,
+                allow_tick_backfill=False,
             )
+            linkage = self._linkage_fields({"round_id": round_id})
+            self._append_transcript(
+                session,
+                "assistant",
+                message,
+                round_id=linkage.get("round_id"),
+                trace_ref=linkage.get("trace_ref"),
+                event_log_ref=linkage.get("event_log_ref"),
+            )
+            self.session_store.write(session)
             for delta in deltas:
-                events.append(build_outbound_event("assistant_token", session_id=session_id, delta=delta, message=message))
-            events.append(self._build_sidebar_snapshot_event(session, run_id=session.active_run_id or session.last_run_id))
-            events.append(build_outbound_event("assistant_final", session_id=session_id, message=message))
+                events.append(
+                    build_outbound_event(
+                        "assistant_token",
+                        session_id=session_id,
+                        delta=delta,
+                        message=message,
+                        **linkage,
+                    )
+                )
+            events.append(
+                self._build_sidebar_snapshot_event(
+                    session,
+                    run_id=session.active_run_id or session.last_run_id,
+                    include_console=False,
+                )
+            )
+            events.append(build_outbound_event("assistant_final", session_id=session_id, message=message, **linkage))
             return events
         execution = self.controller.execute_turn(
             plan,
@@ -446,25 +621,34 @@ class TerminalEventHandler:
             deltas = list(payload.get("stream_deltas", [])) if isinstance(payload, dict) else []
             if not deltas:
                 deltas = [message]
-            self._append_transcript(session, "assistant", message)
-            self.session_store.write(session)
-            self._ensure_chat_sidebar_round(
+            round_id = self._ensure_chat_sidebar_round(
                 text=normalized_text,
                 target=getattr(plan, "target", "user"),
                 mode=getattr(plan, "mode", "interactive"),
                 previous_round_count=previous_round_count,
             )
+            linkage = self._linkage_fields({"round_id": round_id})
+            self._append_transcript(
+                session,
+                "assistant",
+                message,
+                round_id=linkage.get("round_id"),
+                trace_ref=linkage.get("trace_ref"),
+                event_log_ref=linkage.get("event_log_ref"),
+            )
+            self.session_store.write(session)
             for delta in deltas:
                 events.append(
                     build_outbound_event(
-                    "assistant_token",
-                    session_id=session_id,
-                    delta=delta,
-                    message=message,
-                )
+                        "assistant_token",
+                        session_id=session_id,
+                        delta=delta,
+                        message=message,
+                        **linkage,
+                    )
                 )
             events.append(self._build_sidebar_snapshot_event(session, run_id=session.active_run_id or session.last_run_id))
-            events.append(build_outbound_event("assistant_final", session_id=session_id, message=message))
+            events.append(build_outbound_event("assistant_final", session_id=session_id, message=message, **linkage))
             return events
 
         run = execution["run"] if isinstance(execution, dict) else execution.run
@@ -535,6 +719,7 @@ class TerminalEventHandler:
                     status=tool.get("status"),
                     round_id=linkage.get("round_id"),
                     trace_ref=linkage.get("trace_ref"),
+                    event_log_ref=linkage.get("event_log_ref"),
                 )
                 self._append_transcript(session, "system", f"Tool: {tool_name}{f' - {summary}' if summary else ''}")
                 self.session_store.write(session)
@@ -560,6 +745,7 @@ class TerminalEventHandler:
                     "deferred_events": [],
                     "round_id": linkage.get("round_id"),
                     "trace_ref": linkage.get("trace_ref"),
+                    "event_log_ref": linkage.get("event_log_ref"),
                 }
                 pending_approvals.append(approval_payload)
                 session.approvals_pending = pending_approvals
@@ -591,6 +777,7 @@ class TerminalEventHandler:
                         status=str(approval_payload["status"]),
                         round_id=linkage.get("round_id"),
                         trace_ref=linkage.get("trace_ref"),
+                        event_log_ref=linkage.get("event_log_ref"),
                     )
                     self._append_transcript(session, "system", f"Approval: {tool_name} - {approval_payload['summary']}")
                     self.session_store.write(session)
@@ -621,6 +808,7 @@ class TerminalEventHandler:
                         status=tool.get("status"),
                         round_id=linkage.get("round_id"),
                         trace_ref=linkage.get("trace_ref"),
+                        event_log_ref=linkage.get("event_log_ref"),
                     )
                     self._append_transcript(session, "system", f"Result: {tool_name}")
                     self.session_store.write(session)
@@ -637,6 +825,7 @@ class TerminalEventHandler:
                     status=tool.get("status"),
                     round_id=linkage.get("round_id"),
                     trace_ref=linkage.get("trace_ref"),
+                    event_log_ref=linkage.get("event_log_ref"),
                 )
                 self._append_transcript(session, "system", f"Result: {tool_name}")
                 self.session_store.write(session)
@@ -823,7 +1012,7 @@ class TerminalEventHandler:
             elif subcommand == "why":
                 round_ref = tokens[1] if len(tokens) > 1 else "last"
                 payload = self.controller.initiative_why(round_ref)
-                message = "initiative why"
+                message = str(dict(payload or {}).get("summary") or "initiative why")
             else:
                 return [build_outbound_event("error", session_id=session_id, message="Usage: /initiative status|distribution|trigger [trigger] [mode]|why [round]")]
             return [
@@ -1187,14 +1376,30 @@ class TerminalEventHandler:
             )
         return events
 
-    def _close_session(self, session_id: str, *, detach: bool = False, transcript_mode: str | None = None) -> list[dict[str, Any]]:
+    def _close_session(
+        self,
+        session_id: str,
+        *,
+        detach: bool = False,
+        purge: bool = False,
+        cleanup_old: bool = False,
+        transcript_mode: str | None = None,
+    ) -> list[dict[str, Any]]:
         session = self._load_session(session_id)
         if transcript_mode:
             session.transcript_mode = transcript_mode
             session.compact = transcript_mode == "compact"
         session.status = "detached" if detach else "ended"
-        self.session_store.write(session, mark_current=detach)
-        return [build_outbound_event("session_ended", session=to_dict(session))]
+        session_payload = to_dict(session)
+        if purge:
+            self.session_store.delete(session_id)
+        else:
+            self.session_store.write(session, mark_current=detach)
+            if not detach:
+                self.session_store.clear_current(session_id)
+        cleaned_session_ids = self.session_store.prune(statuses={"ended", "detached"}) if cleanup_old else []
+        cleaned_session_ids = [item for item in cleaned_session_ids if item != session_id]
+        return [build_outbound_event("session_ended", session=session_payload, cleaned_session_ids=cleaned_session_ids)]
 
     def _status_summary(self, run_payload: dict[str, Any]) -> str:
         current_step = run_payload.get("current_step") or {}
@@ -1347,7 +1552,7 @@ class TerminalEventHandler:
 
     def _model_summary(self, model_status: dict[str, Any]) -> str:
         tiers = dict(model_status.get("tiers", {}))
-        bindings = dict(model_status.get("agent_bindings", {}))
+        bindings = dict(model_status.get("module_model_bindings", {}))
         rows = ["模型分层："]
         for tier_name in tiers:
             tier = dict(tiers.get(tier_name, {}))
@@ -1361,10 +1566,10 @@ class TerminalEventHandler:
                 f"{'key:ok' if tier.get('credential_present') else 'key:missing'}"
             )
         rows.append("")
-        rows.append("主要 agent 绑定：")
-        for agent_name in ("SalienceAgent", "ValueAgent", "PFCAgent", "PerspectiveModel", "Renderer", "planner"):
-            if agent_name in bindings:
-                rows.append(f"{agent_name} -> {bindings[agent_name]}")
+        rows.append("主要模块模型绑定：")
+        for module_name in ("cognitive_packet", "deliberation", "tool_planner", "deep_renderer", "consolidation_summarizer"):
+            if module_name in bindings:
+                rows.append(f"{module_name} -> {bindings[module_name]}")
         return "\n".join(rows)
 
     def _sidebar_snapshot(self, session: TerminalSessionState, *, run_id: str | None = None) -> dict[str, Any]:
@@ -1390,6 +1595,7 @@ class TerminalEventHandler:
         explain: dict[str, Any] | None,
         steps: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        include_console: bool = True,
     ) -> dict[str, Any]:
         pending = [item for item in session.approvals_pending if item.get("status") == "pending"]
         current_step = ((explain or {}).get("current_step") or (run or {}).get("current_step") or {})
@@ -1405,6 +1611,11 @@ class TerminalEventHandler:
         current_step_title = str(current_step.get("title") or "暂无")
         reason_summary = str(current_step.get("expected_observation") or current_step.get("detail") or "先收集当前任务最直接的上下文。")
         last_tool_summary = str(last_tool.get("tool_name") or "暂无")
+        console_payload = (
+            self.controller.console_refresh_payload(linkage.get("round_id"))
+            if include_console
+            else self._light_console_payload(runtime_state=runtime_state, round_id=linkage.get("round_id"))
+        )
         return {
             "goal_summary": goal_summary,
             "current_step": current_step_title,
@@ -1437,7 +1648,7 @@ class TerminalEventHandler:
             "ui_actions": self._ui_actions(session, run, pending_count=len(pending)),
             "model_status": model_status,
             "statusline": self._build_statusline(session, run_id=run_id, run=run),
-            "console": self.controller.console_refresh_payload(linkage.get("round_id")),
+            "console": console_payload,
             **linkage,
         }
 
@@ -1499,6 +1710,7 @@ class TerminalEventHandler:
         explain: dict[str, Any] | None = None,
         steps: list[dict[str, Any]] | None = None,
         tools: list[dict[str, Any]] | None = None,
+        include_console: bool = True,
     ) -> dict[str, Any]:
         if run_id and run is None:
             run = self.controller.run_status(run_id)
@@ -1515,5 +1727,6 @@ class TerminalEventHandler:
             explain=explain,
             steps=steps or [],
             tools=tools or [],
+            include_console=include_console,
         )
         return build_outbound_event("sidebar_snapshot", session_id=session.session_id, **payload)

@@ -240,7 +240,7 @@ export function App({ bridge, cwd, repoRoot }: { bridge: PythonBridgeClient; cwd
       }));
       return;
     }
-    await bridge.detachSession(effectiveSessionId, { transcriptMode: uiState.transcriptMode });
+    await bridge.closeSession(effectiveSessionId, { purge: true, cleanupOld: true });
     exit();
   }
 
@@ -388,7 +388,7 @@ export function App({ bridge, cwd, repoRoot }: { bridge: PythonBridgeClient; cwd
     }
     if (key.ctrl && normalizedInput === "d") {
       restoreShortcutDraft();
-      void bridge.detachSession(effectiveSessionId, { transcriptMode: uiState.transcriptMode }).finally(() => exit());
+      void bridge.closeSession(effectiveSessionId, { purge: true, cleanupOld: true }).finally(() => exit());
       return;
     }
     if (key.ctrl && normalizedInput === "l") {

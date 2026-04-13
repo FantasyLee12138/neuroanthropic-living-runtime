@@ -33,7 +33,7 @@ def _sample_repo(tmp_path: Path, *, include_runtime: bool) -> Path:
     repo_root = tmp_path / "repo"
     _write_file(
         repo_root / "Open_NALR_Workbench.command",
-        "#!/bin/zsh\nset -euo pipefail\nROOT_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\nexec \"$ROOT_DIR/alive-observer\" start \"$@\"\n",
+        "#!/bin/zsh\nset -euo pipefail\nROOT_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\nexec \"$ROOT_DIR/alive-observer\" foreground \"$@\"\n",
         executable=True,
     )
     _write_file(

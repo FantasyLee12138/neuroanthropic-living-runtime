@@ -219,8 +219,28 @@ function summarizeConsolePairs(value: Record<string, unknown> | undefined, empty
       return rendered ? `${key}=${rendered}` : null;
     })
     .filter((entry): entry is string => Boolean(entry))
-    .slice(0, 3)
+    .slice(0, 3);
   return parts.length > 0 ? parts.join("；") : emptyText;
+}
+
+function summarizeInitiativeMemoryBacking(value: Record<string, unknown> | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+  const cue = formatConsoleInlineValue(value.cue ?? value.summary);
+  if (!cue) {
+    return null;
+  }
+  const parts = [cue];
+  const topicSource = formatConsoleInlineValue(value.topic_source ?? value.topicSource);
+  if (topicSource) {
+    parts.push(`source=${topicSource}`);
+  }
+  const topicRelevance = readConsoleNumber(value.topic_relevance ?? value.topicRelevance);
+  if (topicRelevance !== undefined) {
+    parts.push(`relevance=${formatProbability(topicRelevance)}`);
+  }
+  return parts.join(" · ");
 }
 
 function formatConsoleAction(entry: Record<string, unknown>): string {
@@ -431,8 +451,12 @@ function buildAliveConsoleFromConsoleState(consoleState: ConsoleState, fallbackS
     const expressive = normalizeRecord(actionFieldPayload.expressive) ?? {};
     const expressionMode = readConsoleText(expressive.expression_mode, "");
     const proposalType = readConsoleText(expressive.proposal_type, "");
+    const topIntent = readConsoleText(expressive.top_intent, "");
     const speechCost = readConsoleText(expressive.speech_cost, "");
     const intrinsicValue = readConsoleText(expressive.intrinsic_value, "");
+    const shouldSend = typeof expressive.should_send === "boolean" ? String(expressive.should_send) : "";
+    const suppressionReason = readConsoleText(expressive.suppression_reason, "");
+    const memoryBacking = summarizeInitiativeMemoryBacking(normalizeRecord(expressive.memory_backing));
     hydrated.actionField = {
       title: "思绪流",
       summary: winnerScore === undefined ? winnerAction : `${winnerAction} · 倾向 ${formatProbability(winnerScore)}`,
@@ -442,8 +466,10 @@ function buildAliveConsoleFromConsoleState(consoleState: ConsoleState, fallbackS
         `未采纳路径：${competingPeaks.length > 0 ? competingPeaks.join("；") : "本轮未采纳路径尚不清晰"}`,
         `${contributionSectionTitle()}：${contributionStack.length > 0 ? contributionStack.join("；") : "贡献叠层尚未完全暴露"}`,
         `言语预激活：${summarizeTokenFieldState(actionFieldPayload.tokenField.raw, "尚未接入")}`,
-        `表达模式：${expressionMode || "尚未接入"}${proposalType ? ` · proposal=${proposalType}` : ""}`,
+        `表达模式：${expressionMode || "尚未接入"}${proposalType ? ` · proposal=${proposalType}` : ""}${topIntent ? ` · intent=${topIntent}` : ""}${shouldSend ? ` · should_send=${shouldSend}` : ""}`,
         `表达权衡：intrinsic=${intrinsicValue || "尚未接入"} · cost=${speechCost || "尚未接入"}`,
+        `抑制原因：${suppressionReason || "尚未接入"}`,
+        `记忆牵引：${memoryBacking || "尚未接入"}`,
       ],
       roundId: actionFieldPayload.roundId ?? undefined,
       traceRef: actionFieldPayload.traceRef ?? undefined,
@@ -472,6 +498,7 @@ function buildAliveConsoleFromConsoleState(consoleState: ConsoleState, fallbackS
       authenticityDetails.push(`校验动作：${guardAction}`);
     }
     const monologueDetails = summarizeMonologueStream(why.expressiveTrace);
+    const initiativeMemoryBacking = summarizeInitiativeMemoryBacking(normalizeRecord(initiative.memory_backing));
     hydrated.why = {
       title: "解释层",
       summary: readConsoleText(why.summary, "等待本轮解释"),
@@ -479,8 +506,10 @@ function buildAliveConsoleFromConsoleState(consoleState: ConsoleState, fallbackS
         `${whyCurrentLabel()}：${readConsoleText(why.summary, "等待本轮解释")}`,
         `最终输出动作：${translateActionName(readConsoleText(why.sampledAction, winnerAction), readConsoleText(why.sampledAction, winnerAction))}`,
         `主导模块：${topDrivers.length > 0 ? topDrivers.join("；") : "等待接入"}`,
-        `表达模式：${readConsoleText(initiative.expression_mode, "尚未接入")} · intent=${readConsoleText(initiative.top_intent, "尚未接入")}`,
+        `表达模式：${readConsoleText(initiative.expression_mode, "尚未接入")} · intent=${readConsoleText(initiative.top_intent, "尚未接入")} · should_send=${typeof initiative.should_send === "boolean" ? String(initiative.should_send) : "尚未接入"}`,
         `独白/发言权衡：intrinsic=${readConsoleText(initiative.intrinsic_value, "尚未接入")} · cost=${readConsoleText(initiative.speech_cost, "尚未接入")}`,
+        `抑制原因：${readConsoleText(initiative.suppression_reason, "尚未接入")}`,
+        `记忆牵引：${initiativeMemoryBacking || "尚未接入"}`,
         ...monologueDetails,
         ...authenticityDetails,
       ],
@@ -734,10 +763,24 @@ function normalizeConsoleStatePayload(payload: ConsoleRefreshPayload | undefined
           sampledAction: readConsoleNullableText(stateCurrentRound?.sampled_action),
           traceRef: readConsoleNullableText(stateCurrentRound?.trace_ref),
           routeType: readConsoleNullableText(stateCurrentRound?.route_type),
+          routeBudgetMs: readConsoleNullableNumber(stateCurrentRound?.route_budget_ms),
           causeType: readConsoleNullableText(stateCurrentRound?.cause_type),
           causeLabel: readConsoleNullableText(stateCurrentRound?.cause_label),
           mode: readConsoleNullableText(stateCurrentRound?.mode),
           modeLabel: readConsoleNullableText(stateCurrentRound?.mode_label),
+          activationSet: Array.isArray(stateCurrentRound?.activation_set)
+            ? stateCurrentRound.activation_set.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+            : [],
+          activationReason: Array.isArray(stateCurrentRound?.activation_reason)
+            ? stateCurrentRound.activation_reason.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+            : [],
+          memoryTiersRead: Array.isArray(stateCurrentRound?.memory_tiers_read)
+            ? stateCurrentRound.memory_tiers_read.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+            : [],
+          packetSummary: normalizeRecord(stateCurrentRound?.packet_summary) ?? {},
+          backgroundJobs: normalizeRecordList(stateCurrentRound?.background_jobs),
+          deepenReason: readConsoleNullableText(stateCurrentRound?.deepen_reason),
+          modelCallCount: readConsoleNullableNumber(stateCurrentRound?.model_call_count),
           totalTurnMs: readConsoleNullableNumber(stateCurrentRound?.total_turn_ms),
           modelWaitMs: readConsoleNullableNumber(stateCurrentRound?.model_wait_ms),
           localComputeMs: readConsoleNullableNumber(stateCurrentRound?.local_compute_ms),

@@ -50,6 +50,26 @@ def test_observer_exposes_skill_conflict_mode_and_ablation_views(tmp_path):
     assert "coverage" in ablation_response.json()["modules"][0]
 
 
+def test_observer_status_routes_expose_phase_progress_for_autonomy_worker(tmp_path):
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+
+    service_response = client.get("/service/status")
+    autonomy_response = client.get("/autonomy/status")
+
+    assert service_response.status_code == 200
+    assert autonomy_response.status_code == 200
+
+    service_payload = service_response.json()
+    autonomy_payload = autonomy_response.json()
+
+    assert service_payload["phase"] in {"idle", "preparing", "awaiting_model", "committing", "backoff"}
+    assert service_payload["last_progress_at"]
+    assert service_payload["phase_waiting"] in {True, False}
+    assert autonomy_payload["phase"] in {"idle", "preparing", "awaiting_model", "committing", "backoff"}
+    assert autonomy_payload["last_progress_at"]
+    assert autonomy_payload["phase_waiting"] in {True, False}
+
+
 def test_observer_conflict_timeline_includes_repair_visibility(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     state = controller.load_runtime_state()

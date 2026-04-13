@@ -23,57 +23,114 @@ def assert_page_does_not_scroll(page, tolerance: int = 12) -> None:
         raise RuntimeError(f"page scroll height overflow: {metrics}")
 
 
+def wait_for_active_page(page, page_id: str, timeout_ms: int = 20_000) -> None:
+    page.wait_for_function(
+        """
+        targetId => {
+          const target = document.getElementById(targetId);
+          return Boolean(target && target.classList.contains("active"));
+        }
+        """,
+        page_id,
+        timeout=timeout_ms,
+    )
+
+
+def wait_for_selector_count(page, selector: str, minimum: int = 1, timeout_ms: int = 20_000) -> None:
+    page.wait_for_function(
+        """
+        ({ selector, minimum }) => document.querySelectorAll(selector).length >= minimum
+        """,
+        {"selector": selector, "minimum": minimum},
+        timeout=timeout_ms,
+    )
+
+
+def wait_for_non_empty_text(page, selector: str, timeout_ms: int = 20_000) -> None:
+    page.wait_for_function(
+        """
+        targetSelector => {
+          const target = document.querySelector(targetSelector);
+          return Boolean(target && target.textContent && target.textContent.trim().length > 0);
+        }
+        """,
+        selector,
+        timeout=timeout_ms,
+    )
+
+
+def wait_for_json_text(page, selector: str, timeout_ms: int = 20_000) -> None:
+    page.wait_for_function(
+        """
+        targetSelector => {
+          const target = document.querySelector(targetSelector);
+          if (!target || !target.textContent) {
+            return false;
+          }
+          return target.textContent.trim().startsWith("{");
+        }
+        """,
+        selector,
+        timeout=timeout_ms,
+    )
+
+
 def main() -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1600, "height": 1400})
+        session_state_requests: list[str] = []
+        page.on(
+            "request",
+            lambda request: session_state_requests.append(request.url)
+            if "/web/session/state" in request.url
+            else None,
+        )
         page.goto(BASE_URL, wait_until="networkidle")
         page.wait_for_timeout(1500)
         assert_page_does_not_scroll(page)
-        page.wait_for_selector("#start-chat")
-        page.wait_for_selector("#go-analysis")
-        page.wait_for_selector("#go-replay")
+        page.wait_for_selector("#overview-page.active")
+        page.wait_for_selector("#nav-overview")
+        page.wait_for_selector("#nav-analysis")
+        page.wait_for_selector("#nav-chat")
+        page.wait_for_selector("#runtime-start")
+        page.wait_for_selector("#runtime-pause")
+        page.wait_for_selector("#runtime-resume")
+        page.wait_for_selector("#runtime-wake")
+        page.wait_for_selector("#overview-jump-analysis")
+        wait_for_selector_count(page, "#autonomy-summary .stack-item", minimum=1)
+        wait_for_selector_count(page, "#model-summary .stack-item", minimum=1)
+        wait_for_non_empty_text(page, "#learning-mode")
+        wait_for_selector_count(page, "#overview-rounds .list-row", minimum=1)
 
-        page.click("#start-chat")
-        page.wait_for_selector("#chat-page.active")
-        page.wait_for_selector("#chat-page .section-title")
+        page.click("#overview-jump-analysis")
+        wait_for_active_page(page, "analysis-page")
+        wait_for_selector_count(page, "#analysis-round-list [data-round-row]", minimum=1)
+        page.locator("#analysis-round-list [data-round-row]").first.click()
+        wait_for_non_empty_text(page, "#analysis-live-copy")
+        wait_for_selector_count(page, "#analysis-trend-svg .trend-chart-svg", minimum=1)
+        wait_for_selector_count(page, "#analysis-brainflow .brainflow-stage", minimum=1)
+        wait_for_non_empty_text(page, "#analysis-brainflow-output")
+        wait_for_non_empty_text(page, "#analysis-why")
+        wait_for_non_empty_text(page, "#analysis-why-not")
+        wait_for_selector_count(page, "#analysis-timeline .timeline-node, #analysis-timeline .detail-row", minimum=1)
+        wait_for_selector_count(page, "#analysis-probability .stack-item", minimum=1)
+        wait_for_selector_count(page, "#analysis-contributions .stack-item", minimum=1)
+        wait_for_non_empty_text(page, "#analysis-model-route")
+        wait_for_selector_count(page, "#analysis-links .subsection", minimum=1)
+        wait_for_json_text(page, "#analysis-raw-json")
+
+        page.click("#nav-chat")
+        wait_for_active_page(page, "chat-page")
         page.wait_for_selector("#chat-input")
-        assert_page_does_not_scroll(page)
-        page.wait_for_selector("#command-toggle")
-        page.click("#command-toggle")
-        page.wait_for_selector("#command-dialog:not(.hidden)")
-        page.wait_for_selector("#command-input")
-        page.click("#command-close")
-        page.locator("#command-dialog").wait_for(state="hidden")
-        page.click("#process-toggle")
-        page.wait_for_selector("#process-dialog:not(.hidden)")
-        page.locator("#process-dialog").get_by_role("heading", name="步骤流").wait_for()
-        page.click("#process-close")
-        page.locator("#process-dialog").wait_for(state="hidden")
-        page.wait_for_timeout(3500)
-        if "未连接" in (page.locator("#session-badge").text_content() or ""):
-            raise RuntimeError("chat session was not initialized after entering the dashboard")
+        page.wait_for_selector("#chat-send")
         page.locator("#chat-input").fill("你好，先告诉我你现在的状态。")
-        page.click("#send-chat")
-        page.wait_for_timeout(5000)
-        page.locator("#messages").get_by_text("你好，先告诉我你现在的状态。").wait_for()
-        page.wait_for_selector("#messages [data-message-role='assistant'] .message-body")
-
-        page.locator("#go-analysis").click()
-        page.wait_for_selector("#analysis-page.active")
-        page.locator("#analysis-page [data-workbench-tab='instinct']").click()
-        page.wait_for_selector("#workbench-panel")
-        page.locator("#workbench-panel").get_by_text("当前落点").wait_for()
-        page.locator("#workbench-panel").get_by_text("优胜区").wait_for()
-        page.locator("#analysis-page").get_by_role("heading", name="四层概率场").wait_for()
-        page.locator("#probability-layers").get_by_text("情境层").wait_for()
-        page.locator("#probability-layers").get_by_text("峰值焦点").first.wait_for()
-        page.locator("#probability-layers").get_by_text("Token").wait_for()
-
-        page.locator("#go-replay").click()
-        page.wait_for_selector("#replay-page.active")
-        page.locator("#replay-page").get_by_text("反事实回放").wait_for()
-        page.locator("#replay-page").get_by_text("未采纳路径").wait_for()
+        page.click("#chat-send")
+        page.wait_for_selector("#chat-messages [data-message-role='user'] .message-body")
+        page.locator("#chat-messages").get_by_text("你好，先告诉我你现在的状态。").wait_for()
+        page.wait_for_selector("#chat-messages [data-message-role='assistant'] .message-body")
+        if any("full=true" in url for url in session_state_requests):
+            raise RuntimeError(f"dashboard requested full session state: {session_state_requests}")
 
         page.screenshot(path=str(SCREENSHOT_PATH), full_page=True)
         browser.close()

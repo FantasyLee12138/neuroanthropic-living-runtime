@@ -5,7 +5,7 @@ from uuid import uuid4
 from typing import Any
 
 from nalr.runtime.controller import RuntimeController
-from nalr.schemas.models import CommandEnvelope
+from nalr.schemas.models import CommandEnvelope, to_dict
 
 
 @dataclass(frozen=True)
@@ -87,17 +87,19 @@ COMMAND_SPECS: dict[tuple[str, str], CommandSpec] = {
 
 
 def build_endogenous_status_payload(controller: RuntimeController) -> dict[str, Any]:
-    payload = controller.state_payload()
-    scheduler_state = dict(payload.get("endogenous_scheduler_state", {}) or {})
-    endogenous_state = dict(payload.get("endogenous_state", {}) or {})
+    state = controller.load_runtime_state()
+    scheduler_state = dict(to_dict(getattr(state, "endogenous_scheduler_state", {})) or {})
+    endogenous_state = dict(to_dict(getattr(state, "endogenous_state", {})) or {})
     recent_triggers = list(scheduler_state.get("recent_triggers", []) or [])
     latest_trigger = recent_triggers[-1] if recent_triggers else {}
+    round_reader = getattr(controller.trace_store, "list_round_summaries", None)
+    round_rows = list(round_reader()) if callable(round_reader) else controller.trace_store.list_rounds()
     latest_endogenous_round = next(
-        (row for row in reversed(controller.trace_store.list_rounds()) if row.get("cause_type") == "endogenous"),
+        (row for row in reversed(round_rows) if row.get("cause_type") == "endogenous"),
         None,
     )
     return {
-        "round_count": payload.get("round_count", 0),
+        "round_count": int(getattr(state, "round_count", 0) or 0),
         "last_endogenous_tick_at": scheduler_state.get("last_endogenous_tick_at"),
         "suppression_reason": scheduler_state.get("suppression_reason"),
         "last_trigger": endogenous_state.get("last_trigger", ""),
@@ -106,7 +108,7 @@ def build_endogenous_status_payload(controller: RuntimeController) -> dict[str, 
         "current_intent": endogenous_state.get("current_intent"),
         "stability": endogenous_state.get("stability", 0),
         "latest_endogenous_round_id": latest_endogenous_round.get("round_id") if latest_endogenous_round else None,
-        "storage": payload.get("trace_storage", controller.trace_storage_status()),
+        "storage": controller.trace_storage_status(),
     }
 
 

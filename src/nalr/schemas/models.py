@@ -244,6 +244,11 @@ class RoundTrace:
     probability_field: dict[str, Any] = field(default_factory=dict)
     stochastic_state: dict[str, Any] = field(default_factory=dict)
     conflict_arbitration: dict[str, Any] = field(default_factory=dict)
+    event_log_ref: dict[str, Any] = field(default_factory=dict)
+    memory_evidence: dict[str, Any] = field(default_factory=dict)
+    arbitration_record: dict[str, Any] = field(default_factory=dict)
+    history_burden_delta: dict[str, Any] = field(default_factory=dict)
+    snapshot_continuity: dict[str, Any] = field(default_factory=dict)
     render_plan: dict[str, Any] = field(default_factory=dict)
     rendered_expression: dict[str, Any] = field(default_factory=dict)
     renderer_decision_integrity: dict[str, Any] = field(default_factory=dict)
@@ -277,6 +282,13 @@ class RoundTrace:
     dream_guard_summary: dict[str, Any] = field(default_factory=dict)
     dream_trace_ref: str | None = None
     dream_effect_summary: dict[str, Any] = field(default_factory=dict)
+    route_budget_ms: int = 0
+    activation_set: list[str] = field(default_factory=list)
+    activation_reason: list[str] = field(default_factory=list)
+    memory_tiers_read: list[str] = field(default_factory=list)
+    packet_summary: dict[str, Any] = field(default_factory=dict)
+    background_jobs: list[dict[str, Any]] = field(default_factory=list)
+    deepen_reason: str = ""
     model_call_traces: list[dict[str, Any]] = field(default_factory=list)
     runtime_metrics: dict[str, Any] = field(default_factory=dict)
     resample_count: int = 0
@@ -290,6 +302,13 @@ class RoundTrace:
             self.micro_intent = EndogenousMicroIntent(**self.micro_intent)
         if isinstance(self.endogenous_replay_chain, dict) and self.endogenous_replay_chain:
             self.endogenous_replay_chain = EndogenousReplayChain(**self.endogenous_replay_chain)
+        self.route_budget_ms = max(0, int(self.route_budget_ms or 0))
+        self.activation_set = _normalize_string_list(self.activation_set)
+        self.activation_reason = _normalize_string_list(self.activation_reason)
+        self.memory_tiers_read = _normalize_string_list(self.memory_tiers_read)
+        self.packet_summary = dict(self.packet_summary or {})
+        self.background_jobs = [dict(item) for item in list(self.background_jobs or []) if isinstance(item, dict)]
+        self.deepen_reason = str(self.deepen_reason or "").strip()
 
 
 @dataclass
@@ -751,6 +770,137 @@ class TurnExecution:
 
 
 @dataclass
+class StatePatch:
+    focus: str | None = None
+    current_goal: str | None = None
+    obligations: list[str] = field(default_factory=list)
+    emotion_bias: str | None = None
+    repair_status: str | None = None
+    relation_delta: float = 0.0
+    habit_delta: float = 0.0
+    extras: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.focus = str(self.focus).strip() if self.focus is not None else None
+        self.current_goal = str(self.current_goal).strip() if self.current_goal is not None else None
+        self.obligations = _normalize_string_list(self.obligations)
+        self.emotion_bias = str(self.emotion_bias).strip() if self.emotion_bias is not None else None
+        self.repair_status = str(self.repair_status).strip() if self.repair_status is not None else None
+        self.relation_delta = round(max(-0.2, min(0.2, float(self.relation_delta or 0.0))), 4)
+        self.habit_delta = round(max(-0.2, min(0.2, float(self.habit_delta or 0.0))), 4)
+        self.extras = dict(self.extras or {})
+
+
+@dataclass
+class CognitivePacket:
+    salience: float = 0.0
+    uncertainty: float = 0.0
+    memory_need: bool = False
+    tool_need: bool = False
+    conflict_need: bool = False
+    candidate_action_prior: str = "respond"
+    draft_reply: str = ""
+    proposed_state_patch: StatePatch = field(default_factory=StatePatch)
+    deepen_reason: str = ""
+
+    def __post_init__(self) -> None:
+        self.salience = round(_clip_unit(float(self.salience or 0.0)), 4)
+        self.uncertainty = round(_clip_unit(float(self.uncertainty or 0.0)), 4)
+        self.memory_need = bool(self.memory_need)
+        self.tool_need = bool(self.tool_need)
+        self.conflict_need = bool(self.conflict_need)
+        self.candidate_action_prior = str(self.candidate_action_prior or "respond").strip() or "respond"
+        self.draft_reply = str(self.draft_reply or "").strip()
+        if isinstance(self.proposed_state_patch, dict):
+            self.proposed_state_patch = StatePatch(**self.proposed_state_patch)
+        self.deepen_reason = str(self.deepen_reason or "").strip()
+
+
+@dataclass
+class MemoryReadPlan:
+    tiers: list[str] = field(default_factory=list)
+    cue: str | None = None
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        normalized: list[str] = []
+        for tier in self.tiers or []:
+            name = str(tier or "").strip().lower()
+            if name == "archive":
+                name = "cold"
+            if name in {"hot", "warm", "cold"} and name not in normalized:
+                normalized.append(name)
+        self.tiers = normalized
+        self.cue = str(self.cue).strip() if self.cue is not None else None
+        self.reason = str(self.reason or "").strip()
+
+
+@dataclass
+class ConsolidationJob:
+    job_id: str = field(default_factory=lambda: uuid4().hex)
+    kind: str = ""
+    cue: str | None = None
+    route_type: str = ""
+    priority: float = 0.0
+    status: str = "queued"
+    payload: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.kind = str(self.kind or "").strip()
+        self.cue = str(self.cue).strip() if self.cue is not None else None
+        self.route_type = str(self.route_type or "").strip()
+        self.priority = round(_clip_unit(float(self.priority or 0.0)), 4)
+        self.status = str(self.status or "queued").strip() or "queued"
+        self.payload = dict(self.payload or {})
+
+
+@dataclass
+class ActivationPlan:
+    route_type: str = ""
+    activation_set: list[str] = field(default_factory=list)
+    activation_reason: list[str] = field(default_factory=list)
+    memory_read_plan: MemoryReadPlan = field(default_factory=MemoryReadPlan)
+    background_jobs: list[ConsolidationJob] = field(default_factory=list)
+    deepen_reason: str = ""
+
+    def __post_init__(self) -> None:
+        self.route_type = str(self.route_type or "").strip()
+        self.activation_set = _normalize_string_list(self.activation_set)
+        self.activation_reason = _normalize_string_list(self.activation_reason)
+        if isinstance(self.memory_read_plan, dict):
+            self.memory_read_plan = MemoryReadPlan(**self.memory_read_plan)
+        self.background_jobs = [
+            item if isinstance(item, ConsolidationJob) else ConsolidationJob(**item)
+            for item in self.background_jobs
+        ]
+        self.deepen_reason = str(self.deepen_reason or "").strip()
+
+
+@dataclass
+class RoundDiagnosticsV2:
+    route_type: str = ""
+    route_budget_ms: int = 0
+    activation_set: list[str] = field(default_factory=list)
+    activation_reason: list[str] = field(default_factory=list)
+    memory_tiers_read: list[str] = field(default_factory=list)
+    packet_summary: dict[str, Any] = field(default_factory=dict)
+    background_jobs: list[dict[str, Any]] = field(default_factory=list)
+    deepen_reason: str = ""
+    model_call_count: int = 0
+
+    def __post_init__(self) -> None:
+        self.route_type = str(self.route_type or "").strip()
+        self.route_budget_ms = max(0, int(self.route_budget_ms or 0))
+        self.activation_set = _normalize_string_list(self.activation_set)
+        self.activation_reason = _normalize_string_list(self.activation_reason)
+        self.memory_tiers_read = _normalize_string_list(self.memory_tiers_read)
+        self.packet_summary = dict(self.packet_summary or {})
+        self.background_jobs = [dict(item) for item in list(self.background_jobs or []) if isinstance(item, dict)]
+        self.deepen_reason = str(self.deepen_reason or "").strip()
+        self.model_call_count = max(0, int(self.model_call_count or 0))
+
+
+@dataclass
 class ConflictPostErrorAdjustment:
     triggered: bool = False
     reason: str = ""
@@ -1067,12 +1217,171 @@ class AutonomyLoopState:
 
 
 @dataclass
+class SubjectKernelState:
+    display_name: str = ""
+    current_narrative: str = ""
+    continuity_score: float = 0.0
+    continuity_summary: str = ""
+    boundary_principles: list[str] = field(default_factory=list)
+    core_commitments: list[str] = field(default_factory=list)
+    integrity_source: str = "subject_core"
+
+    def __post_init__(self) -> None:
+        self.display_name = str(self.display_name or "").strip()
+        self.current_narrative = str(self.current_narrative or "").strip()
+        self.continuity_score = round(_clip_unit(float(self.continuity_score)), 4)
+        self.continuity_summary = str(self.continuity_summary or "").strip()
+        self.boundary_principles = _normalize_string_list(self.boundary_principles)
+        self.core_commitments = _normalize_string_list(self.core_commitments)
+        self.integrity_source = str(self.integrity_source or "subject_core").strip() or "subject_core"
+
+
+@dataclass
+class MeaningSource:
+    label: str = ""
+    kind: str = ""
+    strength: float = 0.0
+    source: str = ""
+    evidence: str = ""
+
+    def __post_init__(self) -> None:
+        self.label = str(self.label or "").strip()
+        self.kind = str(self.kind or "").strip()
+        self.strength = round(_clip_unit(float(self.strength)), 4)
+        self.source = str(self.source or "").strip()
+        self.evidence = str(self.evidence or "").strip()
+
+
+@dataclass
+class MeaningConflict:
+    label: str = ""
+    tension: float = 0.0
+    summary: str = ""
+
+    def __post_init__(self) -> None:
+        self.label = str(self.label or "").strip()
+        self.tension = round(_clip_unit(float(self.tension)), 4)
+        self.summary = str(self.summary or "").strip()
+
+
+@dataclass
+class MeaningRepair:
+    label: str = ""
+    status: str = ""
+    summary: str = ""
+
+    def __post_init__(self) -> None:
+        self.label = str(self.label or "").strip()
+        self.status = str(self.status or "").strip()
+        self.summary = str(self.summary or "").strip()
+
+
+@dataclass
+class MeaningSystemState:
+    survival_narrative: str = ""
+    sources: list[MeaningSource] = field(default_factory=list)
+    conflicts: list[MeaningConflict] = field(default_factory=list)
+    debts: list[str] = field(default_factory=list)
+    repairs: list[MeaningRepair] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.survival_narrative = str(self.survival_narrative or "").strip()
+        self.sources = [
+            item if isinstance(item, MeaningSource) else MeaningSource(**item)
+            for item in self.sources
+        ]
+        self.conflicts = [
+            item if isinstance(item, MeaningConflict) else MeaningConflict(**item)
+            for item in self.conflicts
+        ]
+        self.debts = _normalize_string_list(self.debts)
+        self.repairs = [
+            item if isinstance(item, MeaningRepair) else MeaningRepair(**item)
+            for item in self.repairs
+        ]
+
+
+@dataclass
+class PurposeMemoryEntry:
+    summary: str = ""
+    source: str = ""
+    strength: float = 0.0
+    recorded_at: str = ""
+    status: str = ""
+
+    def __post_init__(self) -> None:
+        self.summary = str(self.summary or "").strip()
+        self.source = str(self.source or "").strip()
+        self.strength = round(_clip_unit(float(self.strength)), 4)
+        self.recorded_at = str(self.recorded_at or "").strip()
+        self.status = str(self.status or "").strip()
+
+
+@dataclass
+class RelationshipCommitmentState:
+    target: str = ""
+    commitment: str = ""
+    strength: float = 0.0
+    status: str = ""
+    evidence: str = ""
+
+    def __post_init__(self) -> None:
+        self.target = str(self.target or "").strip()
+        self.commitment = str(self.commitment or "").strip()
+        self.strength = round(_clip_unit(float(self.strength)), 4)
+        self.status = str(self.status or "").strip()
+        self.evidence = str(self.evidence or "").strip()
+
+
+@dataclass
+class ProactiveActionState:
+    kind: str = ""
+    summary: str = ""
+    priority: float = 0.0
+    channel: str = ""
+    status: str = ""
+    suppression_reason: str = ""
+
+    def __post_init__(self) -> None:
+        self.kind = str(self.kind or "").strip()
+        self.summary = str(self.summary or "").strip()
+        self.priority = round(_clip_unit(float(self.priority)), 4)
+        self.channel = str(self.channel or "").strip()
+        self.status = str(self.status or "").strip()
+        self.suppression_reason = str(self.suppression_reason or "").strip()
+
+
+@dataclass
+class AgencyLoopState:
+    summary: str = ""
+    outward_channel: dict[str, Any] = field(default_factory=dict)
+    internal_channel: dict[str, Any] = field(default_factory=dict)
+    budget: dict[str, Any] = field(default_factory=dict)
+    suppressed_actions: list[ProactiveActionState] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.summary = str(self.summary or "").strip()
+        if not isinstance(self.outward_channel, dict):
+            self.outward_channel = {}
+        if not isinstance(self.internal_channel, dict):
+            self.internal_channel = {}
+        if not isinstance(self.budget, dict):
+            self.budget = {}
+        self.suppressed_actions = [
+            item if isinstance(item, ProactiveActionState) else ProactiveActionState(**item)
+            for item in self.suppressed_actions
+        ]
+
+
+@dataclass
 class RuntimeState:
     session_id: str = field(default_factory=lambda: uuid4().hex)
     subject_core: SubjectCore = field(default_factory=SubjectCore)
     mode: str = "interactive"
     safe_mode: bool = False
     round_count: int = 0
+    runtime_revision: int = 0
+    last_mutation_at: str = ""
     body_energy: float = 0.7
     fatigue: float = 0.0
     memory_fragments: float = 0.0
@@ -1116,6 +1425,14 @@ class RuntimeState:
     organic_mode: OrganicModeState = field(default_factory=OrganicModeState)
     emergent_action_sketches: list[EmergentActionSketch] = field(default_factory=list)
     personality_anchor: PersonalityAnchorState = field(default_factory=PersonalityAnchorState)
+    subject_kernel: SubjectKernelState = field(default_factory=SubjectKernelState)
+    meaning_system: MeaningSystemState = field(default_factory=MeaningSystemState)
+    agency_loop: AgencyLoopState = field(default_factory=AgencyLoopState)
+    history_burden: dict[str, Any] = field(default_factory=dict)
+    arbitration_state: dict[str, Any] = field(default_factory=dict)
+    purpose_memory: list[PurposeMemoryEntry] = field(default_factory=list)
+    proactive_backlog: list[ProactiveActionState] = field(default_factory=list)
+    relationship_commitments: list[RelationshipCommitmentState] = field(default_factory=list)
     autonomy_policy: AutonomyPolicyState = field(default_factory=AutonomyPolicyState)
     autonomy_loop: AutonomyLoopState = field(default_factory=AutonomyLoopState)
     motivation_pool_state: MotivationPoolState = field(default_factory=MotivationPoolState)
@@ -1135,6 +1452,8 @@ class RuntimeState:
     commit_permission_required: bool = True
 
     def __post_init__(self) -> None:
+        self.runtime_revision = max(0, int(self.runtime_revision or 0))
+        self.last_mutation_at = str(self.last_mutation_at or "")
         if isinstance(self.subject_core, dict):
             self.subject_core = SubjectCore(**self.subject_core)
         if isinstance(self.identity_state, dict):
@@ -1157,6 +1476,24 @@ class RuntimeState:
         ]
         if isinstance(self.personality_anchor, dict):
             self.personality_anchor = PersonalityAnchorState(**self.personality_anchor)
+        if isinstance(self.subject_kernel, dict):
+            self.subject_kernel = SubjectKernelState(**self.subject_kernel)
+        if isinstance(self.meaning_system, dict):
+            self.meaning_system = MeaningSystemState(**self.meaning_system)
+        if isinstance(self.agency_loop, dict):
+            self.agency_loop = AgencyLoopState(**self.agency_loop)
+        self.purpose_memory = [
+            item if isinstance(item, PurposeMemoryEntry) else PurposeMemoryEntry(**item)
+            for item in self.purpose_memory
+        ]
+        self.proactive_backlog = [
+            item if isinstance(item, ProactiveActionState) else ProactiveActionState(**item)
+            for item in self.proactive_backlog
+        ]
+        self.relationship_commitments = [
+            item if isinstance(item, RelationshipCommitmentState) else RelationshipCommitmentState(**item)
+            for item in self.relationship_commitments
+        ]
         if isinstance(self.autonomy_policy, dict):
             self.autonomy_policy = AutonomyPolicyState(**self.autonomy_policy)
         if isinstance(self.autonomy_loop, dict):
