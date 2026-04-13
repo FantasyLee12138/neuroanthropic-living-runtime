@@ -25,6 +25,17 @@ def test_memory_store_repairs_invalid_json_list_files(tmp_path):
     assert json.loads(store.habit_path.read_text(encoding="utf-8")) == []
 
 
+def test_memory_store_repairs_invalid_storage_status_file(tmp_path):
+    store = MemoryStore(tmp_path / ".alive")
+    store.storage_status_path.write_text("", encoding="utf-8")
+
+    status = store.storage_status()
+
+    assert status["storage_state"] == "healthy"
+    assert "parquet_live_ready" in status
+    assert json.loads(store.storage_status_path.read_text(encoding="utf-8"))["storage_state"] == "healthy"
+
+
 def test_memory_store_noninteractive_shaping_updates_memory_and_habit(tmp_path):
     store = MemoryStore(tmp_path / ".alive")
     store.ingest_event(
@@ -689,3 +700,44 @@ def test_memory_store_recall_prefers_detail_then_gist_and_supports_ablation(tmp_
     assert recall["mode"] in {"detail", "gist"}
     assert ablated["mode"] == "gist"
     assert ablated["strength"] <= recall["strength"]
+
+
+def test_memory_store_defers_snapshot_and_raw_parquet_sync_until_flush(tmp_path):
+    store = MemoryStore(tmp_path / ".alive")
+    snapshot_path = store._snapshot_targets[store.episodic_path]
+    initial_snapshot_mtime = snapshot_path.stat().st_mtime_ns if snapshot_path.exists() else 0
+
+    store.ingest_event(
+        RoundEvent(source="user", content="remember alpha idea for later", target="user", cue="alpha", valence=0.1),
+        round_id=1,
+        session_id="sess-1",
+    )
+    store._io_worker.flush(raise_on_error=True)
+
+    current_snapshot_mtime = snapshot_path.stat().st_mtime_ns if snapshot_path.exists() else 0
+    assert current_snapshot_mtime == initial_snapshot_mtime
+    assert list(store.raw_parquet_dir.rglob("*.parquet")) == []
+
+    store.flush(raise_on_error=True)
+
+    assert snapshot_path.exists() is True
+    assert snapshot_path.stat().st_mtime_ns >= initial_snapshot_mtime
+    assert list(store.raw_parquet_dir.rglob("*.parquet"))
+
+
+def test_memory_store_reload_reads_raw_events_from_jsonl_before_parquet_flush(tmp_path):
+    root = tmp_path / ".alive"
+    store = MemoryStore(root)
+
+    store.ingest_event(
+        RoundEvent(source="user", content="remember alpha idea for later", target="user", cue="alpha", valence=0.1),
+        round_id=1,
+        session_id="sess-1",
+    )
+    store._io_worker.flush(raise_on_error=True)
+
+    reloaded = MemoryStore(root)
+    rows = reloaded._read_jsonl(reloaded.raw_events_path)
+
+    assert rows
+    assert rows[-1]["cue"] == "alpha"

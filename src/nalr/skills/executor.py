@@ -5,9 +5,9 @@ import inspect
 import json
 import threading
 import time
-from dataclasses import MISSING, fields, is_dataclass
+from dataclasses import MISSING, is_dataclass
 from pathlib import Path
-from typing import Any, get_args, get_origin, get_type_hints
+from typing import Any, get_args, get_origin
 
 from nalr.schemas.models import (
     ActionCandidate,
@@ -18,7 +18,7 @@ from nalr.schemas.models import (
     SkillSpec,
     to_dict,
 )
-from nalr.skills.contracts import coerce_contract, serialize_contract_value
+from nalr.skills.contracts import coerce_contract, dataclass_contract_metadata, serialize_contract_value
 
 
 def _hash_payload(payload: Any) -> str:
@@ -41,6 +41,7 @@ class SkillExecutor:
         self.environment_fingerprint = environment_fingerprint
         self._breaker_cache: dict[str, CircuitBreakerState] = {}
         self._breaker_lock = threading.RLock()
+        self._breakers_loaded = False
 
     def _write_text_atomic(self, path: Path, content: str) -> None:
         tmp_path = path.with_name(f"{path.name}.tmp")
@@ -50,7 +51,10 @@ class SkillExecutor:
 
     def _load_breakers(self) -> dict[str, CircuitBreakerState]:
         with self._breaker_lock:
+            if self._breakers_loaded:
+                return self._breaker_cache
             if self.circuit_breaker_path is None:
+                self._breakers_loaded = True
                 return self._breaker_cache
             if not self.circuit_breaker_path.exists():
                 self._save_breakers()
@@ -87,12 +91,14 @@ class SkillExecutor:
                 for name, state in payload.items()
                 if isinstance(state, dict)
             }
+            self._breakers_loaded = True
             return self._breaker_cache
 
     def _save_breakers(self) -> None:
         with self._breaker_lock:
             if self.circuit_breaker_path is None:
                 return
+            self._breakers_loaded = True
             payload = {name: to_dict(state) for name, state in self._breaker_cache.items()}
             if self.environment_fingerprint is None:
                 serialized = payload
@@ -132,6 +138,14 @@ class SkillExecutor:
     def _record_success(self, skill_name: str) -> CircuitBreakerState:
         with self._breaker_lock:
             state = self._breaker_for(skill_name)
+            if (
+                state.failure_count == 0
+                and state.open_until_round is None
+                and state.last_failure_round is None
+                and state.last_failure_reason is None
+                and state.fallback_route is None
+            ):
+                return state
             state.failure_count = 0
             state.open_until_round = None
             state.last_failure_round = None
@@ -233,8 +247,8 @@ class SkillExecutor:
             return ActionCandidate(name="respond", probability=1.0, rationale="typed fallback")
         if isinstance(contract, type) and is_dataclass(contract):
             values: dict[str, Any] = {}
-            type_hints = get_type_hints(contract)
-            for field in fields(contract):
+            contract_fields, type_hints = dataclass_contract_metadata(contract)
+            for field in contract_fields:
                 field_contract = type_hints.get(field.name, field.type)
                 if field.default is not MISSING or field.default_factory is not MISSING:
                     continue

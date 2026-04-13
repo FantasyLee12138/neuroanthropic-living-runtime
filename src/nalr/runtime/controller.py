@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -38,11 +39,16 @@ from nalr.runtime.entropy import MacOSSystemEntropyProvider, QuantumEntropyPool,
 from nalr.runtime.authenticity import AuthenticityPolicy
 from nalr.runtime.endogenous_scheduler import EndogenousTickScheduler
 from nalr.runtime.identity import IdentityRuntime
+from nalr.runtime.initiative import InitiativeRuntime
 from nalr.runtime.longrun import LongRunAnalyzer
+from nalr.runtime.math_kernel import kl_divergence, normalize_distribution, sample_action_name, softmax_distribution
 from nalr.runtime.metadata import iso_date, utc_now_iso
+from nalr.runtime.monologue import MonologueStreamRuntime
 from nalr.runtime.motivation_feedback import MotivationFeedbackUpdater
 from nalr.runtime.motivation_pool import EndogenousMotivationPool
 from nalr.runtime.probability_field import ProbabilityFieldIntegrator, compute_tlh_vector_collapse
+from nalr.runtime.diagnostics_runtime import DiagnosticsRuntimeService
+from nalr.runtime.state_runtime import StateRuntimeService
 from nalr.runtime.tlh_vectors import (
     AXES,
     TLH_ACTION_VECTORS,
@@ -183,23 +189,27 @@ ACTION_STAGE_BY_OWNER["InstinctField"] = "instinct"
 ACTION_STAGE_BY_OWNER["EmergentActionSketch"] = "emergent"
 
 
-INNATE_ACTIONS = ("respond", "rest", "absorb", "wander", "nothing", "die")
+INNATE_ACTIONS = ("respond", "rest", "absorb", "wander", "monologue", "nothing", "die")
 DERIVED_ACTIONS = ("plan", "recall", "connect", "clarify")
-CORE_ACTIONS = ("respond", "plan", "recall", "rest", "connect", "clarify", "wander", "absorb", "nothing", "die")
+CORE_ACTIONS = ("respond", "plan", "recall", "rest", "connect", "clarify", "wander", "absorb", "monologue", "nothing", "die")
 INTERNAL_RUNTIME_ACTIONS = CORE_ACTIONS + ("short_reply",)
-INNATE_ACTIONS = ("respond", "rest", "absorb", "wander", "nothing", "die")
-DERIVED_ACTIONS = ("plan", "recall", "connect", "clarify")
 MODEL_ROUTE_SKILL_BINDINGS: dict[str, tuple[str, ...]] = {
     "planner": (),
     "pfc": ("generate_candidates",),
     "perspective": ("infer_other_state", "simulate_other_reaction"),
     "renderer": ("render_expression",),
+    "renderer_fallback_fast": ("render_expression_fallback",),
+    "renderer_fallback_small": ("render_expression_fallback",),
+    "monologue_stream": ("monologue_stream",),
 }
 MODEL_ROUTE_BINDING_KEYS: dict[str, str] = {
     "planner": "planner",
     "pfc": "PFCAgent",
     "perspective": "PerspectiveModel",
     "renderer": "Renderer",
+    "renderer_fallback_fast": "Renderer",
+    "renderer_fallback_small": "Renderer",
+    "monologue_stream": "MonologueStream",
 }
 
 ARCHITECTURE_CORE_GOAL = "维持生命性、真实性与连续性"
@@ -234,6 +244,9 @@ class RuntimeController:
         thresholds = self.config["thresholds"]["thresholds"]
         self.trace_store = TraceStore(self.home_path)
         self.memory_store = MemoryStore(self.home_path)
+        from nalr.terminal_bridge.session import TerminalSessionStore
+
+        self.terminal_sessions = TerminalSessionStore(self.runtime_dir)
         self.agents = build_agents(
             conflict_high=thresholds["conflict_high"],
             conflict_critical=thresholds["conflict_critical"],
@@ -278,6 +291,13 @@ class RuntimeController:
             vitality_engine=self.vitality_engine,
         )
         self.long_run_analyzer = LongRunAnalyzer(self.trace_store, self.identity_payload, CORE_ACTIONS)
+        self.initiative_runtime = InitiativeRuntime(self.config["models"].get("initiative_trigger", {}))
+        self.monologue_runtime = MonologueStreamRuntime(
+            self.runtime_dir / "monologue_fragments.jsonl",
+            self.config["models"].get("monologue_stream", {}),
+        )
+        self.state_runtime = StateRuntimeService(self)
+        self.diagnostics_runtime = DiagnosticsRuntimeService(self)
 
         if not self.state_parquet_path.exists() and self.state_path.exists():
             payload = json.loads(self.state_path.read_text(encoding="utf-8"))
@@ -294,6 +314,7 @@ class RuntimeController:
                     for name, agent_cfg in self.config["agents"]["agents"].items()
                 }
             )
+            self._ensure_default_autonomy_runtime(initial_state, force=True)
             self._save_state(initial_state, sync=True)
         else:
             self._state_cache = self.load_runtime_state()
@@ -327,9 +348,46 @@ class RuntimeController:
         }
 
     def _default_observer_settings(self) -> dict[str, Any]:
+        autonomy_defaults = AutonomyPolicyState()
+        learning_log_dir = self.home_path / "learning"
+        knowledge_roots = [
+            self.project_root / "docs",
+            learning_log_dir,
+        ]
+        writable_roots = [
+            self.project_root,
+            self.home_path,
+            self.home_path / "cache",
+            learning_log_dir,
+        ]
         return {
             "autonomy": {
                 "clear_safe_mode_on_start": True,
+                "learning_mode": autonomy_defaults.learning_mode,
+                "network_enabled": bool(autonomy_defaults.network_enabled),
+                "external_io_enabled": bool(autonomy_defaults.external_io_enabled),
+                "allow_commit": bool(autonomy_defaults.allow_commit),
+                "allowed_network_domains": [
+                    "docs.python.org",
+                    "developer.mozilla.org",
+                    "fastapi.tiangolo.com",
+                    "react.dev",
+                    "www.typescriptlang.org",
+                    "github.com",
+                    "pypi.org",
+                ],
+                "writable_roots": [str(path) for path in writable_roots],
+                "knowledge_roots": [str(path) for path in knowledge_roots],
+                "learning_log_dir": str(learning_log_dir),
+                "trace_external_learning": bool(autonomy_defaults.trace_external_learning),
+                "allowed_operator_levels": list(autonomy_defaults.allowed_operator_levels),
+                "allowed_commands": list(autonomy_defaults.allowed_commands),
+                "blocked_commands": list(autonomy_defaults.blocked_commands),
+                "max_rounds_per_hour": int(autonomy_defaults.max_rounds_per_hour),
+                "max_tool_actions_per_hour": int(autonomy_defaults.max_tool_actions_per_hour),
+                "quiet_hours": list(autonomy_defaults.quiet_hours),
+                "failure_trip_threshold": int(autonomy_defaults.failure_trip_threshold),
+                "auto_safe_mode": bool(autonomy_defaults.auto_safe_mode),
             },
             "newborn": {
                 "disable_safe_mode_lock": True,
@@ -399,6 +457,56 @@ class RuntimeController:
         defaults["autonomy"]["clear_safe_mode_on_start"] = bool(
             autonomy.get("clear_safe_mode_on_start", defaults["autonomy"]["clear_safe_mode_on_start"])
         )
+        learning_mode = str(autonomy.get("learning_mode", defaults["autonomy"].get("learning_mode", "guided-learn")) or "guided-learn").strip().lower()
+        if learning_mode not in {"observe", "guided-learn", "active-learn"}:
+            learning_mode = str(defaults["autonomy"].get("learning_mode", "guided-learn") or "guided-learn")
+        defaults["autonomy"]["learning_mode"] = learning_mode
+        for key in ("network_enabled", "external_io_enabled", "allow_commit", "auto_safe_mode"):
+            defaults["autonomy"][key] = bool(autonomy.get(key, defaults["autonomy"].get(key)))
+        defaults["autonomy"]["allowed_network_domains"] = self._normalize_observer_string_list(
+            list(autonomy.get("allowed_network_domains", defaults["autonomy"].get("allowed_network_domains", [])))
+        )
+        defaults["autonomy"]["writable_roots"] = self._normalize_observer_path_list(
+            list(autonomy.get("writable_roots", defaults["autonomy"].get("writable_roots", [])))
+        )
+        defaults["autonomy"]["knowledge_roots"] = self._normalize_observer_path_list(
+            list(autonomy.get("knowledge_roots", defaults["autonomy"].get("knowledge_roots", [])))
+        )
+        learning_log_dir = str(autonomy.get("learning_log_dir", defaults["autonomy"].get("learning_log_dir", "")) or "").strip()
+        defaults["autonomy"]["learning_log_dir"] = self._normalize_observer_path(learning_log_dir) if learning_log_dir else str(
+            defaults["autonomy"].get("learning_log_dir", "")
+        )
+        defaults["autonomy"]["trace_external_learning"] = bool(
+            autonomy.get("trace_external_learning", defaults["autonomy"].get("trace_external_learning", True))
+        )
+        defaults["autonomy"]["allowed_operator_levels"] = self._normalize_observer_string_list(
+            list(autonomy.get("allowed_operator_levels", defaults["autonomy"].get("allowed_operator_levels", [])))
+        )
+        for key in ("allowed_commands", "blocked_commands"):
+            defaults["autonomy"][key] = self._normalize_observer_string_list(
+                list(autonomy.get(key, defaults["autonomy"].get(key, [])))
+            )
+        for key in ("max_rounds_per_hour", "max_tool_actions_per_hour"):
+            try:
+                value = int(autonomy.get(key, defaults["autonomy"].get(key, 0)) or 0)
+            except (TypeError, ValueError):
+                value = int(defaults["autonomy"].get(key, 0) or 0)
+            defaults["autonomy"][key] = max(0, value)
+        try:
+            failure_trip_threshold = int(autonomy.get("failure_trip_threshold", defaults["autonomy"].get("failure_trip_threshold", 1)) or 1)
+        except (TypeError, ValueError):
+            failure_trip_threshold = int(defaults["autonomy"].get("failure_trip_threshold", 1) or 1)
+        defaults["autonomy"]["failure_trip_threshold"] = max(1, failure_trip_threshold)
+        quiet_hours_raw = autonomy.get("quiet_hours", defaults["autonomy"].get("quiet_hours", []))
+        quiet_hours: list[int] = []
+        for raw in list(quiet_hours_raw or []):
+            try:
+                hour = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= hour <= 23 and hour not in quiet_hours:
+                quiet_hours.append(hour)
+        defaults["autonomy"]["quiet_hours"] = quiet_hours
 
         newborn = data.get("newborn", {}) if isinstance(data.get("newborn"), dict) else {}
         defaults["newborn"]["disable_safe_mode_lock"] = bool(
@@ -479,6 +587,26 @@ class RuntimeController:
             normalized.append(value)
         return normalized
 
+    def _normalize_observer_path(self, value: str) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = (self.project_root / path).resolve()
+        else:
+            path = path.resolve()
+        return str(path)
+
+    def _normalize_observer_path_list(self, values: list[Any]) -> list[str]:
+        normalized: list[str] = []
+        for raw in list(values or []):
+            path = self._normalize_observer_path(str(raw or ""))
+            if not path or path in normalized:
+                continue
+            normalized.append(path)
+        return normalized
+
     def _apply_observer_settings_to_models(self, models_cfg: dict[str, Any], observer_settings: dict[str, Any]) -> dict[str, Any]:
         merged = json.loads(json.dumps(models_cfg, ensure_ascii=False))
         model_settings = observer_settings.get("models", {}) if isinstance(observer_settings.get("models"), dict) else {}
@@ -502,6 +630,30 @@ class RuntimeController:
 
     def _observer_settings(self) -> dict[str, Any]:
         return self.config.get("observer_settings", self._default_observer_settings())
+
+    def observer_settings_current(self) -> dict[str, Any]:
+        return self._observer_settings()
+
+    def normalize_observer_settings_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        base: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return self._normalize_observer_settings(payload, base=base)
+
+    def refresh_runtime_components_from_config(self) -> None:
+        self.config = self._load_config()
+        self.model_router = ModelRouter.from_config(self.config["models"])
+        model_gateway_cfg = self.config["models"].get("models")
+        self.model_gateway = ModelGateway.from_config(model_gateway_cfg) if isinstance(model_gateway_cfg, dict) else None
+        self.identity_runtime = IdentityRuntime(self._identity_cfg(), self._provider_descriptor)
+        self.authenticity_policy = AuthenticityPolicy(self._identity_cfg())
+        self.initiative_runtime = self.initiative_runtime.__class__(self.config["models"].get("initiative_trigger", {}))
+        self.monologue_runtime = self.monologue_runtime.__class__(
+            self.runtime_dir / "monologue_fragments.jsonl",
+            self.config["models"].get("monologue_stream", {}),
+        )
 
     def _normalize_temperament_config(self, payload: dict[str, Any]) -> dict[str, Any]:
         temperament = dict(payload.get("temperament", {}))
@@ -553,6 +705,7 @@ class RuntimeController:
                 payload = json.loads(self.state_path.read_text(encoding="utf-8"))
             self._state_cache = RuntimeState(**payload)
             self._ensure_subject_core(self._state_cache)
+            self._ensure_default_autonomy_runtime(self._state_cache)
         return RuntimeState(**to_dict(self._state_cache))
 
     def _runtime_migration_status(self) -> dict[str, Any]:
@@ -777,9 +930,10 @@ class RuntimeController:
             updated_round=0,
             continuity_derivation={},
         )
-        state.autonomy_policy = AutonomyPolicyState(enabled=False)
+        state.autonomy_policy = self._autonomy_policy_for_profile("tool_level")
+        state.autonomy_policy.enabled = True
         state.autonomy_loop = AutonomyLoopState(
-            running=False,
+            running=True,
             profile="tool_level",
             last_step_at=None,
             last_action_type="",
@@ -831,6 +985,7 @@ class RuntimeController:
         state.stop_reason = {}
         state.dirty_worktree_detected = False
         state.commit_permission_required = True
+        state.session_metadata["autonomy_default_enabled_at"] = utc_now_iso()
         self._ensure_subject_core(state)
         return RuntimeState(**to_dict(state))
 
@@ -883,6 +1038,8 @@ class RuntimeController:
                 meaning_made=[],
             )
             newborn.organic_mode.instinct_first = False
+        newborn.session_metadata.pop("autonomy_user_disabled", None)
+        self._ensure_default_autonomy_runtime(newborn, force=True)
         self._save_state(newborn, sync=True)
         self._rounds_since_cold_flush = 0
         self._last_cold_flush_at = time.monotonic()
@@ -1291,6 +1448,9 @@ class RuntimeController:
             "endogenous_intent_rate": round(len(endogenous_rounds) / max(len(rounds), 1), 4),
         }
 
+    def subjectivity_metrics(self) -> dict[str, Any]:
+        return self._subjectivity_metrics()
+
     def _round_seed(self, state: RuntimeState, event: RoundEvent) -> int:
         payload = f"{state.round_count}:{event.source}:{event.content}:{event.target or ''}:{event.cue or ''}"
         return int(hashlib.sha1(payload.encode("utf-8")).hexdigest()[:8], 16)
@@ -1336,6 +1496,9 @@ class RuntimeController:
         state.desire_state.latent_drives = latent_drives
         state.desire_state.dominant_drive = dominant_drive
         state.desire_state.drive_tension = round(max(latent_drives.values(), default=0.0), 4)
+
+    def sync_tlh_state(self, state: RuntimeState) -> None:
+        self._sync_tlh_state(state)
 
     def _subjective_pressure(self, state: RuntimeState) -> float:
         self._sync_tlh_state(state)
@@ -1600,6 +1763,59 @@ class RuntimeController:
             ]
         elif normalized == "full_runtime":
             policy.allowed_operator_levels = ["read_only", "soft_intervene", "debug_control"]
+        policy = self._apply_observer_autonomy_preferences(policy)
+        return policy
+
+    def _apply_observer_autonomy_preferences(self, policy: AutonomyPolicyState) -> AutonomyPolicyState:
+        settings = self._observer_settings()
+        autonomy = settings.get("autonomy", {}) if isinstance(settings.get("autonomy"), dict) else {}
+        learning_mode = str(autonomy.get("learning_mode", policy.learning_mode) or policy.learning_mode).strip().lower()
+        if learning_mode not in {"observe", "guided-learn", "active-learn"}:
+            learning_mode = policy.learning_mode
+        policy.learning_mode = learning_mode
+        policy.network_enabled = bool(autonomy.get("network_enabled", policy.network_enabled))
+        policy.external_io_enabled = bool(autonomy.get("external_io_enabled", policy.external_io_enabled))
+        policy.allow_commit = bool(autonomy.get("allow_commit", policy.allow_commit))
+        policy.allowed_network_domains = self._normalize_observer_string_list(
+            list(autonomy.get("allowed_network_domains", policy.allowed_network_domains))
+        )
+        policy.writable_roots = self._normalize_observer_path_list(
+            list(autonomy.get("writable_roots", policy.writable_roots))
+        )
+        policy.knowledge_roots = self._normalize_observer_path_list(
+            list(autonomy.get("knowledge_roots", policy.knowledge_roots))
+        )
+        policy.learning_log_dir = self._normalize_observer_path(str(autonomy.get("learning_log_dir", policy.learning_log_dir) or ""))
+        policy.trace_external_learning = bool(autonomy.get("trace_external_learning", policy.trace_external_learning))
+        policy.allowed_operator_levels = self._normalize_observer_string_list(
+            list(autonomy.get("allowed_operator_levels", policy.allowed_operator_levels))
+        )
+        allowed = self._normalize_observer_string_list(list(autonomy.get("allowed_commands", policy.allowed_commands)))
+        blocked = self._normalize_observer_string_list(list(autonomy.get("blocked_commands", policy.blocked_commands)))
+        policy.allowed_commands = allowed
+        policy.blocked_commands = blocked
+        try:
+            policy.max_rounds_per_hour = max(0, int(autonomy.get("max_rounds_per_hour", policy.max_rounds_per_hour) or 0))
+        except (TypeError, ValueError):
+            policy.max_rounds_per_hour = max(0, int(policy.max_rounds_per_hour or 0))
+        try:
+            policy.max_tool_actions_per_hour = max(0, int(autonomy.get("max_tool_actions_per_hour", policy.max_tool_actions_per_hour) or 0))
+        except (TypeError, ValueError):
+            policy.max_tool_actions_per_hour = max(0, int(policy.max_tool_actions_per_hour or 0))
+        try:
+            policy.failure_trip_threshold = max(1, int(autonomy.get("failure_trip_threshold", policy.failure_trip_threshold) or 1))
+        except (TypeError, ValueError):
+            policy.failure_trip_threshold = max(1, int(policy.failure_trip_threshold or 1))
+        policy.auto_safe_mode = bool(autonomy.get("auto_safe_mode", policy.auto_safe_mode))
+        quiet_hours: list[int] = []
+        for raw in list(autonomy.get("quiet_hours", policy.quiet_hours) or []):
+            try:
+                hour = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= hour <= 23 and hour not in quiet_hours:
+                quiet_hours.append(hour)
+        policy.quiet_hours = quiet_hours
         return policy
 
     def _sync_autonomy_state(self, state: RuntimeState) -> None:
@@ -1611,6 +1827,46 @@ class RuntimeController:
             state.autonomy_policy.profile = "tool_level"
         if not state.autonomy_loop.profile:
             state.autonomy_loop.profile = state.autonomy_policy.profile
+
+    def sync_autonomy_state(self, state: RuntimeState) -> None:
+        self._sync_autonomy_state(state)
+
+    def _ensure_default_autonomy_runtime(self, state: RuntimeState, *, force: bool = False) -> bool:
+        self._sync_autonomy_state(state)
+        if not force and bool(state.session_metadata.get("autonomy_user_disabled", False)):
+            return False
+
+        target_profile = str(state.autonomy_loop.profile or state.autonomy_policy.profile or "tool_level").strip() or "tool_level"
+        default_policy = self._autonomy_policy_for_profile(target_profile)
+        changed = False
+
+        if state.autonomy_policy.profile != default_policy.profile:
+            state.autonomy_policy.profile = default_policy.profile
+            changed = True
+        for command in default_policy.allowed_commands:
+            if command not in state.autonomy_policy.allowed_commands:
+                state.autonomy_policy.allowed_commands.append(command)
+                changed = True
+        for level in default_policy.allowed_operator_levels:
+            if level not in state.autonomy_policy.allowed_operator_levels:
+                state.autonomy_policy.allowed_operator_levels.append(level)
+                changed = True
+        if not state.autonomy_policy.enabled:
+            state.autonomy_policy.enabled = True
+            changed = True
+        if not state.autonomy_loop.running:
+            state.autonomy_loop.running = True
+            changed = True
+        if state.autonomy_loop.profile != default_policy.profile:
+            state.autonomy_loop.profile = default_policy.profile
+            changed = True
+        if not state.autonomy_loop.window_started_at:
+            state.autonomy_loop.window_started_at = datetime.now(timezone.utc).isoformat()
+            changed = True
+        if "autonomy_default_enabled_at" not in state.session_metadata:
+            state.session_metadata["autonomy_default_enabled_at"] = utc_now_iso()
+            changed = True
+        return changed
 
     def _autonomy_matches_prefix(self, command: str, prefix: str) -> bool:
         normalized_command = str(command or "").strip().lower()
@@ -1638,6 +1894,68 @@ class RuntimeController:
         if effective_policy.allowed_operator_levels and envelope.operator_level not in effective_policy.allowed_operator_levels:
             return False, "operator_level_disallowed"
         return True, ""
+
+    def _autonomy_operator_allowed(
+        self,
+        operator_level: str,
+        policy: AutonomyPolicyState | None = None,
+    ) -> tuple[bool, str]:
+        effective_policy = policy or self.load_runtime_state().autonomy_policy
+        if effective_policy.allowed_operator_levels and operator_level not in effective_policy.allowed_operator_levels:
+            return False, "operator_level_disallowed"
+        return True, ""
+
+    def _generate_autonomy_self_run_goal_via_model(self, state: RuntimeState) -> str | None:
+        request = ModelRequest(
+            system_prompt=(
+                "你是自治运行体的只读自查意图生成器。"
+                "只返回 JSON:{goal,reason}。"
+                "goal 必须是一句简短英文任务，限定为 inspect/read/identify/summarize 这类只读动作。"
+                "不要包含写入、修改、删除、提交、push。"
+            ),
+            user_prompt=self._json_prompt(
+                {
+                    "state": {
+                        "round_count": int(state.round_count or 0),
+                        "body_energy": self._compact_float(state.body_energy),
+                        "fatigue": self._compact_float(state.fatigue),
+                        "memory_fragments": self._compact_float(state.memory_fragments),
+                        "self_continuity": self._compact_float(state.self_continuity),
+                        "meaning_strength": self._compact_float(state.meaning_strength),
+                        "mode": state.mode,
+                    },
+                    "constraints": {
+                        "operator_level": "read_only",
+                        "allow_commit": False,
+                        "goal_style": "single_sentence",
+                    },
+                }
+            ),
+            response_schema={"goal": "string", "reason": "string"},
+            metadata={
+                "round_count": int(state.round_count or 0),
+                "memory_fragments": float(state.memory_fragments or 0.0),
+                "self_continuity": float(state.self_continuity or 0.0),
+            },
+        )
+        try:
+            response = self._call_bound_model_route(
+                "AutonomySelfRun",
+                route_name="autonomy_self_run",
+                request=request,
+                skill_name="autonomy_self_run",
+            )
+        except Exception:
+            return None
+        payload = dict(getattr(response, "payload", {}) or {})
+        goal = str(payload.get("goal") or "").strip()
+        if not goal:
+            return None
+        lowered = goal.lower()
+        blocked = ("write", "modify", "delete", "remove", "commit", "push", "overwrite")
+        if any(token in lowered for token in blocked):
+            return None
+        return goal
 
     def _autonomy_budget_usage(self, state: RuntimeState) -> dict[str, Any]:
         self._sync_autonomy_state(state)
@@ -1712,7 +2030,89 @@ class RuntimeController:
         }
         return context, relation_state, slow_variables
 
-    def _autonomy_candidate_action(self, state: RuntimeState) -> str:
+    def _autonomy_self_run_score(
+        self,
+        state: RuntimeState,
+        policy: AutonomyPolicyState,
+    ) -> float:
+        if "self_run" in {str(item or "").strip() for item in list(policy.blocked_commands or [])}:
+            return 0.0
+        pending_progress = self._autonomy_pending_readonly_repo_scan(state, policy)
+        if pending_progress is not None:
+            return 0.94
+        if state.active_run_id and state.run_status in {"running", "paused"}:
+            return 0.0
+        allowed, _reason = self._autonomy_operator_allowed("read_only", policy)
+        if not allowed:
+            return 0.0
+        if int(state.round_count or 0) <= 0:
+            return 0.0
+        if float(state.budget_remaining or 0.0) < 0.18:
+            return 0.0
+        if float(state.body_energy or 0.0) < 0.38 or float(state.fatigue or 0.0) > 0.62:
+            return 0.0
+        recent_actions = list(state.autonomy_loop.recent_actions or [])[-4:]
+        if any(str(item.get("action_type") or "") == "self_run" for item in recent_actions):
+            return 0.0
+        continuity_gap = max(0.0, 0.58 - float(state.self_continuity or 0.0))
+        meaning_gap = max(0.0, 0.44 - float(state.meaning_strength or 0.0))
+        memory_pull = max(float(state.memory_fragments or 0.0), float(state.subjective_state.spontaneous or 0.0) * 0.3)
+        if continuity_gap + meaning_gap + memory_pull < 0.28:
+            return 0.0
+        vitality_room = max(0.0, float(state.body_energy or 0.0) - 0.34)
+        fatigue_headroom = max(0.0, 0.64 - float(state.fatigue or 0.0))
+        return min(
+            1.0,
+            continuity_gap * 0.42
+            + meaning_gap * 0.28
+            + memory_pull * 0.22
+            + vitality_room * 0.18
+            + fatigue_headroom * 0.12
+            + (0.14 if int(state.round_count or 0) > 0 else 0.0),
+        )
+
+    def _autonomy_pending_readonly_repo_scan(
+        self,
+        state: RuntimeState,
+        policy: AutonomyPolicyState,
+    ) -> dict[str, str] | None:
+        active_run_id = str(state.active_run_id or "").strip()
+        if not active_run_id or state.run_status not in {"running", "paused"}:
+            return None
+        allowed, _reason = self._autonomy_operator_allowed("read_only", policy)
+        if not allowed:
+            return None
+        try:
+            run_state = self._load_run_state(active_run_id)
+        except FileNotFoundError:
+            return None
+        if bool(getattr(run_state.policy, "allow_commit", False)):
+            return None
+        if str(getattr(run_state.policy, "operator_level", "") or "") != "read_only":
+            return None
+        tool_rows = list(self.trace_store.list_run_tools(active_run_id) or [])
+        pending_tool = next(
+            (
+                row
+                for row in reversed(tool_rows)
+                if str(row.get("status") or "") == "awaiting_approval"
+            ),
+            None,
+        )
+        if pending_tool is None:
+            return None
+        if str(pending_tool.get("tool_name") or "") != "repo_scan":
+            return None
+        return {
+            "run_id": active_run_id,
+            "call_id": str(pending_tool.get("call_id") or ""),
+        }
+
+    def _autonomy_candidate_scores(
+        self,
+        state: RuntimeState,
+        policy: AutonomyPolicyState,
+    ) -> dict[str, float]:
         self._sync_tlh_state(state)
         rest_score = max(1.0 - float(state.body_energy or 0.0), float(state.fatigue or 0.0))
         absorb_score = max(float(state.memory_fragments or 0.0), float(state.subjective_state.reject_all or 0.0) * 0.85)
@@ -1731,14 +2131,61 @@ class RuntimeController:
             max(0.0, 0.12 - float(state.self_continuity or 0.0))
             + max(0.0, 0.12 - float(state.meaning_strength or 0.0)),
         )
-        scores = {
+        return {
             "rest": rest_score,
             "absorb": absorb_score,
             "wander": wander_score,
             "nothing": nothing_score,
             "die": die_score,
+            "self_run": self._autonomy_self_run_score(state, policy),
         }
+
+    def _autonomy_candidate_action(
+        self,
+        state: RuntimeState,
+        policy: AutonomyPolicyState,
+    ) -> str:
+        field_probe = self._autonomy_action_field_probe()
+        scores = self._autonomy_projected_candidate_scores(state, policy, field_probe)
         return max(scores, key=scores.get)
+
+    def _autonomy_projected_candidate_scores(
+        self,
+        state: RuntimeState,
+        policy: AutonomyPolicyState,
+        field_probe: dict[str, Any] | None = None,
+    ) -> dict[str, float]:
+        prior_scores = {
+            str(name): max(0.0, float(score or 0.0))
+            for name, score in self._autonomy_candidate_scores(state, policy).items()
+        }
+        if not isinstance(field_probe, dict):
+            return prior_scores
+        distribution = dict(field_probe.get("action_distribution", {}) or {})
+        if not distribution:
+            return prior_scores
+
+        projected_actions = list(prior_scores.keys())
+        raw_scores = {
+            action: max(0.0, float(distribution.get(action, 0.0) or 0.0))
+            for action in projected_actions
+        }
+        positive_prior_actions = [action for action, score in prior_scores.items() if score > 0.0]
+        raw_total = sum(raw_scores.get(action, 0.0) for action in positive_prior_actions)
+        prior_total = sum(prior_scores.get(action, 0.0) for action in positive_prior_actions)
+        if raw_total <= 0.0 or prior_total <= 0.0:
+            return prior_scores
+
+        projected_scores: dict[str, float] = {}
+        for action in projected_actions:
+            prior_score = prior_scores.get(action, 0.0)
+            if prior_score <= 0.0:
+                projected_scores[action] = 0.0
+                continue
+            raw_component = raw_scores.get(action, 0.0) / raw_total
+            prior_component = prior_score / prior_total
+            projected_scores[action] = round(raw_component * 0.2 + prior_component * 0.8, 6)
+        return projected_scores
 
     def _autonomy_trace_append(
         self,
@@ -2553,6 +3000,9 @@ class RuntimeController:
     def _identity_cfg(self) -> dict[str, Any]:
         return self.config["identity"]["identity"]
 
+    def identity_config(self) -> dict[str, Any]:
+        return self._identity_cfg()
+
     def _provider_descriptor_for_route(self, route_name: str = "renderer") -> tuple[str, str]:
         route_cfg = self.config["models"]["model_routes"].get(route_name, {})
         binding_key = {
@@ -2560,6 +3010,7 @@ class RuntimeController:
             "pfc": "PFCAgent",
             "perspective": "PerspectiveModel",
             "renderer": "Renderer",
+            "autonomy_self_run": "AutonomySelfRun",
         }.get(route_name)
         if binding_key:
             resolved_route = self._route_config_for_binding(binding_key, route_name=route_name)
@@ -2579,6 +3030,9 @@ class RuntimeController:
 
     def _provider_descriptor(self) -> tuple[str, str]:
         return self._provider_descriptor_for_route("renderer")
+
+    def provider_descriptor(self) -> tuple[str, str]:
+        return self._provider_descriptor()
 
     def _model_tiers(self) -> dict[str, Any]:
         return dict(self.config["models"].get("model_tiers", {}))
@@ -2615,6 +3069,104 @@ class RuntimeController:
 
     def _tier_config(self, tier_name: str) -> dict[str, Any]:
         return dict(self._model_tiers().get(tier_name, {}))
+
+    def _infer_tier_name_for_route(self, route_cfg: ModelRouteConfig | None) -> str | None:
+        if route_cfg is None:
+            return None
+        for tier_name, tier_cfg in self._model_tiers().items():
+            if str(tier_cfg.get("mode", "local")).lower() == "local":
+                continue
+            if (
+                str(tier_cfg.get("backend", "")).strip() == str(route_cfg.backend or "").strip()
+                and str(tier_cfg.get("model", "")).strip() == str(route_cfg.model or "").strip()
+                and str(tier_cfg.get("api_key_env", "")).strip() == str(route_cfg.api_key_env or "").strip()
+            ):
+                return tier_name
+        return None
+
+    def _route_policy_contract(self) -> dict[str, Any]:
+        return {
+            "chat_fast": {
+                "latency_budget_ms": 700,
+                "entry_mode": "interactive",
+                "hot_path": "fast_chat",
+                "explicit_route": "chat_fast",
+                "default_tier": self._infer_tier_name_for_route(self.model_router.route_configs.get("chat_fast")) or "medium_model",
+                "primary_agents": ["fast_chat_expression"],
+                "escalates_to": [],
+                "upgrade_conditions": [],
+            },
+            "chat_standard": {
+                "latency_budget_ms": 700,
+                "entry_mode": "interactive",
+                "hot_path": "full_tick",
+                "explicit_route": None,
+                "default_tier": "medium_model",
+                "primary_agents": ["PFCAgent", "PerspectiveModel", "Renderer"],
+                "escalates_to": ["large_model"],
+                "upgrade_conditions": [
+                    "relation_risk_high",
+                    "disclosure_sensitivity_high",
+                    "authenticity_risk_high",
+                    "conflict_high",
+                ],
+            },
+            "chat_deep": {
+                "latency_budget_ms": 700,
+                "entry_mode": "interactive",
+                "hot_path": "full_tick",
+                "explicit_route": None,
+                "default_tier": "medium_model",
+                "primary_agents": ["PFCAgent", "planner", "PerspectiveModel", "Renderer"],
+                "escalates_to": ["large_model"],
+                "upgrade_conditions": [
+                    "long_form_reasoning",
+                    "high_relation_risk",
+                    "high_disclosure_sensitivity",
+                    "high_authenticity_risk",
+                ],
+            },
+            "task_run": {
+                "latency_budget_ms": 1200,
+                "entry_mode": "interactive",
+                "hot_path": "supervisor_run",
+                "explicit_route": "planner",
+                "default_tier": self._agent_tier("planner"),
+                "primary_agents": ["planner", "PFCAgent"],
+                "escalates_to": ["large_model"],
+                "upgrade_conditions": ["planner_complexity_high", "relation_risk_high"],
+            },
+            "endogenous_light": {
+                "latency_budget_ms": 300,
+                "entry_mode": "idle",
+                "hot_path": "endogenous_tick",
+                "explicit_route": "monologue_stream",
+                "default_tier": self._agent_tier("MonologueStream"),
+                "primary_agents": ["MonologueStream", "InitiativeInteractionAgent"],
+                "escalates_to": [],
+                "upgrade_conditions": [],
+            },
+            "endogenous_deep": {
+                "latency_budget_ms": 300,
+                "entry_mode": "idle",
+                "hot_path": "endogenous_tick",
+                "explicit_route": None,
+                "default_tier": "medium_model",
+                "primary_agents": ["PFCAgent", "PerspectiveModel", "MonologueStream"],
+                "escalates_to": ["large_model"],
+                "upgrade_conditions": ["endogenous_replay", "endogenous_regulation", "relation_risk_high"],
+            },
+            "dream_sleep": {
+                "latency_budget_ms": 5000,
+                "entry_mode": "sleep",
+                "hot_path": "dream_sidecar",
+                "explicit_route": None,
+                "default_tier": "medium_model",
+                "primary_agents": ["dream_orchestrator"],
+                "escalates_to": [],
+                "upgrade_conditions": ["sleep_mode_only"],
+            },
+        }
 
     def _route_config_for_binding(
         self,
@@ -2825,6 +3377,122 @@ class RuntimeController:
                 "repair_stage": render_plan.safety_constraints.get("repair_stage"),
             },
         }
+
+    def _fallback_render_route_names(self) -> list[str]:
+        preferred_groups = [
+            ("renderer_fallback_fast", "chat_fast"),
+            ("renderer_fallback_small", "monologue_stream"),
+        ]
+        selected: list[str] = []
+        for group in preferred_groups:
+            for route_name in group:
+                route_cfg = self.model_router.route_configs.get(route_name)
+                if route_cfg is None or not route_cfg.enabled or route_name in selected:
+                    continue
+                selected.append(route_name)
+                break
+        return selected
+
+    def _build_deterministic_render_fallback_output(self, render_plan: RenderPlan, *, model_label: str) -> dict[str, Any]:
+        return {
+            "text": fallback_render_text(render_plan),
+            "route": "renderer",
+            "model": model_label,
+        }
+
+    def _fallback_renderer_system_prompt(
+        self,
+        render_plan: RenderPlan,
+        *,
+        fallback_reason: str,
+        violation_types: list[str] | None = None,
+    ) -> str:
+        base_prompt = self._renderer_system_prompt(
+            render_plan,
+            prompt_mode="violation" if violation_types else "base",
+            violation_types=violation_types,
+        )
+        extra_lines = [
+            "当前处于降级表达链，但还没有到最终模板兜底。",
+            "你会收到 deterministic_bottom_line，它只是最后失败时的表达底线，不是你应该直接照抄的输出。",
+            "保持同一语义和边界，把它改写成更自然、更像此刻真人开口的表达。",
+            "不要客服腔，不要功能介绍腔，不要元叙述，不要暴露 provider 视角。",
+            f"fallback_reason={fallback_reason}。",
+        ]
+        return " ".join([base_prompt, *extra_lines])
+
+    def _build_fallback_render_model_payload(
+        self,
+        render_plan: RenderPlan,
+        *,
+        fallback_reason: str,
+        violation_types: list[str] | None = None,
+    ) -> dict[str, Any]:
+        payload = self._build_render_model_payload(render_plan)
+        payload["fallback_reason"] = fallback_reason
+        payload["violation_types"] = list(violation_types or [])
+        payload["deterministic_bottom_line"] = fallback_render_text(render_plan)
+        payload["rewrite_target"] = "humanized_first_person_runtime_reply"
+        return payload
+
+    def _render_expression_via_humanized_fallback_chain(
+        self,
+        render_plan: RenderPlan,
+        *,
+        fallback_reason: str,
+        deterministic_model: str,
+        violation_types: list[str] | None = None,
+        model_call_traces: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        request = ModelRequest(
+            system_prompt=self._fallback_renderer_system_prompt(
+                render_plan,
+                fallback_reason=fallback_reason,
+                violation_types=violation_types,
+            ),
+            user_prompt=self._json_prompt(
+                self._build_fallback_render_model_payload(
+                    render_plan,
+                    fallback_reason=fallback_reason,
+                    violation_types=violation_types,
+                )
+            ),
+            response_schema={"text": "str"},
+            metadata={
+                "action": render_plan.action,
+                "query_kind": render_plan.identity_context.query_kind,
+                "disclosure_detail": render_plan.identity_context.disclosure_detail,
+                "fallback_reason": fallback_reason,
+            },
+        )
+        for route_name in self._fallback_render_route_names():
+            route_cfg = self.model_router.route_configs.get(route_name)
+            if route_cfg is None or not route_cfg.enabled:
+                continue
+            try:
+                response = self.model_router.generate(route_name, request)
+            except Exception:
+                continue
+            text = str(response.payload.get("text", "")).strip()
+            if not text:
+                continue
+            if render_plan.delivery_mode == "monologue" and not text.startswith("【独白】"):
+                text = f"【独白】{text}"
+            if model_call_traces is not None:
+                self._record_model_call(
+                    model_call_traces,
+                    skill_name="render_expression_fallback",
+                    binding_key="Renderer",
+                    route_config=route_cfg,
+                    response=response,
+                    prompt_chars=len(request.system_prompt) + len(request.user_prompt),
+                )
+            return {
+                "text": text,
+                "route": "renderer",
+                "model": str(response.model or route_cfg.model),
+            }
+        return self._build_deterministic_render_fallback_output(render_plan, model_label=deterministic_model)
 
     def _execute_parallel_skills(
         self,
@@ -4008,6 +4676,9 @@ class RuntimeController:
             f"本体={identity.display_label or self._unnamed_label()}/{identity.class_label}。",
             f"q={identity.query_kind};d={identity.disclosure_detail};qi={identity.query_intent};di={identity.disclosure_intent}.",
         ]
+        lines.append(f"delivery_mode={render_plan.delivery_mode}; action={render_plan.action}.")
+        if render_plan.delivery_mode == "monologue":
+            lines.append("当 delivery_mode=monologue 时，这不是直接对用户说话，而是可见的内部独白。文本必须以【独白】开头。")
         lines.append(f"repair_expression={json.dumps(repair_expression, ensure_ascii=False, sort_keys=True)}。")
         lines.append(
             "按 repair 组织表达，"
@@ -4170,17 +4841,32 @@ class RuntimeController:
         state: RuntimeState,
         relation_state: dict[str, Any],
         sampled_action: str,
-    ) -> bool:
+        *,
+        route_type: str = "",
+    ) -> tuple[bool, str]:
         perspective_cfg = self.config["models"].get("perspective", {})
         if not perspective_cfg.get("enabled", True):
-            return False
+            return False, "perspective_disabled"
         if not event.target:
-            return False
+            return False, "no_target"
         if state.resource_state.get("resource_mode") == "starvation":
-            return False
+            return False, "resource_starvation"
         action_bump = 0.08 if sampled_action in {"clarify", "connect"} else 0.0
         risk_score = max(relation_state.get("relationship_risk", 0.0), abs(event.valence) * 0.5 + action_bump)
-        return risk_score >= perspective_cfg.get("risk_threshold", 0.33)
+        risk_threshold = float(perspective_cfg.get("risk_threshold", 0.33) or 0.33)
+        if risk_score < risk_threshold:
+            return False, "risk_gate_closed"
+        if route_type == "chat_standard":
+            route_ready = (
+                risk_score >= max(0.38, risk_threshold + 0.08)
+                or abs(float(event.valence or 0.0)) >= 0.3
+                or sampled_action in {"clarify", "connect"}
+            )
+            if not route_ready:
+                return False, "route_gate_closed"
+        elif route_type in {"chat_fast", "endogenous_light", "dream_sleep"}:
+            return False, "route_gate_closed"
+        return True, "risk_gate_open"
 
     def _infer_other_state_via_model(
         self,
@@ -4303,11 +4989,38 @@ class RuntimeController:
             model_call_traces=model_call_traces,
             skill_name="render_expression",
         )
+        text = str(response.payload.get("text", "")).strip()
+        if render_plan.delivery_mode == "monologue" and text and not text.startswith("【独白】"):
+            text = f"【独白】{text}"
         return {
-            "text": str(response.payload.get("text", "")).strip(),
+            "text": text,
             "route": response.route,
             "model": response.model,
         }
+
+    def _should_allow_renderer_resample(
+        self,
+        *,
+        route_type: str,
+        render_plan: RenderPlan,
+        violation_types: list[str],
+        context: dict[str, Any],
+    ) -> bool:
+        if not violation_types:
+            return False
+        if route_type in {"chat_deep", "task_run", "endogenous_deep"}:
+            return True
+        if route_type in {"chat_fast", "endogenous_light", "dream_sleep"}:
+            return False
+        if render_plan.identity_context.query_kind in {"self_identity", "provider_identity", "answer_explanation"}:
+            return True
+        if any(item in {"provider_leak", "false_self_claim"} for item in violation_types):
+            return True
+        return (
+            float(render_plan.relation_state.get("relationship_risk", 0.0) or 0.0) >= 0.62
+            or float(context.get("disclosure_sensitivity", 0.0) or 0.0) >= 0.55
+            or float(context.get("authenticity_risk", 0.0) or 0.0) >= 0.32
+        )
 
     def _score_salience_via_model(
         self,
@@ -4500,6 +5213,8 @@ class RuntimeController:
             "nothing": 0.015 + float(state.subjective_state.reject_all or 0.0) * 0.06,
             "die": 0.01 + (1.0 - float(state.self_continuity or 0.0)) * 0.02 + max(0.0, 0.25 - float(state.meaning_strength or 0.0)) * 0.03,
         }
+        if state.mode in {"idle", "sleep"} or str(state.mode).startswith("endogenous"):
+            base["monologue"] = 0.018 + 0.035
         if state.organic_mode.enabled:
             subjective_pressure = self._subjective_pressure(state)
             innate_gain = 1.0 + subjective_pressure * 0.58 + float(state.organic_mode.guard_relaxation or 0.0) * 0.16
@@ -5101,18 +5816,10 @@ class RuntimeController:
         return float(effective_assessment.get("score", 0.0)), current_action_truth, control_ledger
 
     def _normalize(self, distribution: dict[str, float]) -> dict[str, float]:
-        total = sum(max(value, 0.0) for value in distribution.values()) or 1.0
-        return {action: max(value, 0.0) / total for action, value in distribution.items()}
+        return normalize_distribution(distribution)
 
     def _sample_action_from_distribution(self, distribution: dict[str, float], sample_value: float = 0.5) -> ActionCandidate:
-        threshold = _clip(float(sample_value), 0.0, 1.0)
-        cumulative = 0.0
-        sampled_name = max(distribution, key=distribution.get)
-        for action_name, probability in sorted(distribution.items()):
-            cumulative += max(float(probability), 0.0)
-            if threshold <= cumulative:
-                sampled_name = action_name
-                break
+        sampled_name = sample_action_name(distribution, sample_value)
         return ActionCandidate(
             name=sampled_name,
             probability=float(distribution.get(sampled_name, 0.0) or 0.0),
@@ -5120,11 +5827,7 @@ class RuntimeController:
         )
 
     def _softmax(self, utilities: dict[str, float]) -> dict[str, float]:
-        if not utilities:
-            return {}
-        max_utility = max(utilities.values())
-        weights = {action: math.exp(value - max_utility) for action, value in utilities.items()}
-        return self._normalize(weights)
+        return softmax_distribution(utilities)
 
     def _parse_budget_cap(self, value: str) -> tuple[int, float]:
         normalized = value.strip().lower().replace("_", "")
@@ -5135,12 +5838,7 @@ class RuntimeController:
         return cap_value, round(_clip(cap_value / 100000, 0.0, 1.0), 4)
 
     def _kl_divergence(self, q_dist: dict[str, float], p_dist: dict[str, float]) -> float:
-        kl = 0.0
-        for action, q in q_dist.items():
-            p = max(p_dist.get(action, 1e-9), 1e-9)
-            q = max(q, 1e-9)
-            kl += q * math.log(q / p)
-        return kl
+        return kl_divergence(q_dist, p_dist)
 
     def _stochastic_channel(self, distribution: dict[str, float]) -> str:
         top_action = max(distribution, key=distribution.get)
@@ -5534,6 +6232,44 @@ class RuntimeController:
             projection=EnergyProjectionSpec(module_type="tooling", target_space="action", module_temperature=temperature),
         )
 
+    def _build_autonomy_self_run_action_contribution(
+        self,
+        *,
+        state: RuntimeState,
+        scenario: str,
+        endogenous_turn: bool,
+    ) -> ProbabilisticContribution | None:
+        if not endogenous_turn or scenario == "task":
+            return None
+        score = self._autonomy_self_run_score(state, state.autonomy_policy)
+        if score <= 0.0:
+            return None
+        confidence = round(max(0.35, min(0.92, 0.4 + score * 0.35)), 4)
+        return ProbabilisticContribution(
+            module_name="AutonomySelfRun",
+            module_type="autonomy",
+            level="action",
+            target_space="action",
+            raw_signal={"self_run_drive": round(score, 6)},
+            modulated_delta={
+                "self_run": round(0.18 + score * 0.42, 6),
+                "nothing": round(-0.04 * score, 6),
+                "wander": round(-0.03 * score, 6),
+            },
+            confidence=confidence,
+            confidence_calibrated=confidence,
+            trace_reason="endogenous self-directed run intention enters the main action field",
+            projection_reason="autonomy self-run pressure projected into endogenous action competition",
+            applied_at_stage="autonomy_self_run",
+            native_operator="autonomy_endogenous_bias",
+            dependency_trace=[
+                f"score:{round(score, 4)}",
+                f"mode:{state.mode}",
+                f"round:{int(state.round_count or 0)}",
+            ],
+            projection=EnergyProjectionSpec(module_type="autonomy", target_space="action", module_temperature=0.82),
+        )
+
     def _collapse_internal_sampled_action(self, sampled_action: ActionCandidate) -> ActionCandidate:
         if sampled_action.name != "short_reply":
             return sampled_action
@@ -5618,6 +6354,7 @@ class RuntimeController:
         scenario_cfg: dict[str, Any],
         context: dict[str, Any],
         relation_state: dict[str, float],
+        allow_model_reasoning: bool = True,
     ) -> tuple[list[ActionEvidenceSignal], dict[str, ProbabilisticContribution], dict[str, Any], dict[str, float]]:
         direct_action_contributions: dict[str, ProbabilisticContribution] = {}
         direct_action_signal_metadata: dict[str, dict[str, Any]] = {}
@@ -5717,9 +6454,12 @@ class RuntimeController:
             if owner == "PFCAgent":
                 reasoning_state, reasoning_meta = self._state_for_reasoning(state, event, scenario, state.mode)
                 context = {**context, **reasoning_meta}
-                try:
-                    contribution = self._generate_pfc_candidates_via_model(event, reasoning_state, scenario_cfg, context)
-                except Exception:
+                if allow_model_reasoning:
+                    try:
+                        contribution = self._generate_pfc_candidates_via_model(event, reasoning_state, scenario_cfg, context)
+                    except Exception:
+                        contribution = agent.build_direct_action_contribution(event, reasoning_state, scenario_cfg, context)
+                else:
                     contribution = agent.build_direct_action_contribution(event, reasoning_state, scenario_cfg, context)
                 direct_action_contributions[owner] = contribution
                 direct_action_signal_metadata[owner] = self._action_signal_metadata(
@@ -5766,6 +6506,24 @@ class RuntimeController:
                     utility_shift=self._projected_action_delta_from_contribution(contribution),
                 )
 
+        autonomy_self_run_contribution = self._build_autonomy_self_run_action_contribution(
+            state=state,
+            scenario=scenario,
+            endogenous_turn=event.source == "endogenous",
+        )
+        if autonomy_self_run_contribution is not None:
+            direct_action_contributions["AutonomySelfRun"] = autonomy_self_run_contribution
+            direct_action_signal_metadata["AutonomySelfRun"] = self._action_signal_metadata(
+                owner="AutonomySelfRun",
+                state=state,
+                relation_state=relation_state,
+                context=context,
+                module_type=autonomy_self_run_contribution.module_type,
+                projected_delta=self._projected_action_delta_from_contribution(autonomy_self_run_contribution),
+                utility_shift=self._projected_action_delta_from_contribution(autonomy_self_run_contribution),
+                trace_tags=["autonomy", "self_run"],
+            )
+
         action_signals = [
             self._action_evidence_from_contribution(
                 contribution,
@@ -5786,6 +6544,7 @@ class RuntimeController:
         *,
         scenario: str,
         mode: str,
+        allow_model_reasoning: bool = True,
     ) -> dict[str, Any]:
         state, requested_mode, mode_cfg, scenario_cfg, context, relation_state, round_seed = self._probe_context(event, scenario, mode)
         probe_signals, probe_direct_contributions, context, relation_state = self._collect_probe_signals(
@@ -5795,6 +6554,7 @@ class RuntimeController:
             scenario_cfg=scenario_cfg,
             context=context,
             relation_state=relation_state,
+            allow_model_reasoning=allow_model_reasoning,
         )
         slow_variables = self._build_slow_variable_payload(
             state=state,
@@ -5937,6 +6697,22 @@ class RuntimeController:
             "chat_mass": chat_mass,
         }
 
+    def _autonomy_action_field_probe(self) -> dict[str, Any] | None:
+        try:
+            return self._probe_distribution_for_scenario(
+                RoundEvent(
+                    source="endogenous",
+                    content="autonomy heartbeat",
+                    target="self",
+                    cue="endogenous:autonomy",
+                ),
+                scenario="companion",
+                mode="endogenous_light",
+                allow_model_reasoning=False,
+            )
+        except Exception:
+            return None
+
     def _terminal_route_scenario_hint(self, text: str) -> str:
         normalized = text.strip().lower()
         if not normalized:
@@ -5980,6 +6756,72 @@ class RuntimeController:
         if route == "task_run":
             return f"{scenario}_probe task_mass={task_mass:.3f} chat_mass={chat_mass:.3f}"
         return f"{scenario}_probe chat_mass={chat_mass:.3f} task_mass={task_mass:.3f}"
+
+    def _endogenous_route_type(self, mode: str | None) -> str:
+        normalized = str(mode or "").strip().lower()
+        if normalized in {"endogenous_replay", "endogenous_regulation"}:
+            return "endogenous_deep"
+        if normalized.startswith("endogenous"):
+            return "endogenous_light"
+        if normalized == "sleep":
+            return "dream_sleep"
+        return ""
+
+    def _direct_chat_route_type(
+        self,
+        text: str,
+        *,
+        probe: dict[str, Any] | None = None,
+        top_action: str = "",
+        model_call_count: int = 0,
+    ) -> str:
+        normalized = str(text or "").strip()
+        top = str(top_action or str((probe or {}).get("top_action", ""))).strip()
+        task_mass = float((probe or {}).get("task_mass", 0.0) or 0.0)
+        deep_tokens = ("详细", "深入", "系统", "比较", "分析", "展开", "long-form", "step by step", "deeply")
+        if (
+            len(normalized) > 140
+            or model_call_count >= 4
+            or task_mass >= 0.35
+            or (top in {"plan", "recall", "clarify", "connect"} and len(normalized) > 48)
+            or any(token in normalized.lower() for token in deep_tokens)
+        ):
+            return "chat_deep"
+        return "chat_standard"
+
+    def _route_type_for_turn_plan(self, *, route: str, text: str, scenario: str, mode: str, probe: dict[str, Any] | None = None) -> str:
+        if route == "fast_chat":
+            return "chat_fast"
+        if route == "task_run":
+            return "task_run"
+        endogenous_route = self._endogenous_route_type(mode)
+        if endogenous_route:
+            return endogenous_route
+        if scenario == "task":
+            return "task_run"
+        return self._direct_chat_route_type(text, probe=probe)
+
+    def _runtime_route_type_for_round(
+        self,
+        *,
+        event: RoundEvent,
+        scenario: str,
+        mode: str,
+        top_action: str,
+        model_call_count: int,
+        probe: dict[str, Any] | None = None,
+    ) -> str:
+        endogenous_route = self._endogenous_route_type(mode)
+        if endogenous_route:
+            return endogenous_route
+        if scenario == "task":
+            return "task_run"
+        return self._direct_chat_route_type(
+            event.content,
+            probe=probe,
+            top_action=top_action,
+            model_call_count=model_call_count,
+        )
 
     def _is_fast_chat_candidate(self, text: str, *, target: str = "user", mode: str = "interactive") -> bool:
         normalized = text.strip()
@@ -6155,6 +6997,7 @@ class RuntimeController:
         self._persist_fast_chat_capsule(state, capsule, final_message)
         return TurnExecution(
             route="fast_chat",
+            route_type="chat_fast",
             assistant_final=final_message,
             payload={"capsule": capsule},
         )
@@ -6182,6 +7025,7 @@ class RuntimeController:
         self._persist_fast_chat_capsule(state, capsule, final_message)
         return deltas, TurnExecution(
             route="fast_chat",
+            route_type="chat_fast",
             assistant_final=final_message,
             payload={"capsule": capsule, "stream_deltas": deltas},
         )
@@ -6215,6 +7059,21 @@ class RuntimeController:
             recorded_at=utc_now_iso(),
         )
 
+    def prepare_task_bootstrap(
+        self,
+        goal: str,
+        *,
+        allow_commit: bool,
+        operator_level: str,
+        defer_bootstrap_tool: bool = False,
+    ) -> tuple[RunState, dict[str, Any], dict[str, Any]]:
+        return self._build_task_bootstrap(
+            goal,
+            allow_commit=allow_commit,
+            operator_level=operator_level,
+            defer_bootstrap_tool=defer_bootstrap_tool,
+        )
+
     def plan_turn(
         self,
         text: str,
@@ -6231,6 +7090,7 @@ class RuntimeController:
                 text=normalized,
                 route="direct_chat",
                 scenario="chat",
+                route_type="chat_standard",
                 mode=mode,
                 target=target,
                 reason="empty_input",
@@ -6242,6 +7102,7 @@ class RuntimeController:
                 text=normalized,
                 route="fast_chat",
                 scenario=scenario,
+                route_type="chat_fast",
                 mode=mode,
                 target=target,
                 reason="chat_fast_heuristic",
@@ -6272,6 +7133,7 @@ class RuntimeController:
             text=normalized,
             route=route,
             scenario=scenario,
+            route_type=self._route_type_for_turn_plan(route=route, text=normalized, scenario=scenario, mode=mode, probe=probe),
             mode=mode,
             target=target,
             reason=self._turn_reason(route, probe, scenario),
@@ -6304,8 +7166,9 @@ class RuntimeController:
             final_message = result.rendered_expression.text.strip() or "你好，我在。你想让我帮你做什么？"
             return TurnExecution(
                 route="direct_chat",
+                route_type=plan.route_type or "chat_standard",
                 assistant_final=final_message,
-                payload={"reason": plan.reason, "top_action": plan.top_action},
+                payload={"reason": plan.reason, "top_action": plan.top_action, "route_type": plan.route_type or "chat_standard"},
             )
 
         run_details = self.start_run(
@@ -6320,13 +7183,14 @@ class RuntimeController:
         )
         return TurnExecution(
             route="task_run",
+            route_type=plan.route_type or "task_run",
             assistant_preamble=self._task_turn_message(run_details["run"]),
             assistant_final=self._task_turn_message(run_details["run"]),
             run=run_details["run"],
             explain=run_details["explain"],
             steps=run_details["steps"],
             tools=run_details["tools"],
-            payload={"reason": plan.reason, "top_action": plan.top_action},
+            payload={"reason": plan.reason, "top_action": plan.top_action, "route_type": plan.route_type or "task_run"},
         )
 
     def probe_terminal_route(
@@ -6340,6 +7204,7 @@ class RuntimeController:
         selected = plan.precomputed_distribution
         return {
             "route": plan.route,
+            "route_type": plan.route_type,
             "top_action": plan.top_action,
             "action_distribution": selected["action_distribution"],
             "task_mass": selected["task_mass"],
@@ -6355,11 +7220,12 @@ class RuntimeController:
             return ("hot",)
         return ("hot", "warm", "archive")
 
-    def _tick_impl(self, event: RoundEvent, scenario: str, mode: str) -> RoundResult:
-        turn_started = time.perf_counter()
+    def build_round_context(self, event: RoundEvent, scenario: str, mode: str) -> dict[str, Any]:
         state = self.load_runtime_state()
         self._normalize_temperament_runtime_state(state)
         prior_state = RuntimeState(**to_dict(state))
+        latest_round_views = self.trace_store.recent_round_signal_views(limit=1)
+        latest_round_recorded_at = latest_round_views[-1].get("recorded_at") if latest_round_views else None
         requested_mode = "safe" if state.safe_mode else mode
         endogenous_turn = event.source == "endogenous" or requested_mode.startswith("endogenous")
         mode_cfg = self.config["modes"]["modes"].get(requested_mode, self.config["modes"]["modes"]["interactive"])
@@ -6434,8 +7300,7 @@ class RuntimeController:
         identity_evidence = self._augment_identity_evidence(state, self.memory_store.identity_evidence())
         self._update_personality_anchor(state, identity_evidence)
 
-        gate_decisions: list[dict[str, Any]] = []
-        gate_decisions.append(
+        gate_decisions: list[dict[str, Any]] = [
             {
                 "stage": "memory_write_gate",
                 "owner": "MemoryWriteGate",
@@ -6443,7 +7308,7 @@ class RuntimeController:
                 "reason": memory_write_gate.get("reason", "unknown"),
                 "cue": memory_write_gate.get("cue"),
             }
-        )
+        ]
         skill_traces: list[dict[str, Any]] = []
         model_call_traces: list[dict[str, Any]] = []
         parallel_traces: list[dict[str, Any]] = []
@@ -6458,6 +7323,62 @@ class RuntimeController:
             relation_state=relation_state,
             prior_closeness=prior_closeness,
         )
+        return {
+            "event": event,
+            "state": state,
+            "prior_state": prior_state,
+            "latest_round_recorded_at": latest_round_recorded_at,
+            "requested_mode": requested_mode,
+            "endogenous_turn": endogenous_turn,
+            "mode_cfg": mode_cfg,
+            "scenario_cfg": scenario_cfg,
+            "thresholds": thresholds,
+            "prior_closeness": prior_closeness,
+            "appraisal": appraisal,
+            "recorded_at": recorded_at,
+            "recorded_date": recorded_date,
+            "resource_telemetry": resource_telemetry,
+            "cue": cue,
+            "memory_write_gate": memory_write_gate,
+            "context": context,
+            "relation_state": relation_state,
+            "shaping_events": shaping_events,
+            "dream_payload": dream_payload,
+            "rename_event": rename_event,
+            "identity_evidence": identity_evidence,
+            "gate_decisions": gate_decisions,
+            "skill_traces": skill_traces,
+            "model_call_traces": model_call_traces,
+            "parallel_traces": parallel_traces,
+            "previous_focus": previous_focus,
+            "round_seed": round_seed,
+            "reasoning_state": reasoning_state,
+            "runtime_context": runtime_context,
+            "slow_variables": slow_variables,
+        }
+
+    def collect_parallel_contributions(
+        self,
+        *,
+        round_context: dict[str, Any],
+        scenario: str,
+    ) -> dict[str, Any]:
+        event = round_context["event"]
+        state = round_context["state"]
+        mode_cfg = round_context["mode_cfg"]
+        scenario_cfg = round_context["scenario_cfg"]
+        context = round_context["context"]
+        relation_state = round_context["relation_state"]
+        shaping_events = round_context["shaping_events"]
+        rename_event = round_context["rename_event"]
+        skill_traces = round_context["skill_traces"]
+        model_call_traces = round_context["model_call_traces"]
+        parallel_traces = round_context["parallel_traces"]
+        round_seed = round_context["round_seed"]
+        reasoning_state = round_context["reasoning_state"]
+        runtime_context = round_context["runtime_context"]
+        slow_variables = round_context["slow_variables"]
+
         intent_prefetch = self._execute_parallel_skills(
             round_id=state.round_count,
             tasks=[
@@ -7036,6 +7957,41 @@ class RuntimeController:
                 utility_shift=self._projected_action_delta_from_contribution(motivation_contribution),
                 trace_tags=["motivation", *[item.motivation_type for item in motivation_pool_state.active_motivations]],
             )
+        autonomy_self_run_contribution = self._build_autonomy_self_run_action_contribution(
+            state=state,
+            scenario=scenario,
+            endogenous_turn=bool(round_context.get("endogenous_turn", False)),
+        )
+        if autonomy_self_run_contribution is not None:
+            direct_action_contributions["AutonomySelfRun"] = autonomy_self_run_contribution
+            direct_action_signal_metadata["AutonomySelfRun"] = self._action_signal_metadata(
+                owner="AutonomySelfRun",
+                state=state,
+                relation_state=relation_state,
+                context=context,
+                module_type=autonomy_self_run_contribution.module_type,
+                projected_delta=self._projected_action_delta_from_contribution(autonomy_self_run_contribution),
+                utility_shift=self._projected_action_delta_from_contribution(autonomy_self_run_contribution),
+                trace_tags=["autonomy", "self_run"],
+            )
+        monologue_stream_contribution, monologue_stream_trace = self._build_monologue_stream_action_contribution(
+            state=state,
+            scenario=scenario,
+            endogenous_turn=bool(round_context.get("endogenous_turn", False)),
+        )
+        context["monologue_stream_trace"] = monologue_stream_trace
+        if monologue_stream_contribution is not None:
+            direct_action_contributions["MonologueStream"] = monologue_stream_contribution
+            direct_action_signal_metadata["MonologueStream"] = self._action_signal_metadata(
+                owner="MonologueStream",
+                state=state,
+                relation_state=relation_state,
+                context=context,
+                module_type=monologue_stream_contribution.module_type,
+                projected_delta=self._projected_action_delta_from_contribution(monologue_stream_contribution),
+                utility_shift=self._projected_action_delta_from_contribution(monologue_stream_contribution),
+                trace_tags=["monologue", "hidden_stream"],
+            )
         instinct_contribution = self._build_instinct_field_contribution(
             state=state,
             context=context,
@@ -7096,6 +8052,65 @@ class RuntimeController:
             state_sources=list(grounding_capsule.get("state_sources", [])),
             rename_event=rename_event,
         )
+        return {
+            "query_state": query_state,
+            "disclosure_state": disclosure_state,
+            "runtime_inputs": runtime_inputs,
+            "direct_action_contributions": direct_action_contributions,
+            "action_signals": action_signals,
+            "action_bookkeeping": action_bookkeeping,
+            "identity_context": identity_context,
+            "online_long_run_projection": online_long_run_projection,
+            "motivation_pool_state": motivation_pool_state,
+            "monologue_stream_trace": dict(context.get("monologue_stream_trace", {}) or {}),
+        }
+
+    def integrate_and_arbitrate(
+        self,
+        *,
+        round_context: dict[str, Any],
+        collected: dict[str, Any],
+        scenario: str,
+        turn_started: float,
+    ) -> dict[str, Any]:
+        event = round_context["event"]
+        state = round_context["state"]
+        prior_state = round_context["prior_state"]
+        latest_round_recorded_at = round_context["latest_round_recorded_at"]
+        requested_mode = round_context["requested_mode"]
+        endogenous_turn = round_context["endogenous_turn"]
+        scenario_cfg = round_context["scenario_cfg"]
+        thresholds = round_context["thresholds"]
+        prior_closeness = round_context["prior_closeness"]
+        appraisal = round_context["appraisal"]
+        recorded_at = round_context["recorded_at"]
+        recorded_date = round_context["recorded_date"]
+        memory_write_gate = round_context["memory_write_gate"]
+        context = round_context["context"]
+        relation_state = round_context["relation_state"]
+        shaping_events = round_context["shaping_events"]
+        dream_payload = round_context["dream_payload"]
+        rename_event = round_context["rename_event"]
+        identity_evidence = round_context["identity_evidence"]
+        gate_decisions = round_context["gate_decisions"]
+        skill_traces = round_context["skill_traces"]
+        model_call_traces = round_context["model_call_traces"]
+        parallel_traces = round_context["parallel_traces"]
+        previous_focus = round_context["previous_focus"]
+        round_seed = round_context["round_seed"]
+        runtime_context = round_context["runtime_context"]
+
+        query_state = collected["query_state"]
+        disclosure_state = collected["disclosure_state"]
+        runtime_inputs = collected["runtime_inputs"]
+        direct_action_contributions = collected["direct_action_contributions"]
+        action_signals = collected["action_signals"]
+        action_bookkeeping = collected["action_bookkeeping"]
+        identity_context = collected["identity_context"]
+        online_long_run_projection = collected["online_long_run_projection"]
+        motivation_pool_state = collected["motivation_pool_state"]
+        monologue_stream_trace = dict(collected.get("monologue_stream_trace", {}) or {})
+
         online_long_run_contribution = self.long_run_analyzer.build_long_run_prior_contribution(
             online_long_run_projection
         )
@@ -7195,7 +8210,7 @@ class RuntimeController:
             current_final_distribution,
             query_kind=query_state.legacy_query_kind,
             disclosure_intent=disclosure_state.posterior.top_intent,
-            slow_variables=slow_variables,
+            slow_variables=round_context["slow_variables"],
             memory_cue=context.get("cue"),
             shaping_events=shaping_events,
         )
@@ -7469,6 +8484,51 @@ class RuntimeController:
             }
         )
 
+        context_memory_backing = {}
+        if context.get("cue") or float(context.get("recall_strength", 0.0) or 0.0) > 0.0:
+            context_memory_backing = {
+                "cue": context.get("cue"),
+                "strength": round(float(context.get("recall_strength", 0.0) or 0.0), 4),
+                "summary": context.get("cue") or event.content[:80],
+            }
+        expressive_overlay = self._initiative_distribution_payload(
+            state,
+            relation_state=relation_state,
+            vitality_snapshot={},
+            cue=context.get("cue"),
+            memory_backing=context_memory_backing,
+            latest_recorded_at=latest_round_recorded_at,
+            current_goal=context.get("run_context", {}).get("goal") if isinstance(context.get("run_context"), dict) else state.current_goal,
+        )
+        expressive_contribution = self._build_expressive_action_contribution(
+            current_distribution=dict(action_snapshot.action.winner_posterior or {}),
+            payload=expressive_overlay,
+            scenario=scenario,
+            endogenous_turn=endogenous_turn,
+        )
+        if expressive_contribution is not None:
+            action_contributions.append(expressive_contribution)
+            action_snapshot = self._reintegrate_probability_snapshot(
+                snapshot=action_snapshot,
+                contributions=action_contributions,
+                token_state=token_state,
+                source_chain=["action_field_after_expressive"],
+            )
+            action_truth = self._refresh_action_truth(action_snapshot.action, action_truth)
+        gate_decisions.append(
+            {
+                "stage": "expressive_field",
+                "owner": "InitiativeRuntime",
+                "allowed": expressive_overlay.get("expression_mode") != "silent",
+                "requires_resample": False,
+                "reason": (
+                    f"intent={expressive_overlay.get('top_intent', 'stay_silent')}; "
+                    f"mode={expressive_overlay.get('expression_mode', 'silent')}; "
+                    f"speech_cost={float(expressive_overlay.get('speech_cost', 0.0) or 0.0):.2f}"
+                ),
+            }
+        )
+
         provisional_action_name = str(action_snapshot.action.winner_target or self._top_action_name(dict(action_snapshot.action.winner_posterior or {})))
         provisional_action = ActionCandidate(
             name=provisional_action_name,
@@ -7512,6 +8572,13 @@ class RuntimeController:
             sample_value,
         )
         sampled_action = self._collapse_internal_sampled_action(sampled_action)
+        route_type = self._runtime_route_type_for_round(
+            event=event,
+            scenario=scenario,
+            mode=requested_mode,
+            top_action=sampled_action.name,
+            model_call_count=0,
+        )
         stochastic_state.entropy_ref = action_entropy_ref if not stochastic_state.entropy_ref.source else stochastic_state.entropy_ref
         stochastic_state.entropy_refs_by_node["action_sample"] = to_dict(action_entropy_ref)
         state.focus_lock_count = state.focus_lock_count + 1 if sampled_action.name == previous_focus else 1
@@ -7563,7 +8630,14 @@ class RuntimeController:
         delay_params = output_profiles["delay_params"]
 
         late_perspective = {"state_hypothesis": {}, "reaction_hypothesis": {}}
-        if self._should_run_late_perspective(event, state, relation_state, sampled_action.name):
+        allow_late_perspective, late_perspective_reason = self._should_run_late_perspective(
+            event,
+            state,
+            relation_state,
+            sampled_action.name,
+            route_type=route_type,
+        )
+        if allow_late_perspective:
             perspective = self.agent_map["PerspectiveModel"]
             perspective_results = self._execute_parallel_skills(
                 round_id=state.round_count,
@@ -7618,7 +8692,7 @@ class RuntimeController:
                     "owner": "PerspectiveModel",
                     "allowed": False,
                     "requires_resample": False,
-                    "reason": "risk_gate_closed",
+                    "reason": late_perspective_reason,
                 }
             )
 
@@ -7653,20 +8727,29 @@ class RuntimeController:
             shaping_events=shaping_events,
             repair_expression=self._build_repair_expression_policy(dict(control_ledger.get("conflict", {}) or {})),
         )
-        rendered_output, rendered_result = self._execute_skill_with_result(
-            round_id=state.round_count,
-            skill_name="render_expression",
-            inputs={"render_plan": render_plan},
-            provider=lambda render_plan: self._render_expression_via_model(render_plan, model_call_traces=model_call_traces),
-            skill_traces=skill_traces,
-            runtime_context=runtime_context,
-            fallback_provider=lambda render_plan: {
-                "text": fallback_render_text(render_plan),
-                "route": "renderer",
-                "model": "fallback",
-            },
-            seed_ref=round_seed,
-        )
+        if sampled_action.name == "self_run":
+            rendered_output = {
+                "text": "",
+                "route": "runtime",
+                "model": "self_run_realizer",
+            }
+            rendered_result = SimpleNamespace(degraded=False, failure_policy_applied="")
+        else:
+            rendered_output, rendered_result = self._execute_skill_with_result(
+                round_id=state.round_count,
+                skill_name="render_expression",
+                inputs={"render_plan": render_plan},
+                provider=lambda render_plan: self._render_expression_via_model(render_plan, model_call_traces=model_call_traces),
+                skill_traces=skill_traces,
+                runtime_context=runtime_context,
+                fallback_provider=lambda render_plan: self._render_expression_via_humanized_fallback_chain(
+                    render_plan,
+                    fallback_reason="renderer_failure",
+                    deterministic_model="fallback",
+                    model_call_traces=model_call_traces,
+                ),
+                seed_ref=round_seed,
+            )
         initial_auth = self._evaluate_authenticity(rendered_output.get("text", ""), render_plan)
         guard_action = "pass"
         violation_types = list(initial_auth.get("violation_types", []))
@@ -7674,32 +8757,42 @@ class RuntimeController:
         final_rendered_output = rendered_output
 
         if violation_types:
-            guard_action = "resample"
-            try:
-                resampled_output = self._render_expression_via_model(
-                    render_plan,
-                    prompt_mode="violation",
-                    violation_types=violation_types,
-                    model_call_traces=model_call_traces,
-                )
-            except Exception:
-                resampled_output = None
-            if resampled_output is not None:
-                resampled_auth = self._evaluate_authenticity(resampled_output.get("text", ""), render_plan)
-                if not resampled_auth.get("violation_types"):
-                    final_rendered_output = resampled_output
-                    final_auth = resampled_auth
+            if self._should_allow_renderer_resample(
+                route_type=route_type,
+                render_plan=render_plan,
+                violation_types=violation_types,
+                context=context,
+            ):
+                guard_action = "resample"
+                try:
+                    resampled_output = self._render_expression_via_model(
+                        render_plan,
+                        prompt_mode="violation",
+                        violation_types=violation_types,
+                        model_call_traces=model_call_traces,
+                    )
+                except Exception:
+                    resampled_output = None
+                if resampled_output is not None:
+                    resampled_auth = self._evaluate_authenticity(resampled_output.get("text", ""), render_plan)
+                    if not resampled_auth.get("violation_types"):
+                        final_rendered_output = resampled_output
+                        final_auth = resampled_auth
+                    else:
+                        guard_action = "fallback"
                 else:
                     guard_action = "fallback"
             else:
                 guard_action = "fallback"
 
             if guard_action == "fallback":
-                final_rendered_output = {
-                    "text": fallback_render_text(render_plan),
-                    "route": "renderer",
-                    "model": "authenticity_fallback",
-                }
+                final_rendered_output = self._render_expression_via_humanized_fallback_chain(
+                    render_plan,
+                    fallback_reason="authenticity_guard_fallback",
+                    deterministic_model="authenticity_fallback",
+                    violation_types=violation_types,
+                    model_call_traces=model_call_traces,
+                )
                 final_auth = self._evaluate_authenticity(final_rendered_output["text"], render_plan)
 
         final_auth_payload = self.authenticity_policy.build_record(
@@ -7737,6 +8830,7 @@ class RuntimeController:
             text=final_rendered_output.get("text", ""),
             route=final_rendered_output.get("route", "renderer"),
             model=final_rendered_output.get("model", "fallback"),
+            delivery_mode=render_plan.delivery_mode,
             degraded=rendered_result.degraded or guard_action == "fallback",
             failure_policy_applied=rendered_result.failure_policy_applied,
             authenticity=final_auth_payload,
@@ -7802,6 +8896,19 @@ class RuntimeController:
         long_run_projection["online_prior"] = dict(online_long_run_projection)
         long_run_projection["anchor_alignment"] = round(float(state.personality_anchor.alignment or 0.0), 4)
         long_run_projection["anchor_drift"] = round(float(state.personality_anchor.drift or 0.0), 4)
+        initiative_payload = self.evaluate_initiative_overlay(
+            state=state,
+            relation_state=relation_state,
+            vitality_snapshot=vitality_snapshot,
+            context=context,
+            latest_round_recorded_at=latest_round_recorded_at,
+            endogenous_turn=endogenous_turn,
+            rendered_preview=rendered_expression.text,
+        )
+        expressive_trace_payload = {
+            **initiative_payload,
+            "monologue_stream": monologue_stream_trace,
+        }
         for row in skill_traces:
             row["session_id"] = state.session_id
             row["recorded_at"] = recorded_at
@@ -7814,7 +8921,7 @@ class RuntimeController:
             }
         )
         runtime_metrics = {
-            "route_type": "direct_chat",
+            "route_type": route_type,
             "model_call_count": len(model_call_traces),
             "parallel_task_count": len(parallel_traces),
             "parallel_groups": parallel_groups,
@@ -7902,6 +9009,8 @@ class RuntimeController:
             vitality_snapshot=vitality_snapshot,
             vitality_events=shaping_events,
             long_run_projection=long_run_projection,
+            initiative=initiative_payload,
+            expressive_trace=expressive_trace_payload,
             appraisal_snapshot=appraisal,
             state_delta_before_clip={
                 "mood": round(float(event.valence) * 0.08, 4),
@@ -8004,7 +9113,64 @@ class RuntimeController:
             state,
             endogenous_turn=endogenous_turn,
         )
+        return {
+            "trace": trace,
+            "sampled_action": sampled_action,
+            "rendered_expression": rendered_expression,
+            "control_ledger": control_ledger,
+        }
 
+    def evaluate_initiative_overlay(
+        self,
+        *,
+        state: RuntimeState,
+        relation_state: dict[str, Any],
+        vitality_snapshot: dict[str, Any],
+        context: dict[str, Any],
+        latest_round_recorded_at: str | None,
+        endogenous_turn: bool,
+        rendered_preview: str,
+    ) -> dict[str, Any]:
+        context_memory_backing = {}
+        if context.get("cue") or float(context.get("recall_strength", 0.0) or 0.0) > 0.0:
+            context_memory_backing = {
+                "cue": context.get("cue"),
+                "strength": round(float(context.get("recall_strength", 0.0) or 0.0), 4),
+                "summary": context.get("cue") or rendered_preview[:80],
+            }
+        payload = self._initiative_distribution_payload(
+            state,
+            relation_state=relation_state,
+            vitality_snapshot=vitality_snapshot,
+            cue=context.get("cue"),
+            memory_backing=context_memory_backing,
+            latest_recorded_at=latest_round_recorded_at,
+            current_goal=context.get("run_context", {}).get("goal") if isinstance(context.get("run_context"), dict) else state.current_goal,
+        )
+        if not endogenous_turn and payload.get("should_send"):
+            payload["should_send"] = False
+            payload["expression_mode"] = "silent"
+            payload["suppression_reason"] = str(payload.get("suppression_reason") or "reactive_round")
+        payload["rendered_preview"] = rendered_preview[:200].strip()
+        payload["source_round_id"] = state.round_count
+        if payload.get("should_send") and not bool(payload.get("auto_send_enabled")):
+            payload["should_send"] = False
+            payload["expression_mode"] = "silent"
+            payload["suppression_reason"] = "auto_send_disabled"
+        return payload
+
+    def render_and_commit(
+        self,
+        *,
+        state: RuntimeState,
+        trace: RoundTrace,
+        sampled_action: ActionSelection,
+        rendered_expression: RenderedExpression,
+        scenario: str,
+        endogenous_turn: bool,
+        control_ledger: dict[str, Any],
+        recorded_at: str,
+    ) -> RoundResult:
         health = HealthEvent(event="tick", status="ok", detail=f"budget={state.budget_remaining:.2f}")
         state.entropy_health_state = self.entropy_pool.health_snapshot()
         state.last_entropy_failure = {}
@@ -8031,7 +9197,24 @@ class RuntimeController:
             endogenous_turn=endogenous_turn,
             raise_on_error=True,
         )
-
+        if sampled_action.name == "self_run":
+            pending_progress = self._autonomy_pending_readonly_repo_scan(state, state.autonomy_policy)
+            if pending_progress is not None:
+                self.resolve_run_tool_approval(
+                    str(pending_progress.get("run_id") or ""),
+                    str(pending_progress.get("call_id") or ""),
+                    approved=True,
+                )
+            elif not (state.active_run_id and state.run_status in {"running", "paused"}):
+                self.start_run(
+                    self._autonomy_self_run_goal(state),
+                    allow_commit=False,
+                    operator_level="read_only",
+                    include_details=False,
+                    sync_hot_path=True,
+                    defer_bootstrap_tool=True,
+                )
+            state = self.load_runtime_state()
         return RoundResult(
             round_id=state.round_count,
             sampled_action=sampled_action,
@@ -8039,6 +9222,38 @@ class RuntimeController:
             state=state,
             health=health,
             rendered_expression=rendered_expression,
+        )
+
+    def _tick_impl(self, event: RoundEvent, scenario: str, mode: str) -> RoundResult:
+        turn_started = time.perf_counter()
+        round_context = self.build_round_context(event, scenario, mode)
+        state = round_context["state"]
+        endogenous_turn = round_context["endogenous_turn"]
+        recorded_at = round_context["recorded_at"]
+        collected = self.collect_parallel_contributions(
+            round_context=round_context,
+            scenario=scenario,
+        )
+        arbitration = self.integrate_and_arbitrate(
+            round_context=round_context,
+            collected=collected,
+            scenario=scenario,
+            turn_started=turn_started,
+        )
+        trace = arbitration["trace"]
+        sampled_action = arbitration["sampled_action"]
+        rendered_expression = arbitration["rendered_expression"]
+        control_ledger = arbitration["control_ledger"]
+
+        return self.render_and_commit(
+            state=state,
+            trace=trace,
+            sampled_action=sampled_action,
+            rendered_expression=rendered_expression,
+            scenario=scenario,
+            endogenous_turn=endogenous_turn,
+            control_ledger=control_ledger,
+            recorded_at=recorded_at,
         )
 
     def tick(self, event: RoundEvent, scenario: str, mode: str) -> RoundResult:
@@ -8210,6 +9425,26 @@ class RuntimeController:
             self._pending_endogenous_trigger = None
             self._pending_endogenous_trigger_context = None
         micro_intent = to_dict(result.trace.micro_intent) if result.trace.micro_intent else {}
+        initiative_payload = dict(getattr(result.trace, "initiative", {}) or {})
+        auto_sent = False
+        auto_session_id = None
+        if initiative_payload:
+            should_send = bool(initiative_payload.get("should_send"))
+            if should_send:
+                auto_sent, auto_session_id = self._dispatch_initiative_to_session(initiative_payload, result.rendered_expression.text)
+            recorded_initiative = self._record_initiative_outcome(
+                round_id=result.round_id,
+                recorded_at=result.trace.recorded_at,
+                proposal=initiative_payload,
+                message=result.rendered_expression.text.strip(),
+                auto_sent=auto_sent,
+                session_id=auto_session_id,
+            )
+            initiative_payload = {
+                **recorded_initiative,
+                "auto_sent": auto_sent,
+                "target_session_id": auto_session_id or initiative_payload.get("target_session_id"),
+            }
         return {
             "round_id": result.round_id,
             "micro_intent": micro_intent,
@@ -8220,6 +9455,7 @@ class RuntimeController:
             "suppressed": False,
             "suppression_reason": "",
             "trace_ref": f"round://{result.round_id}",
+            "initiative": initiative_payload,
         }
 
     def execute_command(self, envelope: CommandEnvelope) -> CommandResult:
@@ -8280,8 +9516,17 @@ class RuntimeController:
             )
         elif envelope.domain == "body" and envelope.verb == "rest":
             state.body_energy = _clip(state.body_energy + 0.15)
+            embodied_fatigue = _clip((1.0 - state.body_energy) * 0.82 + float(state.affect_residue or 0.0) * 0.14)
+            state.fatigue = _clip(float(state.fatigue or 0.0) * 0.82 + embodied_fatigue * 0.18 - 0.05)
             result = self._mark_boundary_result(
-                CommandResult(applied=True, scope="body", delta={"body_energy": state.body_energy}, ttl="one round", operator_level=operator_level, rollback_available=True),
+                CommandResult(
+                    applied=True,
+                    scope="body",
+                    delta={"body_energy": state.body_energy, "fatigue": round(float(state.fatigue), 4)},
+                    ttl="one round",
+                    operator_level=operator_level,
+                    rollback_available=True,
+                ),
                 boundary_action="downgrade_to_stimulus",
                 deprecation_warning=self._boundary_deprecation(envelope.canonical),
             )
@@ -8557,44 +9802,828 @@ class RuntimeController:
             state.subjective_state.felt = self._normalize_observer_string_list(list(subjective.get("felt", [])))
         if not state.subjective_state.meaning_made:
             state.subjective_state.meaning_made = self._normalize_observer_string_list(list(subjective.get("meaning_made", [])))
+        self._ensure_default_autonomy_runtime(state)
+
+    def apply_startup_unlock_preferences(self, state: RuntimeState) -> None:
+        self._apply_startup_unlock_preferences(state)
+
+    def initiative_status_from_state(self, state: RuntimeState) -> dict[str, Any]:
+        return self._initiative_status_payload(state)
+
+    def save_runtime_state(self, state: RuntimeState, *, sync: bool = False) -> None:
+        self._save_state(state, sync=sync)
+
+    def console_round_or_none(self) -> int | None:
+        return self._console_round_or_none()
+
+    def console_default_why_not_action(
+        self,
+        round_ref: int | str | None,
+        *,
+        action_field: dict[str, Any] | None = None,
+    ) -> str | None:
+        return self._console_default_why_not_action(round_ref, action_field=action_field)
+
+    def console_recent_rounds(self, *, limit: int = 12) -> list[dict[str, Any]]:
+        return self._console_recent_rounds(limit=limit)
+
+    def console_source_links(
+        self,
+        *,
+        round_id: int | None,
+        trace_ref: str | None,
+        why_not_action: str | None,
+    ) -> list[dict[str, Any]]:
+        return self._console_source_links(round_id=round_id, trace_ref=trace_ref, why_not_action=why_not_action)
 
     def update_observer_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
-        normalized = self._normalize_observer_settings(payload, base=self._observer_settings())
-        self.observer_settings_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
-        self.config = self._load_config()
-        self.model_router = ModelRouter.from_config(self.config["models"])
-        model_gateway_cfg = self.config["models"].get("models")
-        self.model_gateway = ModelGateway.from_config(model_gateway_cfg) if isinstance(model_gateway_cfg, dict) else None
-        self.identity_runtime = IdentityRuntime(self._identity_cfg(), self._provider_descriptor)
-        self.authenticity_policy = AuthenticityPolicy(self._identity_cfg())
-        state = self.load_runtime_state()
-        self._apply_startup_unlock_preferences(state)
-        self._save_state(state, sync=True)
-        return self.observer_settings_payload()
+        return self.state_runtime.update_observer_settings(payload)
 
     def state_payload(self) -> dict[str, Any]:
-        self.flush_pending_io(raise_on_error=False)
-        state = self.load_runtime_state()
-        self._sync_tlh_state(state)
-        self._sync_autonomy_state(state)
-        payload = to_dict(state)
-        payload["subjectivity"] = self._subjectivity_metrics()
-        payload["trace_storage"] = self._trace_storage_payload()
-        payload["memory_storage"] = self.memory_store.storage_status()
-        payload["runtime_storage"] = self.runtime_storage_status()
-        payload["migration"] = self.runtime_migration_report()
-        payload["entropy"] = self.entropy_pool.health_snapshot()
-        payload["dream"] = self.dream_status()
-        payload["cognitive_snapshot"] = self.cognitive_snapshot(state=state)
+        return self.state_runtime.state_payload()
+
+    def latest_runtime_metrics(self) -> dict[str, Any]:
+        return self.diagnostics_runtime.latest_runtime_metrics()
+
+    def runtime_performance_payload(self) -> dict[str, Any]:
+        return self.diagnostics_runtime.performance_payload()
+
+    def _initiative_state_bucket(self, state: RuntimeState) -> dict[str, Any]:
+        bucket = state.session_metadata.setdefault("initiative", {})
+        if not isinstance(bucket, dict):
+            bucket = {}
+            state.session_metadata["initiative"] = bucket
+        bucket["settings"] = self.initiative_runtime.merge_settings(bucket.get("settings"))
+        bucket["history"] = [
+            item
+            for item in list(bucket.get("history", []) or [])
+            if isinstance(item, dict)
+        ][-50:]
+        feedback = dict(bucket.get("feedback", {}) or {})
+        feedback["recent"] = [
+            item
+            for item in list(feedback.get("recent", []) or [])
+            if isinstance(item, dict)
+        ][-20:]
+        bucket["feedback"] = feedback
+        if not isinstance(bucket.get("last_evaluation"), dict):
+            bucket["last_evaluation"] = {}
+        bucket["last_evaluated_at"] = str(bucket.get("last_evaluated_at") or "")
+        bucket["last_evaluation_source"] = str(bucket.get("last_evaluation_source") or "")
+        return bucket
+
+    def _monologue_state_bucket(self, state: RuntimeState) -> dict[str, Any]:
+        bucket = state.session_metadata.setdefault("monologue_stream", {})
+        if not isinstance(bucket, dict):
+            bucket = {}
+            state.session_metadata["monologue_stream"] = bucket
+        normalized = self.monologue_runtime.ensure_bucket(bucket)
+        state.session_metadata["monologue_stream"] = normalized
+        return normalized
+
+    def _sync_monologue_stream(
+        self,
+        state: RuntimeState,
+        *,
+        mark_viewed: bool = False,
+        generate_if_due: bool = True,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        bucket = self._monologue_state_bucket(state)
+        if generate_if_due:
+            updated_bucket, generated = self.monologue_runtime.catch_up(
+                bucket,
+                now_iso=utc_now_iso(),
+                fragment_builder=self._generate_monologue_fragments_via_model,
+            )
+        else:
+            updated_bucket = self.monologue_runtime.ensure_bucket(bucket, now_iso=utc_now_iso())
+            generated = []
+        if mark_viewed:
+            updated_bucket["last_viewed_at"] = utc_now_iso()
+        state.session_metadata["monologue_stream"] = updated_bucket
+        self._save_state(state, sync=True)
+        return updated_bucket, generated
+
+    def _refresh_heartbeat_side_channels(self, state: RuntimeState) -> dict[str, Any]:
+        bucket, _generated = self._sync_monologue_stream(state, generate_if_due=False)
+        latest_view = self.trace_store.recent_round_signal_views(limit=1)
+        latest_recorded_at = latest_view[-1].get("recorded_at") if latest_view else None
+        initiative_bucket = self._initiative_state_bucket(state)
+        evaluation = self._initiative_distribution_payload(
+            state,
+            latest_recorded_at=latest_recorded_at,
+        )
+        initiative_bucket["last_evaluation"] = evaluation
+        initiative_bucket["last_evaluated_at"] = utc_now_iso()
+        initiative_bucket["last_evaluation_source"] = "heartbeat"
+        state.session_metadata["initiative"] = initiative_bucket
+        self._save_state(state, sync=True)
+        return {
+            "monologue_generated_total": int(bucket.get("generated_total", 0) or 0),
+            "initiative_ready": bool(evaluation.get("should_send")),
+        }
+
+    def _collect_monologue_stream_fragments(
+        self,
+        state: RuntimeState,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+        bucket = self._monologue_state_bucket(state)
+        updated_bucket, generated = self.monologue_runtime.catch_up(
+            bucket,
+            now_iso=utc_now_iso(),
+            fragment_builder=self._generate_monologue_fragments_via_model,
+        )
+        state.session_metadata["monologue_stream"] = updated_bucket
+        recent_fragments = list(generated[-3:] if generated else self.monologue_runtime.read_fragments(limit=3))
+        return updated_bucket, recent_fragments, generated
+
+    def _monologue_stream_trace_payload(
+        self,
+        *,
+        bucket: dict[str, Any],
+        recent_fragments: list[dict[str, Any]],
+        generated: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return {
+            "active": bool(recent_fragments),
+            "hidden_by_default": bool(dict(bucket.get("settings", {}) or {}).get("hidden_by_default", True)),
+            "fresh_generated": bool(generated),
+            "generated_total": int(bucket.get("generated_total", 0) or 0),
+            "last_generated_at": str(bucket.get("last_generated_at") or ""),
+            "recent_fragment_count": len(recent_fragments),
+            "sample_fragments": [
+                {
+                    "fragment_id": str(row.get("fragment_id") or ""),
+                    "recorded_at": str(row.get("recorded_at") or ""),
+                    "category": str(row.get("category") or ""),
+                    "content": str(row.get("content") or ""),
+                    "source": str(row.get("source") or ""),
+                }
+                for row in list(recent_fragments or [])[:2]
+            ],
+        }
+
+    def _build_monologue_stream_action_contribution(
+        self,
+        *,
+        state: RuntimeState,
+        scenario: str,
+        endogenous_turn: bool,
+    ) -> tuple[ProbabilisticContribution | None, dict[str, Any]]:
+        if not endogenous_turn or scenario == "task":
+            return None, {}
+        bucket, recent_fragments, generated = self._collect_monologue_stream_fragments(state)
+        trace_payload = self._monologue_stream_trace_payload(
+            bucket=bucket,
+            recent_fragments=recent_fragments,
+            generated=generated,
+        )
+        if not recent_fragments:
+            return None, trace_payload
+        fragment_count = len(recent_fragments)
+        blank_count = sum(
+            1
+            for row in recent_fragments
+            if str(row.get("category") or "") == "blank_fragment"
+            or not str(row.get("content") or "").strip().strip(".。!！?？… ")
+        )
+        blank_ratio = blank_count / max(fragment_count, 1)
+        freshness_bonus = 0.08 if generated else 0.03
+        score = _clip(0.18 + fragment_count * 0.14 + blank_ratio * 0.08 + freshness_bonus, 0.0, 1.0)
+        confidence = round(max(0.34, min(0.88, 0.4 + score * 0.3)), 4)
+        return ProbabilisticContribution(
+            module_name="MonologueStream",
+            module_type="monologue",
+            level="action",
+            target_space="action",
+            raw_signal={
+                "fragment_count": round(float(fragment_count), 6),
+                "blank_ratio": round(float(blank_ratio), 6),
+                "fresh_generated": round(float(1.0 if generated else 0.0), 6),
+            },
+            modulated_delta={
+                "monologue": round(0.14 + score * 0.32, 6),
+                "absorb": round(0.03 + score * 0.06, 6),
+                "respond": round(-0.02 * score, 6),
+                "nothing": round(-0.01 * score, 6),
+            },
+            confidence=confidence,
+            confidence_calibrated=confidence,
+            trace_reason="hidden monologue fragments re-enter the endogenous action field as low-weight internal speech pressure",
+            projection_reason="continuous hidden monologue stream projects a monologue candidate back into the unified action field",
+            applied_at_stage="monologue_stream",
+            native_operator="hidden_monologue_feedback",
+            dependency_trace=[
+                f"fragments:{fragment_count}",
+                f"blank_ratio:{round(blank_ratio, 4)}",
+                f"fresh:{1 if generated else 0}",
+            ],
+            projection=EnergyProjectionSpec(module_type="monologue", target_space="action", module_temperature=0.78),
+        ), trace_payload
+
+    def _generate_monologue_fragments_via_model(
+        self,
+        *,
+        seed: str,
+        pulse_index: int,
+        pulse_dt: str,
+        fragment_count: int,
+    ) -> list[dict[str, Any]]:
+        request = ModelRequest(
+            system_prompt=(
+                "你是一个隐藏意识流生成器。只返回 JSON:{fragments:[{content,category,source}] }。"
+                "生成彼此松散、碎片化、无明确任务指向的第一人称内在念头。"
+                "不要对用户说话，不要解释，不要总结，不要输出第二人称开头。"
+            ),
+            user_prompt=self._json_prompt(
+                {
+                    "seed": seed,
+                    "pulse_index": pulse_index,
+                    "pulse_dt": pulse_dt,
+                    "fragment_count": fragment_count,
+                    "categories": [
+                        "environment_notice",
+                        "free_association",
+                        "memory_fragment",
+                        "daydream",
+                        "blank_fragment",
+                    ],
+                }
+            ),
+            response_schema={"fragments": "list"},
+            metadata={
+                "seed": seed,
+                "pulse_index": pulse_index,
+                "fragment_count": fragment_count,
+            },
+        )
+        try:
+            response = self._call_bound_model_route(
+                "MonologueStream",
+                route_name="monologue_stream",
+                request=request,
+                skill_name="monologue_stream",
+            )
+        except Exception:
+            return []
+        payload = dict(getattr(response, "payload", {}) or {})
+        rows: list[dict[str, Any]] = []
+        for item in list(payload.get("fragments", []) or []):
+            if isinstance(item, str):
+                content = item.strip()
+                if not content:
+                    continue
+                rows.append({"content": content, "category": "model_fragment", "source": "model"})
+                continue
+            if not isinstance(item, dict):
+                continue
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            rows.append(
+                {
+                    "content": content,
+                    "category": str(item.get("category") or "model_fragment"),
+                    "source": str(item.get("source") or "model"),
+                }
+            )
+        return rows[: max(1, int(fragment_count or 1))]
+
+    def _initiative_active_session(self) -> dict[str, Any] | None:
+        try:
+            current = self.terminal_sessions.read_current()
+        except FileNotFoundError:
+            current = None
+        if current is not None and current.status == "active":
+            return to_dict(current)
+        for session in self.terminal_sessions.list_sessions():
+            if session.status == "active":
+                return to_dict(session)
+        return None
+
+    def _initiative_has_pending_approval(self, active_session: dict[str, Any] | None) -> bool:
+        if not isinstance(active_session, dict):
+            return False
+        approvals = [item for item in list(active_session.get("approvals_pending", []) or []) if isinstance(item, dict)]
+        return any(str(item.get("status") or "pending") == "pending" for item in approvals)
+
+    def _initiative_recent_history_stats(
+        self,
+        history: list[dict[str, Any]],
+        *,
+        now_iso: str,
+        settings: dict[str, Any],
+    ) -> dict[str, Any]:
+        now_dt = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
+        recent_hour = 0
+        last_auto_sent_at = None
+        for item in reversed(history):
+            if not item.get("auto_sent"):
+                continue
+            recorded_at = str(item.get("recorded_at") or "")
+            try:
+                recorded_dt = datetime.fromisoformat(recorded_at.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if last_auto_sent_at is None:
+                last_auto_sent_at = recorded_at
+            if (now_dt - recorded_dt).total_seconds() <= 3600:
+                recent_hour += 1
+        cooldown_remaining = 0
+        if last_auto_sent_at:
+            last_auto_dt = datetime.fromisoformat(last_auto_sent_at.replace("Z", "+00:00"))
+            cooldown_remaining = max(0, int(settings["cooldown_seconds"]) - int((now_dt - last_auto_dt).total_seconds()))
+        return {
+            "sent_last_hour": recent_hour,
+            "hourly_limit": int(settings["hourly_limit"]),
+            "cooldown_remaining_seconds": cooldown_remaining,
+            "last_auto_sent_at": last_auto_sent_at,
+        }
+
+    def _initiative_memory_backing(self, cue: str | None = None) -> dict[str, Any]:
+        if cue:
+            recall = self.memory_recall(cue)
+            if recall.get("found"):
+                return {
+                    "cue": recall.get("cue") or cue,
+                    "strength": round(float(recall.get("strength", 0.0) or 0.0), 4),
+                    "summary": recall.get("summary") or recall.get("cue") or cue,
+                }
+        top_memories = self.memory_top(limit=1)
+        if not top_memories:
+            return {}
+        top = dict(top_memories[0] or {})
+        return {
+            "cue": top.get("cue"),
+            "strength": round(
+                max(float(top.get("detail_strength", 0.0) or 0.0), float(top.get("gist_strength", 0.0) or 0.0)),
+                4,
+            ),
+            "summary": top.get("summary") or top.get("cue") or "",
+        }
+
+    def _initiative_distribution_payload(
+        self,
+        state: RuntimeState,
+        *,
+        relation_state: dict[str, Any] | None = None,
+        vitality_snapshot: dict[str, Any] | None = None,
+        cue: str | None = None,
+        memory_backing: dict[str, Any] | None = None,
+        latest_recorded_at: str | None = None,
+        current_goal: str | None = None,
+    ) -> dict[str, Any]:
+        bucket = self._initiative_state_bucket(state)
+        settings = self.initiative_runtime.merge_settings(bucket.get("settings"))
+        now_iso = utc_now_iso()
+        history = list(bucket.get("history", []) or [])
+        history_stats = self._initiative_recent_history_stats(history, now_iso=now_iso, settings=settings)
+        active_session = self._initiative_active_session()
+        pending_approval = self._initiative_has_pending_approval(active_session)
+        active_run_blocked = bool(state.active_run_id and state.run_status in {"running", "paused"})
+        idle_seconds = self.initiative_runtime.idle_seconds(latest_recorded_at, now_iso=now_iso)
+        vitality = dict(vitality_snapshot or {})
+        if not vitality:
+            vitality = {
+                "body_energy": round(float(state.body_energy or 0.0), 4),
+                "affect_residue": round(float(state.affect_residue or 0.0), 4),
+                "mood": round(float(state.mood or 0.0), 4),
+            }
+        relation = dict(relation_state or self.memory_store.relation_state("user"))
+        habit_strength = max((float(item.get("strength", 0.0) or 0.0) for item in self.habit_top(limit=1)), default=0.0)
+        resolved_memory_backing = dict(memory_backing or {})
+        if not resolved_memory_backing:
+            resolved_memory_backing = self._initiative_memory_backing(cue)
+        payload = self.initiative_runtime.evaluate(
+            settings=settings,
+            idle_seconds=idle_seconds,
+            vitality_snapshot=vitality,
+            relation_state=relation,
+            habit_strength=habit_strength,
+            memory_backing=resolved_memory_backing,
+            active_session=active_session,
+            pending_approval=pending_approval,
+            active_run_blocked=active_run_blocked,
+            safe_mode=bool(state.safe_mode),
+            recent_history=history,
+            current_goal=current_goal or state.current_goal,
+        )
+        hourly_limit = int(settings["hourly_limit"])
+        if hourly_limit > 0 and history_stats["sent_last_hour"] >= hourly_limit:
+            payload["should_send"] = False
+            payload["expression_mode"] = "silent"
+            payload["suppression_reason"] = "hourly_limit_reached"
+        elif history_stats["cooldown_remaining_seconds"] > 0:
+            payload["should_send"] = False
+            payload["expression_mode"] = "silent"
+            payload["suppression_reason"] = "cooldown_active"
+        payload["settings"] = settings
+        payload["active_session"] = active_session
+        payload["history_stats"] = history_stats
+        payload["auto_send_enabled"] = bool(settings["auto_send_enabled"])
+        payload["memory_backing"] = resolved_memory_backing
+        if not payload.get("should_send"):
+            payload["expression_mode"] = "silent"
         return payload
 
+    def _expressive_action_biases(
+        self,
+        payload: dict[str, Any],
+        *,
+        scenario: str,
+        endogenous_turn: bool,
+    ) -> dict[str, float]:
+        delta = {action: 0.0 for action in INTERNAL_RUNTIME_ACTIONS}
+        metrics = dict(payload.get("metrics", {}) or {})
+        top_intent = str(payload.get("top_intent") or "stay_silent")
+        expression_mode = str(payload.get("expression_mode") or "silent")
+        relation_strength = float(metrics.get("relation_strength", 0.0) or 0.0)
+        grounding_score = float(payload.get("grounding_score", 0.0) or 0.0)
+        speech_cost = float(payload.get("speech_cost", 0.0) or 0.0)
+        intrinsic_value = float(payload.get("intrinsic_value", 0.0) or 0.0)
+        external_drive = max(0.0, intrinsic_value - speech_cost)
+
+        if top_intent == "share_memory":
+            delta["recall"] += 0.06 + external_drive * 0.14
+            delta["connect"] += 0.02 + relation_strength * 0.04
+        elif top_intent == "check_relation":
+            delta["connect"] += 0.04 + relation_strength * 0.08
+            delta["clarify"] += 0.02 + external_drive * 0.08
+        elif top_intent == "express_state":
+            delta["respond"] += 0.04 + external_drive * 0.12
+            delta["connect"] += 0.02 + relation_strength * 0.05
+        elif top_intent == "follow_up_task":
+            delta["plan"] += 0.05 + external_drive * 0.14
+            delta["clarify"] += 0.02 + external_drive * 0.06
+        else:
+            delta["nothing"] += 0.04 + speech_cost * 0.06
+
+        if expression_mode == "external":
+            delta["respond"] += 0.04 + external_drive * 0.10
+        else:
+            delta["nothing"] += 0.03 + speech_cost * 0.08
+            delta["respond"] -= min(0.04, speech_cost * 0.04)
+            delta["connect"] -= min(0.03, speech_cost * 0.03)
+
+        if scenario == "task":
+            delta["plan"] += 0.01
+        if grounding_score < 0.25:
+            delta["respond"] -= 0.01
+            delta["connect"] -= 0.01
+
+        return {
+            action: round(value, 6)
+            for action, value in delta.items()
+            if abs(float(value)) > 0.0
+        }
+
+    def _build_expressive_action_contribution(
+        self,
+        *,
+        current_distribution: dict[str, float],
+        payload: dict[str, Any],
+        scenario: str,
+        endogenous_turn: bool,
+    ) -> ProbabilisticContribution | None:
+        modulated_delta = self._expressive_action_biases(
+            payload,
+            scenario=scenario,
+            endogenous_turn=endogenous_turn,
+        )
+        if not modulated_delta:
+            return None
+        adjusted_distribution = dict(current_distribution or {})
+        for action_name, delta in modulated_delta.items():
+            adjusted_distribution[action_name] = max(0.0, float(adjusted_distribution.get(action_name, 0.0) or 0.0) + float(delta))
+        return self._build_distribution_delta_contribution(
+            module_name="ExpressiveImpulse",
+            module_type="expression",
+            from_distribution=dict(current_distribution or {}),
+            to_distribution=self._normalize(adjusted_distribution),
+            trace_reason=(
+                f"expression_mode={payload.get('expression_mode', 'silent')} "
+                f"intent={payload.get('top_intent', 'stay_silent')} "
+                f"speech_cost={round(float(payload.get('speech_cost', 0.0) or 0.0), 4)}"
+            ),
+            projection_reason="expressive impulse projected into unified action field",
+            applied_at_stage="expressive_field",
+            native_operator="expressive_reweight",
+            dependency_trace=[
+                f"proposal_type:{payload.get('proposal_type', 'speak')}",
+                f"expression_mode:{payload.get('expression_mode', 'silent')}",
+                f"grounding_score:{round(float(payload.get('grounding_score', 0.0) or 0.0), 4)}",
+                f"endogenous:{str(bool(endogenous_turn)).lower()}",
+            ],
+            confidence=max(0.35, min(1.0, float(payload.get("intrinsic_value", 0.0) or 0.0) + 0.2)),
+        )
+
+    def _initiative_status_payload(self, state: RuntimeState) -> dict[str, Any]:
+        bucket = self._initiative_state_bucket(state)
+        latest_view = self.trace_store.recent_round_signal_views(limit=1)
+        distribution = self._initiative_distribution_payload(
+            state,
+            latest_recorded_at=latest_view[-1].get("recorded_at") if latest_view else None,
+        )
+        feedback = dict(bucket.get("feedback", {}) or {})
+        recent_feedback = list(feedback.get("recent", []) or [])
+        return {
+            "settings": distribution["settings"],
+            "ready": bool(distribution.get("should_send")),
+            "last_evaluated_at": bucket.get("last_evaluated_at"),
+            "last_evaluation_source": bucket.get("last_evaluation_source"),
+            "last_evaluation": dict(bucket.get("last_evaluation", {}) or {}),
+            "proposal": {
+                "proposal_id": distribution.get("proposal_id"),
+                "proposal_type": distribution.get("proposal_type"),
+                "expression_mode": distribution.get("expression_mode"),
+                "top_intent": distribution.get("top_intent"),
+                "posterior": distribution.get("posterior", {}),
+                "readiness": distribution.get("readiness", 0.0),
+                "intrinsic_value": distribution.get("intrinsic_value", 0.0),
+                "speech_cost": distribution.get("speech_cost", 0.0),
+                "suppression_reason": distribution.get("suppression_reason", ""),
+                "should_send": distribution.get("should_send", False),
+                "target_session_id": distribution.get("target_session_id"),
+            },
+            "history": list(bucket.get("history", []) or [])[-10:],
+            "history_stats": distribution.get("history_stats", {}),
+            "feedback": {
+                "recent_count": len(recent_feedback),
+                "last_response": recent_feedback[-1] if recent_feedback else None,
+            },
+        }
+
+    def initiative_status(self) -> dict[str, Any]:
+        state = self.load_runtime_state()
+        return self._initiative_status_payload(state)
+
+    def initiative_distribution(self) -> dict[str, Any]:
+        state = self.load_runtime_state()
+        latest_view = self.trace_store.recent_round_signal_views(limit=1)
+        return self._initiative_distribution_payload(
+            state,
+            latest_recorded_at=latest_view[-1].get("recorded_at") if latest_view else None,
+        )
+
+    def monologue_status(self) -> dict[str, Any]:
+        state = self.load_runtime_state()
+        bucket, _generated = self._sync_monologue_stream(state)
+        return self.monologue_runtime.status_payload(bucket)
+
+    def monologue_status_lightweight(self) -> dict[str, Any]:
+        state = self.load_runtime_state()
+        bucket, _generated = self._sync_monologue_stream(state, generate_if_due=False)
+        return self.monologue_runtime.status_payload(bucket)
+
+    def monologue_show(self, limit: int | None = None) -> dict[str, Any]:
+        state = self.load_runtime_state()
+        bucket, _generated = self._sync_monologue_stream(state, mark_viewed=True)
+        return self.monologue_runtime.show_payload(bucket, limit=limit)
+
+    def monologue_show_lightweight(self, limit: int | None = None) -> dict[str, Any]:
+        state = self.load_runtime_state()
+        bucket, _generated = self._sync_monologue_stream(state, mark_viewed=True, generate_if_due=False)
+        return self.monologue_runtime.show_payload(bucket, limit=limit)
+
+    def _initiative_force_settings(self, settings: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.initiative_runtime.merge_settings(
+            settings,
+            {
+                "idle_seconds_threshold": 0,
+                "vitality_threshold": 0.0,
+                "relation_strength_threshold": 0.0,
+                "habit_strength_threshold": 0.0,
+                "proposal_posterior_threshold": 0.0,
+                "hourly_limit": 0,
+                "cooldown_seconds": 0,
+                "require_memory_backing": False,
+            },
+        )
+
+    def initiative_update_settings(self, **settings: Any) -> dict[str, Any]:
+        state = self.load_runtime_state()
+        bucket = self._initiative_state_bucket(state)
+        bucket["settings"] = self.initiative_runtime.merge_settings(bucket.get("settings"), settings)
+        self._save_state(state, sync=True)
+        return self._initiative_status_payload(state)
+
+    def initiative_why(self, round_ref: int | str = "last") -> dict[str, Any]:
+        trace = self.trace_round(round_ref)
+        return {
+            "round_id": trace.get("round_id"),
+            "trace_ref": trace.get("trace_ref"),
+            "initiative": trace.get("initiative", {}),
+            "summary": str(dict(trace.get("initiative", {}) or {}).get("suppression_reason") or "initiative why"),
+        }
+
+    def initiative_trigger_now(self, *, trigger: str = "idle", mode: str | None = None, force: bool = False) -> dict[str, Any]:
+        original_settings: dict[str, Any] | None = None
+        had_settings = False
+        if force:
+            forced_state = self.load_runtime_state()
+            bucket = self._initiative_state_bucket(forced_state)
+            had_settings = isinstance(bucket.get("settings"), dict)
+            original_settings = dict(bucket.get("settings", {}) or {})
+            bucket["settings"] = self._initiative_force_settings(bucket.get("settings"))
+            self._save_state(forced_state, sync=True)
+        try:
+            preflight = self.initiative_distribution()
+            tick_payload = self.run_endogenous_tick(trigger=trigger, mode=mode or "endogenous_light")
+        finally:
+            if force:
+                restore_state = self.load_runtime_state()
+                bucket = self._initiative_state_bucket(restore_state)
+                if had_settings:
+                    bucket["settings"] = dict(original_settings or {})
+                else:
+                    bucket.pop("settings", None)
+                self._save_state(restore_state, sync=True)
+        proposal = dict(tick_payload.get("initiative") or preflight)
+        return {
+            "trigger": trigger,
+            "distribution": preflight,
+            "tick": tick_payload,
+            "proposal": proposal,
+            "auto_sent": bool(proposal.get("auto_sent", False)),
+            "forced": bool(force),
+        }
+
+    def thought_snapshot(self, round_ref: int | str = "last") -> dict[str, Any]:
+        trace = self.trace_round(round_ref)
+        why = self.why_this(round_ref)
+        action_field = self.console_action_field(round_ref)
+        timeline = self.console_timeline(round_ref)
+        return {
+            "round_id": trace.get("round_id"),
+            "trace_ref": trace.get("trace_ref"),
+            "sampled_action": trace.get("sampled_action"),
+            "thought_summary": {
+                "why_summary": str((why.get("sampled_action") or trace.get("sampled_action") or "暂无")),
+                "conflict_mode": str(dict(trace.get("conflict_arbitration", {}) or {}).get("conflict_mode") or ""),
+                "top_intent": str(dict(trace.get("initiative", {}) or {}).get("top_intent") or ""),
+            },
+            "top_drivers": why.get("top_drivers", []),
+            "why": why,
+            "action_field": action_field,
+            "timeline": timeline,
+            "initiative": trace.get("initiative", {}),
+            "expressive_trace": trace.get("expressive_trace", trace.get("initiative", {})),
+            "rendered_expression": trace.get("rendered_expression", {}),
+            "storage": trace.get("storage", self.trace_storage_status()),
+        }
+
+    def empty_thought_payload(self, round_ref: int | str | None = None) -> dict[str, Any]:
+        return {
+            "round_id": round_ref if isinstance(round_ref, int) else None,
+            "trace_ref": None,
+            "sampled_action": "nothing",
+            "thought_summary": {
+                "why_summary": "暂无",
+                "conflict_mode": "",
+                "top_intent": "",
+            },
+            "top_drivers": [],
+            "why": self.empty_why_payload(round_ref),
+            "action_field": {
+                "round_id": round_ref if isinstance(round_ref, int) else None,
+                "trace_ref": None,
+                "top_actions": [],
+                "winner": {"action": None, "score": 0.0},
+                "winner_posterior": {},
+                "conflict": {},
+                "token_field": {},
+                "contribution_stack": [],
+                "competing_peaks": [],
+            },
+            "timeline": {
+                "round_id": round_ref if isinstance(round_ref, int) else None,
+                "trace_ref": None,
+                "events": [],
+            },
+            "initiative": {},
+            "expressive_trace": {},
+            "rendered_expression": {},
+            "storage": self.trace_storage_status(),
+            "message": "无决策记录",
+        }
+
+    def _record_initiative_feedback_delta(self, text: str) -> float:
+        positive_tokens = ("好", "可以", "继续", "想", "愿意", "谢谢", "ok", "yes", "sure", "love")
+        negative_tokens = ("不要", "别", "停", "烦", "no", "stop", "later")
+        lowered = text.lower()
+        if any(token in text for token in positive_tokens) or any(token in lowered for token in positive_tokens):
+            return 0.05
+        if any(token in text for token in negative_tokens) or any(token in lowered for token in negative_tokens):
+            return -0.05
+        return 0.01
+
+    def record_initiative_feedback(self, text: str, *, session_id: str | None = None, target: str = "user") -> dict[str, Any]:
+        state = self.load_runtime_state()
+        bucket = self._initiative_state_bucket(state)
+        history = list(bucket.get("history", []) or [])
+        pending = next(
+            (
+                item
+                for item in reversed(history)
+                if item.get("auto_sent") and not item.get("feedback_recorded") and (session_id is None or item.get("session_id") == session_id)
+            ),
+            None,
+        )
+        if pending is None:
+            return {"recorded": False}
+        delta = self._record_initiative_feedback_delta(text)
+        self.memory_store.nudge_relation(target, delta)
+        cue = str(dict(pending.get("memory_backing", {}) or {}).get("cue") or "")
+        if cue:
+            self.memory_store.update_habit_strength(cue, delta, round_id=state.round_count)
+        intent = str(pending.get("top_intent") or "initiative")
+        state.desire_state.latent_drives[intent] = round(float(state.desire_state.latent_drives.get(intent, 0.0) or 0.0) + delta, 6)
+        state.motivation_learning_state.endogenous_policy_shift[intent] = round(
+            float(state.motivation_learning_state.endogenous_policy_shift.get(intent, 0.0) or 0.0) + delta,
+            6,
+        )
+        pending["feedback_recorded"] = True
+        pending["response_preview"] = text[:120]
+        response = {
+            "initiative_response_to": pending.get("proposal_id"),
+            "recorded_at": utc_now_iso(),
+            "session_id": session_id,
+            "relation_delta": round(delta, 4),
+            "habit_cue": cue or None,
+            "response_preview": text[:120],
+        }
+        feedback = dict(bucket.get("feedback", {}) or {})
+        feedback["recent"] = [*list(feedback.get("recent", []) or []), response][-20:]
+        bucket["feedback"] = feedback
+        bucket["history"] = history
+        self._save_state(state, sync=True)
+        return {"recorded": True, **response}
+
+    def _dispatch_initiative_to_session(self, proposal: dict[str, Any], text: str) -> tuple[bool, str | None]:
+        session_id = str(proposal.get("target_session_id") or "").strip()
+        if not session_id or not text.strip():
+            return False, None
+        try:
+            session = self.terminal_sessions.read(session_id)
+        except FileNotFoundError:
+            return False, None
+        session.transcript_lines.append(
+            {
+                "kind": "assistant",
+                "text": text.strip(),
+                "recorded_at": utc_now_iso(),
+                "delivery_mode": "speech",
+                "initiative_proposal_id": proposal.get("proposal_id"),
+            }
+        )
+        self.terminal_sessions.write(session)
+        return True, session_id
+
+    def _record_initiative_outcome(
+        self,
+        *,
+        round_id: int,
+        recorded_at: str,
+        proposal: dict[str, Any],
+        message: str,
+        auto_sent: bool,
+        session_id: str | None,
+    ) -> dict[str, Any]:
+        state = self.load_runtime_state()
+        bucket = self._initiative_state_bucket(state)
+        history = list(bucket.get("history", []) or [])
+        entry = {
+            **dict(proposal or {}),
+            "round_id": round_id,
+            "recorded_at": recorded_at,
+            "message": message,
+            "auto_sent": bool(auto_sent),
+            "session_id": session_id,
+            "feedback_recorded": False,
+        }
+        history.append(entry)
+        bucket["history"] = history[-50:]
+        bucket["last_proposal"] = entry
+        if auto_sent:
+            bucket["last_auto_send"] = entry
+        else:
+            bucket["last_suppressed"] = entry
+        self._save_state(state, sync=True)
+        return entry
+
     def autonomy_status(self) -> dict[str, Any]:
+        return self._autonomy_status_payload(include_diagnostics=True)
+
+    def autonomy_runtime_status(self) -> dict[str, Any]:
+        return self._autonomy_status_payload(include_diagnostics=False)
+
+    def _autonomy_status_payload(self, *, include_diagnostics: bool) -> dict[str, Any]:
         state = self.load_runtime_state()
         self._sync_autonomy_state(state)
         self._ensure_autonomy_window(state)
         policy = state.autonomy_policy
         loop = state.autonomy_loop
-        return {
+        payload = {
             "enabled": bool(policy.enabled),
             "running": bool(loop.running and policy.enabled),
             "profile": loop.profile or policy.profile,
@@ -8609,6 +10638,22 @@ class RuntimeController:
             "allowed_commands": list(policy.allowed_commands),
             "blocked_commands": list(policy.blocked_commands),
             "recent_actions": list(loop.recent_actions),
+        }
+        if not include_diagnostics:
+            return payload
+
+        field_probe = self._autonomy_action_field_probe()
+        candidate_scores = {
+            name: round(float(score or 0.0), 6)
+            for name, score in self._autonomy_projected_candidate_scores(state, policy, field_probe).items()
+        }
+        candidate_peak = max(candidate_scores, key=candidate_scores.get)
+        return {
+            **payload,
+            "decision_surface": "autonomy_action_field_probe" if field_probe else "autonomy_candidate_competition",
+            "field_probe_top_action": str(field_probe.get("top_action") or "") if isinstance(field_probe, dict) else "",
+            "candidate_scores": candidate_scores,
+            "candidate_peak": candidate_peak,
         }
 
     def start_autonomy(self, profile: str = "tool_level", *, clear_safe_mode: bool = False) -> dict[str, Any]:
@@ -8626,6 +10671,7 @@ class RuntimeController:
         state.autonomy_loop.window_started_at = datetime.now(timezone.utc).isoformat()
         state.autonomy_loop.window_tool_actions = 0
         state.autonomy_loop.window_endogenous_rounds = 0
+        state.session_metadata["autonomy_user_disabled"] = False
         self._append_autonomy_recent_action(
             state,
             action_type="start",
@@ -8640,6 +10686,8 @@ class RuntimeController:
         state.autonomy_policy.enabled = False
         state.autonomy_loop.running = False
         state.autonomy_loop.stop_reason = str(reason or "manual_stop")
+        if state.autonomy_loop.stop_reason in {"manual_stop", "user_stop", "operator_stop"}:
+            state.session_metadata["autonomy_user_disabled"] = True
         self._append_autonomy_recent_action(
             state,
             action_type="stop",
@@ -8672,26 +10720,44 @@ class RuntimeController:
             self._append_autonomy_recent_action(state, action_type="stop", summary="autonomy stopped by exhausted budget")
             self._save_state(state, sync=True)
             return self.autonomy_status()
-        if loop.window_endogenous_rounds >= policy.max_rounds_per_hour:
+        if policy.max_rounds_per_hour > 0 and loop.window_endogenous_rounds >= policy.max_rounds_per_hour:
             state.autonomy_policy.enabled = False
             state.autonomy_loop.running = False
             state.autonomy_loop.stop_reason = "round_budget_reached"
             self._append_autonomy_recent_action(state, action_type="stop", summary="autonomy stopped by round budget")
             self._save_state(state, sync=True)
             return self.autonomy_status()
-        if loop.window_tool_actions >= policy.max_tool_actions_per_hour:
+        if policy.max_tool_actions_per_hour > 0 and loop.window_tool_actions >= policy.max_tool_actions_per_hour:
             state.autonomy_policy.enabled = False
             state.autonomy_loop.running = False
             state.autonomy_loop.stop_reason = "tool_budget_reached"
             self._append_autonomy_recent_action(state, action_type="stop", summary="autonomy stopped by tool budget")
             self._save_state(state, sync=True)
             return self.autonomy_status()
+        self._refresh_heartbeat_side_channels(state)
+        state = self.load_runtime_state()
+        self._sync_autonomy_state(state)
+        self._ensure_autonomy_window(state)
+        policy = state.autonomy_policy
+        loop = state.autonomy_loop
         current_hour = time.localtime().tm_hour
         if current_hour in policy.quiet_hours:
             state.autonomy_loop.heartbeat_count += 1
             self._append_autonomy_recent_action(state, action_type="quiet", summary="quiet-hours heartbeat")
             self._save_state(state, sync=True)
             return self.autonomy_status()
+
+        action = self._autonomy_candidate_action(state, policy)
+        if action == "rest":
+            state.autonomy_loop.heartbeat_count += 1
+            recovery = self._autonomy_rest_realization(state, policy)
+            if recovery is not None:
+                if recovery.get("kind") == "dream":
+                    return self._autonomy_run_dream_pass(state)
+                return self._autonomy_after_command_step(
+                    self._autonomy_execute_command(str(recovery.get("command") or ""))
+                )
+            return self._autonomy_after_command_step(self._autonomy_execute_command("body rest"))
 
         context, relation_state, slow_variables = self._autonomy_step_context(state)
         trigger = self.endogenous_scheduler.build_trigger(
@@ -8726,26 +10792,6 @@ class RuntimeController:
                 self._save_state(state, sync=True)
                 return self.autonomy_status()
 
-            if state.mode in {"idle", "sleep"} and self._autonomy_command_allowed("dream run", policy)[0]:
-                dream_status = self.dream_status()
-                if dream_status.get("enabled"):
-                    dream_payload = self.run_dream(mode=state.mode)
-                    state = self.load_runtime_state()
-                    self._sync_autonomy_state(state)
-                    self._ensure_autonomy_window(state)
-                    state.autonomy_loop.heartbeat_count += 1
-                    state.autonomy_loop.total_tool_actions += 1
-                    state.autonomy_loop.window_tool_actions += 1
-                    self._append_autonomy_recent_action(
-                        state,
-                        action_type="dream_pass",
-                        summary=f"dream pass in {state.mode}",
-                        trace_ref=str(dream_payload.get("trace_ref") or ""),
-                    )
-                    self._save_state(state, sync=True)
-                    return self.autonomy_status()
-
-            action = self._autonomy_candidate_action(state)
             state.autonomy_loop.heartbeat_count += 1
             if action == "die":
                 if policy.auto_safe_mode:
@@ -8767,10 +10813,6 @@ class RuntimeController:
                 )
                 self._save_state(state, sync=True)
                 return self.autonomy_status()
-
-            if action == "rest":
-                return self._autonomy_after_command_step(self._autonomy_execute_command("body rest"))
-
             if action == "absorb":
                 payload = self.memory_top(limit=3)
                 state.autonomy_loop.total_tool_actions += 1
@@ -8809,6 +10851,15 @@ class RuntimeController:
                 self._save_state(state, sync=True)
                 return self.autonomy_status()
 
+            if action == "self_run":
+                pending_progress = self._autonomy_pending_readonly_repo_scan(state, policy)
+                if pending_progress is not None:
+                    return self._autonomy_continue_readonly_run(
+                        str(pending_progress.get("run_id") or ""),
+                        str(pending_progress.get("call_id") or ""),
+                    )
+                return self._autonomy_start_readonly_run(self._autonomy_self_run_goal(state))
+
             self._append_autonomy_recent_action(state, action_type="nothing", summary="no outward autonomy action this heartbeat")
             self._autonomy_trace_append(
                 state,
@@ -8828,83 +10879,154 @@ class RuntimeController:
     def _autonomy_after_command_step(self, result: dict[str, Any]) -> dict[str, Any]:
         state = self.load_runtime_state()
         self._sync_autonomy_state(state)
-        if not result.get("allowed", False):
-            self._save_state(state, sync=True)
+        state.autonomy_loop.heartbeat_count += 1
+        self._save_state(state, sync=True)
         return self.autonomy_status()
+
+    def _autonomy_run_dream_pass(self, state: RuntimeState) -> dict[str, Any]:
+        dream_payload = self.run_dream(mode=state.mode)
+        state = self.load_runtime_state()
+        self._sync_autonomy_state(state)
+        self._ensure_autonomy_window(state)
+        state.autonomy_loop.heartbeat_count += 1
+        state.autonomy_loop.total_tool_actions += 1
+        state.autonomy_loop.window_tool_actions += 1
+        self._append_autonomy_recent_action(
+            state,
+            action_type="dream_pass",
+            summary=f"dream pass in {state.mode}",
+            trace_ref=str(dream_payload.get("trace_ref") or ""),
+        )
+        self._save_state(state, sync=True)
+        return self.autonomy_status()
+
+    def _autonomy_self_run_goal(self, state: RuntimeState) -> str:
+        model_goal = self._generate_autonomy_self_run_goal_via_model(state)
+        if model_goal:
+            return model_goal
+        continuity_gap = max(0.0, 0.58 - float(state.self_continuity or 0.0))
+        meaning_gap = max(0.0, 0.44 - float(state.meaning_strength or 0.0))
+        memory_pull = float(state.memory_fragments or 0.0)
+        if continuity_gap >= meaning_gap and continuity_gap >= memory_pull * 0.8:
+            return "Inspect recent runtime traces, continuity drift, and memory pressure, then identify the next read-only stabilizing step."
+        if memory_pull >= 0.34:
+            return "Inspect recent runtime traces and surfaced memory fragments, then identify the next read-only organizing step."
+        return "Inspect the repository and current runtime state, then identify the next read-only self-directed step."
+
+    def _autonomy_continue_readonly_run_directive(
+        self,
+        state: RuntimeState,
+        policy: AutonomyPolicyState,
+    ) -> dict[str, str] | None:
+        pending = self._autonomy_pending_readonly_repo_scan(state, policy)
+        if pending is None:
+            return None
+        return {"kind": "repo_scan_approval", **pending}
+
+    def _autonomy_start_readonly_run(self, goal: str) -> dict[str, Any]:
+        run_payload = self.start_run(
+            goal,
+            allow_commit=False,
+            operator_level="read_only",
+            include_details=False,
+            sync_hot_path=True,
+            defer_bootstrap_tool=True,
+        )
+        state = self.load_runtime_state()
+        self._sync_autonomy_state(state)
+        self._ensure_autonomy_window(state)
+        state.autonomy_loop.heartbeat_count += 1
+        state.autonomy_loop.total_tool_actions += 1
+        state.autonomy_loop.window_tool_actions += 1
+        summary = str(run_payload.get("goal_summary") or run_payload.get("goal") or goal).strip()
+        trace_ref = str(run_payload.get("trace_ref") or "")
+        self._append_autonomy_recent_action(
+            state,
+            action_type="self_run",
+            summary=f"autonomy self-study: {summary}",
+            trace_ref=trace_ref or None,
+        )
+        self._autonomy_trace_append(
+            state,
+            action_type="self_run",
+            summary=summary,
+            delta={
+                "run_id": run_payload.get("run_id"),
+                "goal": goal,
+                "status": run_payload.get("status"),
+                "trace_ref": trace_ref,
+            },
+        )
+        self._save_state(state, sync=True)
+        return self.autonomy_status()
+
+    def _autonomy_continue_readonly_run(self, run_id: str, call_id: str) -> dict[str, Any]:
+        payload = self.resolve_run_tool_approval(run_id, call_id, approved=True)
+        state = self.load_runtime_state()
+        self._sync_autonomy_state(state)
+        self._ensure_autonomy_window(state)
+        state.autonomy_loop.heartbeat_count += 1
+        state.autonomy_loop.total_tool_actions += 1
+        state.autonomy_loop.window_tool_actions += 1
+        tool = dict(payload.get("tool", {}) or {})
+        summary = f"auto-approved {str(tool.get('tool_name') or 'tool')} for read-only run"
+        self._append_autonomy_recent_action(
+            state,
+            action_type="self_run_tool",
+            summary=summary,
+            trace_ref=str((payload.get("run") or {}).get("trace_ref") or ""),
+        )
+        self._autonomy_trace_append(
+            state,
+            action_type="self_run_tool",
+            summary=summary,
+            delta={
+                "run_id": run_id,
+                "call_id": call_id,
+                "tool_name": tool.get("tool_name"),
+                "tool_status": tool.get("status"),
+            },
+        )
+        self._save_state(state, sync=True)
+        return self.autonomy_status()
+
+    def _autonomy_rest_realization(
+        self,
+        state: RuntimeState,
+        policy: AutonomyPolicyState,
+    ) -> dict[str, str] | None:
+        energy = float(state.body_energy if state.body_energy is not None else state.body_state.energy)
+        fatigue = float(state.fatigue if state.fatigue is not None else state.body_state.fatigue)
+        severe = fatigue >= 0.94 or energy <= 0.08
+        high = fatigue >= 0.82 or energy <= 0.18
+        elevated = fatigue >= 0.68 or energy <= 0.28
+
+        if severe:
+            if state.mode == "sleep" and self._autonomy_command_allowed("dream run", policy)[0]:
+                dream_status = self.dream_status()
+                if dream_status.get("enabled"):
+                    return {"kind": "dream"}
+            if state.mode != "sleep" and self._autonomy_command_allowed("mode set sleep", policy)[0]:
+                return {"kind": "command", "command": "mode set sleep"}
+        if high and state.mode != "idle" and self._autonomy_command_allowed("mode set idle", policy)[0]:
+            return {"kind": "command", "command": "mode set idle"}
+        if elevated and self._autonomy_command_allowed("body rest", policy)[0]:
+            return {"kind": "command", "command": "body rest"}
+        return None
 
     def _console_round_or_none(self) -> int | None:
         round_count = int(self.load_runtime_state().round_count or 0)
         return round_count if round_count > 0 else None
 
     def console_state(self) -> dict[str, Any]:
-        payload = self.state_payload()
-        cognitive = dict(payload.get("cognitive_snapshot", {}) or {})
-        vital_signs = dict(cognitive.get("vital_signs", {}) or {})
-        identity = dict(cognitive.get("identity", {}) or {})
-        authenticity = dict(cognitive.get("authenticity", {}) or {})
-        round_id = self._console_round_or_none()
-        current_round = None
-        latest_trace = None
-        if round_id is not None:
-            latest_trace = self.trace_round(round_id)
-            rendered_expression = dict(latest_trace.get("rendered_expression", {}) or {})
-            current_round = {
-                "round_id": latest_trace["round_id"],
-                "sampled_action": latest_trace.get("sampled_action"),
-                "trace_ref": latest_trace.get("trace_ref"),
-                "cause_type": latest_trace.get("cause_type"),
-                "render_route": rendered_expression.get("route"),
-                "render_model": rendered_expression.get("model"),
-                "render_degraded": bool(rendered_expression.get("degraded", False)),
-                "failure_policy_applied": rendered_expression.get("failure_policy_applied"),
-                "model_call_count": len(list(latest_trace.get("model_call_traces", []) or [])),
-            }
-        try:
-            run = self.run_status()
-        except FileNotFoundError:
-            if current_round is not None:
-                run = {
-                    "status": "responded",
-                    "round_id": current_round["round_id"],
-                    "trace_ref": current_round.get("trace_ref"),
-                }
-            else:
-                run = {"status": "idle", "round_id": None, "trace_ref": None}
-        return {
-            "brain_state": {
-                "mode": vital_signs.get("mode") or payload.get("mode"),
-                "vitality": vital_signs.get("body_energy"),
-                "self_continuity": identity.get("continuity"),
-                "authenticity_pressure": authenticity.get("summary"),
-                "long_run_drift_risk": None,
-            },
-            "neuromodulators": {
-                "dopamine": None,
-                "noradrenaline": None,
-                "serotonin": None,
-                "acetylcholine": None,
-                "gaba": None,
-            },
-            "motivation_pool": dict(latest_trace.get("motivation_pool", {}) or {}) if isinstance(latest_trace, dict) else {},
-            "long_run": {
-                "dream": payload.get("dream", {}),
-                "trace_storage": payload.get("trace_storage", {}),
-            },
-            "current_round": current_round,
-            "session": {
-                "session_id": payload.get("session_id"),
-                "mode": payload.get("mode"),
-                "safe_mode": payload.get("safe_mode"),
-            },
-            "run": run,
-            "cognitive_snapshot": cognitive,
-        }
+        return self.diagnostics_runtime.console_state()
 
     def console_action_field(self, round_ref: int | str | None = None) -> dict[str, Any]:
         effective_round = self.resolve_round_ref(round_ref)
         why_payload = self.why_this(effective_round)
         probability_payload = self.trace_probability_field(effective_round)
         contribution_payload = self.contribution_breakdown(effective_round)
+        initiative_payload = dict(why_payload.get("initiative", {}) or {})
         explanation = dict(why_payload.get("action_probability_explanation", {}) or {})
         winner_target = explanation.get("winner_target") or why_payload.get("sampled_action")
         winner_posterior = dict(explanation.get("winner_posterior", {}) or {})
@@ -8931,6 +11053,13 @@ class RuntimeController:
             "token_field": probability_payload.get("token_state", {}),
             "contribution_stack": explanation.get("stacked_contributions", contribution_payload.get("contributions", [])),
             "competing_peaks": competing_peaks,
+            "expressive": {
+                "expression_mode": initiative_payload.get("expression_mode"),
+                "proposal_type": initiative_payload.get("proposal_type"),
+                "speech_cost": initiative_payload.get("speech_cost"),
+                "intrinsic_value": initiative_payload.get("intrinsic_value"),
+                "grounded_in": initiative_payload.get("grounded_in", {}),
+            },
         }
 
     def console_timeline(self, round_ref: int | str | None = None) -> dict[str, Any]:
@@ -9005,6 +11134,8 @@ class RuntimeController:
     def console_why_current(self, round_ref: int | str | None = None) -> dict[str, Any]:
         effective_round = self.resolve_round_ref(round_ref)
         payload = self.why_this(effective_round)
+        initiative_payload = dict(payload.get("initiative", {}) or {})
+        expressive_trace = dict(payload.get("expressive_trace", initiative_payload) or {})
         return {
             "round_id": payload["round_id"],
             "trace_ref": f"round://{payload['round_id']}",
@@ -9014,6 +11145,14 @@ class RuntimeController:
                 "top_drivers": payload.get("top_drivers", []),
                 "vitality_snapshot": payload.get("vitality_snapshot", {}),
                 "authenticity": payload.get("authenticity", {}),
+                "initiative": {
+                    "expression_mode": initiative_payload.get("expression_mode"),
+                    "proposal_type": initiative_payload.get("proposal_type"),
+                    "top_intent": initiative_payload.get("top_intent"),
+                    "speech_cost": initiative_payload.get("speech_cost"),
+                    "intrinsic_value": initiative_payload.get("intrinsic_value"),
+                },
+                "expressive_trace": expressive_trace,
             },
         }
 
@@ -9030,8 +11169,35 @@ class RuntimeController:
                 "blocked_by": payload.get("blocked_by", []),
                 "competing_peaks": payload.get("competing_peaks", []),
                 "stacked_contributions": payload.get("stacked_contributions", []),
+                "expressive_trace": payload.get("expressive_trace", {}),
+                "summary": payload.get("summary", ""),
             },
         }
+
+    def _why_not_summary(
+        self,
+        *,
+        action: str,
+        selected_action: str,
+        candidate_score: float,
+        blocked_by: list[str],
+        expressive_trace: dict[str, Any],
+    ) -> str:
+        normalized_action = str(action or "").strip()
+        selected = str(selected_action or "").strip()
+        if not normalized_action:
+            return "没有候选动作。"
+        if normalized_action == "monologue":
+            monologue_stream = dict(expressive_trace.get("monologue_stream", {}) or {})
+            fragment_count = int(monologue_stream.get("recent_fragment_count", 0) or 0)
+            if selected == "monologue":
+                return f"这轮独白胜出，隐藏独白流提供了 {fragment_count} 条最近碎片作为内部表达压力。"
+            blocker_text = "、".join(blocked_by[:3]) if blocked_by else "其他动作后验更高"
+            return f"这轮独白没有胜出；虽然隐藏独白流仍在提供 {fragment_count} 条碎片，但最终被 {selected or '其他动作'} 压过。阻力主要来自 {blocker_text}。"
+        if selected == normalized_action:
+            return f"{normalized_action} 就是本轮最终动作。"
+        blocker_text = "、".join(blocked_by[:3]) if blocked_by else "没有明确阻断，只是后验不足"
+        return f"{normalized_action} 没有胜出，最终由 {selected or '其他动作'} 占优。当前候选分数为 {round(float(candidate_score or 0.0), 4)}，主要阻力是 {blocker_text}。"
 
     def _console_default_why_not_action(
         self,
@@ -9052,8 +11218,18 @@ class RuntimeController:
         return None
 
     def _console_recent_rounds(self, *, limit: int = 12) -> list[dict[str, Any]]:
-        rounds = list(self.metrics_timeline().get("rounds", []) or [])
-        return rounds[-limit:]
+        rows = self.trace_store.recent_rounds(limit=limit)
+        return [
+            {
+                "round_id": row["round_id"],
+                "sampled_action": row["sampled_action"],
+                "mode": row["mode"],
+                "budget_remaining": row.get("state_snapshot", {}).get("budget_remaining"),
+                "conflict_score": (row.get("conflict_arbitration", {}) or {}).get("total_score", 0.0),
+                "cause_type": row.get("cause_type", "external_stimulus"),
+            }
+            for row in rows
+        ]
 
     def _console_source_links(
         self,
@@ -9080,6 +11256,8 @@ class RuntimeController:
             link("subjective_state", "/console/state", "RuntimeController.cognitive_snapshot"),
             link("organic_mode", "/console/state", "RuntimeController.cognitive_snapshot"),
             link("emergent_action_sketches", "/console/state", "RuntimeController.cognitive_snapshot"),
+            link("speak_channel", f"/speak/{round_id}" if round_id is not None else "/speak/last", "RuntimeController.expression_channel_snapshot"),
+            link("monologue_channel", f"/monologue/{round_id}" if round_id is not None else "/monologue/last", "RuntimeController.expression_channel_snapshot"),
             link("autonomy_status", "/autonomy/status", "RuntimeController.autonomy_status"),
             link("autonomy_recent", "/autonomy/status", "RuntimeController.autonomy_status"),
             link("autonomy_policy", "/autonomy/status", "RuntimeController.autonomy_status"),
@@ -9093,147 +11271,13 @@ class RuntimeController:
         ]
 
     def console_refresh_payload(self, round_ref: int | str | None = None) -> dict[str, Any]:
-        effective_round = round_ref if round_ref is not None else self._console_round_or_none()
-        payload: dict[str, Any] = {
-            "state": self.console_state(),
-            "autonomy": self.autonomy_status(),
-        }
-        if effective_round is None:
-            payload["action_field"] = {
-                "round_id": None,
-                "trace_ref": None,
-                "top_actions": [],
-                "winner": {"action": None, "score": 0.0},
-                "winner_posterior": {},
-                "conflict": {},
-                "token_field": {},
-                "contribution_stack": [],
-                "competing_peaks": [],
-            }
-            payload["timeline"] = {"round_id": None, "trace_ref": None, "events": []}
-            payload["why_current"] = {
-                "round_id": None,
-                "trace_ref": None,
-                "why": {"summary": "暂无", "sampled_action": None, "top_drivers": [], "vitality_snapshot": {}, "authenticity": {}},
-            }
-            payload["why_not"] = None
-            payload["probability_field"] = {}
-            payload["counterfactual_preview"] = None
-            payload["recent_rounds"] = self._console_recent_rounds()
-            payload["source_links"] = self._console_source_links(round_id=None, trace_ref=None, why_not_action=None)
-            return payload
-        payload["action_field"] = self.console_action_field(effective_round)
-        payload["probability_field"] = self.trace_probability_field(effective_round).get("probability_field", {})
-        payload["timeline"] = self.console_timeline(effective_round)
-        payload["why_current"] = self.console_why_current(effective_round)
-        default_why_not_action = self._console_default_why_not_action(effective_round, action_field=payload["action_field"])
-        payload["why_not"] = self.console_why_not(default_why_not_action, effective_round) if default_why_not_action else None
-        payload["counterfactual_preview"] = self.replay(int(self.resolve_round_ref(effective_round))).get("counterfactual_preview", {})
-        payload["recent_rounds"] = self._console_recent_rounds()
-        payload["source_links"] = self._console_source_links(
-            round_id=int(self.resolve_round_ref(effective_round)),
-            trace_ref=payload["action_field"].get("trace_ref"),
-            why_not_action=default_why_not_action,
-        )
-        return payload
+        return self.diagnostics_runtime.console_refresh_payload(round_ref)
 
     def console_recent_actions(self, *, limit: int = 8) -> dict[str, Any]:
-        self.trace_store.flush(raise_on_error=False)
-        rows = list(self.trace_store.list_rounds()[-limit:])
-        actions = [
-            {
-                "round_id": int(row.get("round_id", 0) or 0),
-                "trace_ref": f"round://{int(row.get('round_id', 0) or 0)}",
-                "action": str(row.get("sampled_action") or "nothing"),
-                "summary": f"{str(row.get('cause_type') or 'external_stimulus')} · {str(row.get('mode') or 'interactive')}",
-                "recorded_at": row.get("recorded_at"),
-                "cause_type": str(row.get("cause_type") or "external_stimulus"),
-                "mode": str(row.get("mode") or "interactive"),
-            }
-            for row in rows
-        ]
-        return {
-            "actions": actions,
-            "message": "暂无最近动作" if not actions else "",
-        }
+        return self.diagnostics_runtime.console_recent_actions(limit=limit)
 
-    def console_probability_space(self) -> dict[str, Any]:
-        state = self.load_runtime_state()
-        self._sync_tlh_state(state)
-        instinct_field = to_dict(state.instinct_field)
-        anchor = to_dict(state.personality_anchor)
-        latest_round = self._console_round_or_none()
-        probability_field = (
-            self.trace_probability_field(latest_round).get("probability_field", {})
-            if latest_round is not None
-            else {}
-        )
-        region_scores = dict(instinct_field.get("region_scores", {}) or {})
-        winner_region = str(instinct_field.get("winner_region") or "")
-        axis_values = {
-            axis: round(float((instinct_field.get("axis_values") or {}).get(axis, 0.0) or 0.0), 4)
-            for axis in ("E", "F", "S", "M")
-        }
-        anchor_axes = {
-            axis: round(float((anchor.get("axis_baseline") or {}).get(axis, 0.5) or 0.5), 4)
-            for axis in ("E", "F", "S", "M")
-        }
-        region_vectors = {
-            "express": {"E": 0.82, "F": 0.24, "S": 0.48, "M": 0.74},
-            "withdraw": {"E": 0.18, "F": 0.78, "S": 0.32, "M": 0.36},
-            "hibernate": {"E": 0.12, "F": 0.86, "S": 0.12, "M": 0.22},
-            "dissolve": {"E": 0.08, "F": 0.62, "S": 0.56, "M": 0.12},
-            "absorb": {"E": 0.36, "F": 0.34, "S": 0.82, "M": 0.58},
-        }
-        winner_vector = region_vectors.get(winner_region, {"E": axis_values["E"], "F": axis_values["F"], "S": axis_values["S"], "M": axis_values["M"]})
-        winner_strength = max(region_scores.values(), default=0.0)
-        predicted_axes = {
-            axis: round(_clip(axis_values[axis] * 0.7 + float(winner_vector.get(axis, axis_values[axis])) * min(0.3, winner_strength * 0.18)), 4)
-            for axis in ("E", "F", "S", "M")
-        }
-        candidate_center = {
-            axis: round((axis_values[axis] + predicted_axes[axis]) / 2.0, 4)
-            for axis in ("E", "F", "S", "M")
-        }
-        plots = []
-        for x_axis, y_axis in (("E", "F"), ("E", "S"), ("E", "M"), ("F", "S")):
-            plots.append(
-                {
-                    "label": f"{x_axis}-{y_axis}",
-                    "x_axis": x_axis,
-                    "y_axis": y_axis,
-                    "current_point": {"x": axis_values[x_axis], "y": axis_values[y_axis]},
-                    "predicted_point": {"x": predicted_axes[x_axis], "y": predicted_axes[y_axis]},
-                    "anchor_point": {"x": anchor_axes[x_axis], "y": anchor_axes[y_axis]},
-                    "candidate_point": {"x": candidate_center[x_axis], "y": candidate_center[y_axis]},
-                    "winner_region": winner_region,
-                    "has_data": any(abs(value) > 1e-9 for value in axis_values.values()) or bool(winner_region),
-                }
-            )
-        layer_labels = {
-            "context": "情境层",
-            "memory": "记忆层",
-            "action": "动作层",
-            "token": "Token",
-        }
-        layers = []
-        for key in ("context", "memory", "action", "token"):
-            layer_payload = dict(probability_field.get(key, {}) or {})
-            layers.append(
-                {
-                    "key": key,
-                    "label": layer_labels[key],
-                    "winner": layer_payload.get("winner") or layer_payload.get("winner_target") or "",
-                    "keys": len(layer_payload),
-                    "empty": not bool(layer_payload),
-                }
-            )
-        return {
-            "plots": plots,
-            "layers": layers,
-            "instinct_field": instinct_field,
-            "message": "尚无概率分布" if latest_round is None else "",
-        }
+    def console_probability_space(self, round_ref: int | str | None = None) -> dict[str, Any]:
+        return self.diagnostics_runtime.console_probability_space(round_ref)
 
     def state_delta_timeline(self, window: int = 20) -> dict[str, Any]:
         rounds = self.trace_store.list_rounds()[-window:]
@@ -9341,14 +11385,36 @@ class RuntimeController:
         for blocker in blockers:
             if blocker not in deduped:
                 deduped.append(blocker)
+        if failure_mode == "not_called":
+            summary = "本轮没有形成有效 appraisal 输入，因此没有可见变化。"
+        elif failure_mode == "updated_but_clipped":
+            summary = "状态更新出现了，但被抑制或裁剪，没有进入可见表达。"
+        elif failure_mode == "updated_but_not_expressed":
+            summary = "状态有更新，但尚未越过表达阈值，或被其他运行上下文压住了。"
+        else:
+            summary = "本轮 appraisal 偏中性，因此没有形成明显外显变化。"
         return {
             "round_id": trace["round_id"],
             "failure_mode": failure_mode,
             "blockers": deduped,
+            "summary": summary,
             "appraisal_snapshot": appraisal,
             "state_delta_before_clip": before,
             "state_delta_after_clip": after,
             "storage": trace.get("storage", self._trace_storage_payload()),
+        }
+
+    def empty_why_no_change_payload(self, round_ref: int | str | None = None) -> dict[str, Any]:
+        return {
+            "round_id": round_ref if isinstance(round_ref, int) else None,
+            "failure_mode": "",
+            "blockers": [],
+            "summary": "无决策记录",
+            "appraisal_snapshot": {},
+            "state_delta_before_clip": {},
+            "state_delta_after_clip": {},
+            "storage": self._trace_storage_payload(),
+            "message": "无决策记录",
         }
 
     def migration_report(self) -> dict[str, Any]:
@@ -9385,6 +11451,13 @@ class RuntimeController:
             if run_goal:
                 return f"围绕目标“{run_goal}”收束下一步行动"
         if latest_why:
+            if str(latest_why.get("cause_type") or "").strip() == "endogenous":
+                internal_mode = str(latest_why.get("mode") or "").strip()
+                return {
+                    "endogenous_light": "正在进行内部整理，先在心里消化线索",
+                    "endogenous_regulation": "正在进行内在调节，让状态先回稳",
+                    "endogenous_replay": "正在进行内部回放，先把刚才的痕迹过一遍",
+                }.get(internal_mode, "正在进行内部整理，先在内部自我对话")
             identity_context = latest_why.get("render_plan", {}).get("identity_context", {})
             query_intent = str(identity_context.get("query_intent") or "").strip()
             sampled_action = str(latest_why.get("sampled_action") or "").strip()
@@ -9434,6 +11507,8 @@ class RuntimeController:
             "rest": "准备降低表达强度",
             "wander": "准备转入发散游移",
             "absorb": "准备先吸收内部线索",
+            "self_run": "准备转入自我检查并启动只读行动",
+            "monologue": "准备把念头先在内部说清楚",
             "nothing": "准备先不向外表达",
             "die": "准备自主结束生命",
             "short_reply": "准备先给出简短回应",
@@ -9446,6 +11521,8 @@ class RuntimeController:
             "wander": "思绪有些发散",
             "rest": "慢慢回落和恢复",
             "absorb": "把注意力转向内部吸收",
+            "self_run": "把注意力转向自我检查和只读行动",
+            "monologue": "把注意力转向内在独白",
             "nothing": "暂时收住外显表达",
             "die": "正在转向自主结束生命",
             "boot": "还在进入状态",
@@ -9531,6 +11608,9 @@ class RuntimeController:
             payload["read_source"] = read_source
         return payload
 
+    def trace_storage_status(self, *, read_source: str | None = None) -> dict[str, Any]:
+        return self._trace_storage_payload(read_source=read_source)
+
     def _dream_summary_from_trace(self, trace: dict[str, Any]) -> dict[str, Any] | None:
         run_id = trace.get("dream_run_id")
         if not run_id:
@@ -9579,6 +11659,80 @@ class RuntimeController:
 
     def dream_metrics(self) -> dict[str, Any]:
         return self.dream_orchestrator.metrics()
+
+    def _dream_semantic_summary(self, payload: dict[str, Any]) -> dict[str, Any]:
+        trace = payload.get("trace", {}) if isinstance(payload.get("trace"), dict) else {}
+        guard = payload.get("guard_summary", {}) if isinstance(payload.get("guard_summary"), dict) else {}
+        effect = payload.get("effect_summary", {}) if isinstance(payload.get("effect_summary"), dict) else {}
+        proposal_bundle = payload.get("proposal_bundle", {}) if isinstance(payload.get("proposal_bundle"), dict) else {}
+        proposal_counts = trace.get("proposal_counts", {}) if isinstance(trace.get("proposal_counts"), dict) else {}
+        if proposal_counts:
+            proposal_total = sum(max(0, int(value or 0)) for value in proposal_counts.values())
+        else:
+            proposal_total = sum(len(value) for value in proposal_bundle.values() if isinstance(value, list))
+        return {
+            "trigger": str(trace.get("trigger") or ""),
+            "mode": str(trace.get("mode") or ""),
+            "route": str(trace.get("route") or ""),
+            "degraded": bool(trace.get("degraded")),
+            "cue": trace.get("cue"),
+            "dominant_emotion": trace.get("dominant_emotion"),
+            "evaluated_types": list(trace.get("evaluated_types", []) or guard.get("evaluated_types", []) or []),
+            "allowed_types": list(guard.get("allowed_types", []) or []),
+            "rejected_types": list(guard.get("rejected_types", []) or []),
+            "applied_types": list(effect.get("applied_types", []) or []),
+            "proposal_total": int(proposal_total),
+            "proposal_counts": dict(proposal_counts),
+            "approved": bool(guard.get("approved")),
+            "applied": bool(effect.get("applied")),
+        }
+
+    def dream_overview(self, *, limit: int = 6) -> dict[str, Any]:
+        normalized_limit = max(1, int(limit or 1))
+        status = self.dream_status()
+        metrics = self.dream_metrics()
+        runs = list(self.dream_runs().get("runs", []) or [])
+        recent_runs: list[dict[str, Any]] = []
+        for item in runs[:normalized_limit]:
+            trace = item.get("trace", {}) if isinstance(item, dict) else {}
+            run_payload = {
+                "dream_run_id": trace.get("dream_run_id"),
+                "trigger": trace.get("trigger"),
+                "mode": trace.get("mode"),
+                "trace_ref": f"dream://runs/{trace.get('dream_run_id')}" if trace.get("dream_run_id") else "",
+                "trace": trace,
+                "proposal_bundle": item.get("proposal_bundle", {}) if isinstance(item, dict) else {},
+                "guard_summary": item.get("guard_summary", {}) if isinstance(item, dict) else {},
+                "effect_summary": item.get("effect_summary", {}) if isinstance(item, dict) else {},
+            }
+            run_payload["semantic_summary"] = self._dream_semantic_summary(run_payload)
+            recent_runs.append(run_payload)
+        latest_run: dict[str, Any] | None = None
+        latest_run_id = status.get("latest_run_id")
+        if latest_run_id:
+            try:
+                latest_payload = self.dream_trace(str(latest_run_id))
+                latest_run = {
+                    "dream_run_id": latest_payload.get("dream_run_id"),
+                    "trigger": latest_payload.get("trigger"),
+                    "mode": latest_payload.get("mode"),
+                    "trace_ref": latest_payload.get("trace_ref"),
+                    "trace": latest_payload.get("trace", {}),
+                    "proposal_bundle": latest_payload.get("proposal_bundle", {}),
+                    "guard_summary": latest_payload.get("guard_summary", {}),
+                    "effect_summary": latest_payload.get("effect_summary", {}),
+                }
+                latest_run["semantic_summary"] = self._dream_semantic_summary(latest_run)
+            except FileNotFoundError:
+                latest_run = recent_runs[0] if recent_runs else None
+        elif recent_runs:
+            latest_run = recent_runs[0]
+        return {
+            "status": status,
+            "metrics": metrics,
+            "latest_run": latest_run,
+            "recent_runs": recent_runs,
+        }
 
     def set_dream_enabled(self, enabled: bool) -> dict[str, Any]:
         state = self.load_runtime_state()
@@ -10031,6 +12185,8 @@ class RuntimeController:
         emergent_sketches = trace.get("state_snapshot", {}).get("emergent_action_sketches", [])
         return {
             "round_id": trace["round_id"],
+            "cause_type": trace.get("cause_type"),
+            "mode": trace.get("mode"),
             "sampled_action": trace["sampled_action"],
             "top_drivers": trace["top_drivers"],
             "style_profile": trace["style_profile"],
@@ -10055,6 +12211,9 @@ class RuntimeController:
             "long_run_projection": trace.get("long_run_projection", {}),
             "motivation_pool": trace.get("motivation_pool", {}),
             "motivation_feedback": trace.get("motivation_feedback", {}),
+            "initiative": trace.get("initiative", {}),
+            "expressive_trace": trace.get("expressive_trace", trace.get("initiative", {})),
+            "micro_intent": trace.get("micro_intent", {}),
             "endogenous_tick_reason": trace.get("endogenous_tick_reason", {}),
             "endogenous_policy_shift": trace.get("endogenous_policy_shift", {}),
             "appraisal_snapshot": trace.get("appraisal_snapshot", {}),
@@ -10117,6 +12276,8 @@ class RuntimeController:
             "long_run_projection": {},
             "motivation_pool": {},
             "motivation_feedback": {},
+            "initiative": {},
+            "expressive_trace": {},
             "endogenous_tick_reason": {},
             "endogenous_policy_shift": {},
             "appraisal_snapshot": {},
@@ -10146,6 +12307,84 @@ class RuntimeController:
             },
             "storage": self._trace_storage_payload(),
             "message": "无决策记录",
+        }
+
+    def empty_expression_channel_payload(self, channel: str, round_ref: int | str | None = None) -> dict[str, Any]:
+        normalized = "monologue" if str(channel or "").strip().lower() == "monologue" else "speak"
+        preview_action = "monologue" if normalized == "monologue" else "respond"
+        delivery_mode = "monologue" if normalized == "monologue" else "speech"
+        return {
+            "round_id": round_ref if isinstance(round_ref, int) else None,
+            "trace_ref": None,
+            "channel": normalized,
+            "delivery_mode": delivery_mode,
+            "preview_action": preview_action,
+            "sampled_action": "nothing",
+            "active": False,
+            "posterior": 0.0,
+            "actual": {
+                "action": "nothing",
+                "delivery_mode": delivery_mode,
+                "text": "",
+                "route": "",
+                "model": "",
+                "degraded": False,
+            },
+            "preview": {
+                "action": preview_action,
+                "delivery_mode": delivery_mode,
+                "text": "",
+                "would_output": False,
+                "terminal_intent": False,
+            },
+            "initiative": {},
+            "message": "无决策记录",
+        }
+
+    def expression_channel_snapshot(self, channel: str, round_ref: int | str = "last") -> dict[str, Any]:
+        normalized = "monologue" if str(channel or "").strip().lower() == "monologue" else "speak"
+        preview_action = "monologue" if normalized == "monologue" else "respond"
+        expected_delivery_mode = "monologue" if normalized == "monologue" else "speech"
+        trace = self.trace_round(round_ref)
+        rendered_expression = dict(trace.get("rendered_expression", {}) or {})
+        action_explanation = self._action_probability_explanation(trace, target_action=preview_action)
+        initiative = dict(trace.get("initiative", {}) or {})
+        actual_delivery_mode = str(rendered_expression.get("delivery_mode") or "speech")
+        actual_action = str(trace.get("sampled_action") or "")
+        actual_active = actual_delivery_mode == expected_delivery_mode and bool(rendered_expression.get("text"))
+        preview = self._counterfactual_render_preview(trace, preview_action)
+        return {
+            "round_id": int(trace.get("round_id", 0) or 0),
+            "trace_ref": str(trace.get("trace_ref") or f"round://{int(trace.get('round_id', 0) or 0)}"),
+            "channel": normalized,
+            "delivery_mode": expected_delivery_mode,
+            "preview_action": preview_action,
+            "sampled_action": actual_action,
+            "active": actual_active,
+            "posterior": round(float(action_explanation.get("winner_posterior", {}).get(preview_action, 0.0) or 0.0), 6),
+            "actual": {
+                "action": actual_action,
+                "delivery_mode": actual_delivery_mode,
+                "text": str(rendered_expression.get("text") or ""),
+                "route": str(rendered_expression.get("route") or ""),
+                "model": str(rendered_expression.get("model") or ""),
+                "degraded": bool(rendered_expression.get("degraded", False)),
+            },
+            "preview": {
+                "action": str(preview.get("action") or preview_action),
+                "delivery_mode": expected_delivery_mode,
+                "text": str(preview.get("text") or ""),
+                "would_output": bool(preview.get("would_output", False)),
+                "terminal_intent": bool(preview.get("terminal_intent", False)),
+            },
+            "initiative": {
+                "proposal_type": str(initiative.get("proposal_type") or ""),
+                "expression_mode": str(initiative.get("expression_mode") or ""),
+                "speech_cost": round(float(initiative.get("speech_cost", 0.0) or 0.0), 6),
+                "intrinsic_value": round(float(initiative.get("intrinsic_value", 0.0) or 0.0), 6),
+                "grounded_in": dict(initiative.get("grounded_in", {}) or {}),
+            },
+            "message": "",
         }
 
     def _action_layer_from_trace(self, trace: dict[str, Any]) -> dict[str, Any]:
@@ -10386,9 +12625,11 @@ class RuntimeController:
                 "terminal_intent": action == "die",
             }
         render_plan_payload["action"] = action
+        render_plan_payload["delivery_mode"] = "monologue" if action == "monologue" else "speech"
         message_plan = dict(render_plan_payload.get("message_plan", {}) or {})
         message_plan["intent"] = action
         message_plan["focus"] = action
+        message_plan["delivery_mode"] = render_plan_payload["delivery_mode"]
         render_plan_payload["message_plan"] = message_plan
         preview_plan = RenderPlan(**render_plan_payload)
         preview_text = fallback_render_text(preview_plan)
@@ -10960,6 +13201,7 @@ class RuntimeController:
             "tiers": tiers,
             "agent_bindings": self._agent_model_bindings(),
             "routes": routes,
+            "route_policies": self._route_policy_contract(),
         }
 
     def relation_show(self, target: str) -> dict[str, Any]:
@@ -11091,6 +13333,7 @@ class RuntimeController:
         trace = self.trace_round(round_id)
         candidate_distribution = self._candidate_distribution_from_trace(trace)
         action_explanation = self._action_probability_explanation(trace, target_action=action)
+        expressive_trace = dict(trace.get("expressive_trace", trace.get("initiative", {})) or {})
         blocked_by = []
         if action not in candidate_distribution:
             blocked_by.append("not_proposed")
@@ -11104,15 +13347,25 @@ class RuntimeController:
             if item["hard_masked"] or item["direction"] in {"block", "suppress"}
         )
         blocked_by.extend(item["agent_name"] for item in trace.get("top_drivers", [])[:2])
+        blocked_by = list(dict.fromkeys(blocked_by))
+        summary = self._why_not_summary(
+            action=action,
+            selected_action=str(trace.get("sampled_action") or ""),
+            candidate_score=float(candidate_distribution.get(action, 0.0) or 0.0),
+            blocked_by=blocked_by,
+            expressive_trace=expressive_trace,
+        )
         return {
             "round_id": round_id,
             "action": action,
             "selected_action": trace["sampled_action"],
             "candidate_score": candidate_distribution.get(action, 0.0),
-            "blocked_by": list(dict.fromkeys(blocked_by)),
+            "blocked_by": blocked_by,
             "stacked_contributions": action_explanation["stacked_contributions"],
             "competing_peaks": action_explanation["competing_peaks"],
             "conflict_arbitration": self._conflict_arbitration_summary(trace),
+            "expressive_trace": expressive_trace,
+            "summary": summary,
             "storage": self._trace_storage_payload(),
         }
 
@@ -11126,6 +13379,8 @@ class RuntimeController:
             "stacked_contributions": [],
             "competing_peaks": [],
             "conflict_arbitration": {},
+            "expressive_trace": {},
+            "summary": "无决策记录",
             "storage": self._trace_storage_payload(),
             "message": "无决策记录",
         }
@@ -11774,6 +14029,7 @@ class RuntimeController:
                 continue
             if all((not item.get("dependency_trace") or item.get("module_name")) for item in token_audit if isinstance(item, dict)):
                 token_source_integrity_passes += 1
+        autonomy_settings = self._observer_settings().get("autonomy", {}) if isinstance(self._observer_settings().get("autonomy"), dict) else {}
         return {
             "window": window,
             "rounds_considered": len(rounds),
@@ -11791,6 +14047,18 @@ class RuntimeController:
             "renderer_decision_integrity": self._renderer_decision_integrity_summary(rounds),
             "memory_write_gate": self._memory_write_gate_summary(rounds),
             "failure_taxonomy": self._failure_taxonomy_summary(rounds),
+            "release_15": {
+                "controlled_learning": {
+                    "learning_mode": str(autonomy_settings.get("learning_mode", "guided-learn") or "guided-learn"),
+                    "allowed_network_domains": list(autonomy_settings.get("allowed_network_domains", []) or []),
+                    "writable_roots": list(autonomy_settings.get("writable_roots", []) or []),
+                    "knowledge_roots": list(autonomy_settings.get("knowledge_roots", []) or []),
+                    "learning_log_dir": str(autonomy_settings.get("learning_log_dir", "") or ""),
+                    "trace_external_learning": bool(autonomy_settings.get("trace_external_learning", True)),
+                    "network_enabled": bool(autonomy_settings.get("network_enabled", False)),
+                    "external_io_enabled": bool(autonomy_settings.get("external_io_enabled", False)),
+                }
+            },
             "storage": self._trace_storage_payload(),
         }
 

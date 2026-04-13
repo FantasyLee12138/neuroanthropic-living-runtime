@@ -18,7 +18,16 @@ const BRIDGE_COMMANDS = new Set<BridgeControlCommand>([
   "mode",
   "permissions",
   "dream",
-  "probability"
+  "probability",
+  "endogenous",
+  "initiative",
+  "monologue",
+  "why-motivation",
+  "replay-motivation",
+  "replay",
+  "why-not",
+  "what-changed",
+  "eval"
 ]);
 
 const LOCAL_COMMANDS = new Set<"help" | "clear" | "exit" | "compact">(["help", "clear", "exit", "compact"]);

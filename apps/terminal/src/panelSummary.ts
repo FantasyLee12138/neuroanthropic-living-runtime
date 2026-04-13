@@ -1,4 +1,17 @@
 import type { CognitiveSnapshotState, PanelKey, UiState } from "./types.js";
+import { translateBrainIdentifier } from "./brainLabels.js";
+import { translateAuthenticityGuardAction, translateAuthenticitySource, translateCognitivePhrase, translateTimelineType } from "./cognitiveTerms.js";
+import {
+  translateActionName,
+  translateCognitiveMode,
+  translateFocusState,
+  translatePermissionMode,
+  translateRiskLevel,
+  translateRunStatus,
+  translateToolName,
+} from "./displayLabels.js";
+import { summarizeMonologueStream } from "./expressiveTrace.js";
+import { contributionSectionTitle, whyCurrentLabel, whyNotSectionTitle } from "./terminalCopy.js";
 
 export interface SidebarSummaryItem {
   label: string;
@@ -10,84 +23,172 @@ function line(label: string, value: string): string {
   return `${label}：${value}`;
 }
 
-function statusSummary(state: UiState): string {
-  const run = state.run ?? {};
-  const currentStep = (run.current_step as Record<string, unknown> | undefined) ?? {};
-  return [
-    line("状态", String(run.status ?? "unknown")),
-    line("当前步骤", String(currentStep.title ?? "暂无")),
-    line("已暂停", run.status === "paused" ? "是" : "否"),
-    line("工作区", run.dirty_worktree_detected ? "dirty" : "clean"),
-  ].join("\n");
+function formatScore(value: number | null | undefined): string {
+  return typeof value === "number" && Number.isFinite(value) ? value.toFixed(2) : "0.00";
 }
 
-function whySummary(state: UiState): string {
-  const why = state.lastWhy ?? {};
-  const currentStep = (why.current_step as Record<string, unknown> | undefined) ?? {};
-  const stopReason = (why.stop_reason as Record<string, unknown> | undefined) ?? {};
-  const reason = String(currentStep.expected_observation ?? currentStep.detail ?? "先收集当前任务最直接的上下文。");
+function presentText(value: unknown): string {
+  if (value === null || value === undefined) {
+    return "尚未接入";
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? value : "尚未接入";
+  }
+  return String(value);
+}
+
+function statusSummary(state: UiState): string {
+  const consoleState = state.console.state;
+  const run = state.run ?? {};
+  const currentStep = (run.current_step as Record<string, unknown> | undefined) ?? {};
+  const rawStatus = presentText(consoleState?.run.status ?? run.status);
+  const status = translateRunStatus(rawStatus, rawStatus);
+  const currentRound = consoleState?.currentRound;
+  const rawCurrentStepTitle =
+    currentRound?.causeType === "endogenous"
+      ? presentText(currentRound.modeLabel ?? currentRound.causeLabel ?? currentRound.sampledAction ?? currentStep.title)
+      : presentText(currentRound?.sampledAction ?? currentStep.title);
+  const currentStepTitle = translateActionName(rawCurrentStepTitle, rawCurrentStepTitle);
+  const worktree = run.dirty_worktree_detected;
   const rows = [
-    line("当前目标", String(why.goal_summary ?? why.goal ?? "暂无")),
-    line("当前选择", String(currentStep.title ?? "暂无")),
-    line("原因", reason),
+    line("脑态", status),
+    line("当前驱动", currentStepTitle),
+    line("外显活动", worktree === undefined ? "尚未接入" : worktree ? "工作区有变更" : "工作区已收束"),
   ];
-  if (stopReason.message) {
-    rows.push(line("暂停原因", String(stopReason.message)));
+  const causeLabel = presentText(currentRound?.causeLabel);
+  if (causeLabel !== "尚未接入") {
+    rows.push(line("处理来源", causeLabel));
+  }
+  const latencySummary = presentText(currentRound?.latencySummary);
+  if (latencySummary !== "尚未接入") {
+    const modelWait = currentRound?.modelWaitMs == null ? "?" : `${currentRound.modelWaitMs}ms`;
+    const localCompute = currentRound?.localComputeMs == null ? "?" : `${currentRound.localComputeMs}ms`;
+    rows.push(line("本轮时延", `${latencySummary}（模型 ${modelWait} / 本地 ${localCompute}）`));
   }
   return rows.join("\n");
 }
 
+function whySummary(state: UiState): string {
+  const consoleWhy = state.console.whyCurrent?.why;
+  const actionField = state.console.actionField;
+  const why = state.lastWhy ?? {};
+  const currentStep = (why.current_step as Record<string, unknown> | undefined) ?? {};
+  const stopReason = (why.stop_reason as Record<string, unknown> | undefined) ?? {};
+  const reason = presentText(consoleWhy?.summary ?? currentStep.expected_observation ?? currentStep.detail);
+  const rows = [
+    line(whyCurrentLabel(), presentText(consoleWhy?.summary ?? why.goal_summary ?? why.goal)),
+    line(
+      "最终输出动作",
+      translateActionName(
+        presentText(consoleWhy?.sampledAction ?? currentStep.title),
+        presentText(consoleWhy?.sampledAction ?? currentStep.title),
+      ),
+    ),
+  ];
+  if (reason !== "尚未接入") {
+    rows.push(line(whyCurrentLabel(), reason));
+  } else {
+    const stopMessage = presentText(stopReason.message);
+    if (stopMessage !== "尚未接入") {
+      rows.push(line(whyCurrentLabel(), stopMessage));
+    }
+  }
+  const stopMessage = presentText(stopReason.message);
+  if (reason !== "尚未接入" && stopMessage !== "尚未接入") {
+    rows.push(line("暂停说明", stopMessage));
+  }
+  if (actionField?.competingPeaks.length) {
+    rows.push(
+      line(
+        whyNotSectionTitle(),
+        actionField.competingPeaks
+          .map((item) => `${translateActionName(presentText(item.action), presentText(item.action))}(${formatScore(item.score)})`)
+          .join("；"),
+      ),
+    );
+  }
+  if (actionField?.contributionStack.length) {
+    rows.push(line(contributionSectionTitle(), actionField.contributionStack.map((item) => `${translateBrainIdentifier(item.source)}(${formatScore(item.weight)})`).join("；")));
+  }
+  rows.push(...summarizeMonologueStream(consoleWhy?.expressiveTrace));
+  return rows.join("\n");
+}
+
+function timelineEventLabel(entry: { type: string; label: string; summary: string }): string {
+  return `${translateTimelineType(entry.type)}：${translateCognitivePhrase(entry.summary)}`;
+}
+
 function stepsSummary(state: UiState): string {
+  const timeline = state.console.timeline;
+  const winner = state.console.actionField?.winner;
+  if (timeline?.events.length) {
+    return [
+      line("当前驱动", translateActionName(presentText(winner?.action), presentText(winner?.action))),
+      line("外显活动", `${timeline.events.length} 段流转`),
+      line("接续", timeline.events.slice(0, 3).map((entry) => translateCognitivePhrase(entry.label, translateBrainIdentifier(entry.label, presentText(entry.label)))).join("；")),
+    ].join("\n");
+  }
   const current =
     state.steps.find((step) => ["running", "in_progress", "active"].includes(String(step.status ?? ""))) ?? state.steps[0] ?? {};
   const remaining = state.steps.filter(
     (step) => !["running", "in_progress", "active", "completed", "done"].includes(String(step.status ?? "")),
   );
   const rows = [
-    line("当前步骤", String(current.title ?? current.step_id ?? "暂无")),
-    line("剩余步骤", String(remaining.length)),
+    line("当前驱动", presentText(current.title ?? current.step_id)),
+    line("外显活动", remaining.length === 0 ? "已收束" : `${remaining.length} 步待续`),
   ];
   if (remaining.length > 0) {
-    rows.push(line("后续", remaining.slice(0, 3).map((step) => String(step.title ?? step.step_id ?? "未命名步骤")).join("；")));
+    rows.push(line("接续", remaining.slice(0, 3).map((step) => presentText(step.title ?? step.step_id)).join("；")));
   }
   return rows.join("\n");
 }
 
 function toolsSummary(state: UiState): string {
+  const timeline = state.console.timeline;
+  if (timeline?.events.length) {
+    return line("外显活动", timeline.events.slice(0, 3).map(timelineEventLabel).join("；"));
+  }
   const recent = state.tools.slice(-3);
   if (recent.length === 0) {
-    return line("最近工具", "暂无");
+    return line("外显活动", "尚未接入");
   }
+  const entries = recent
+    .map((tool) => `${translateToolName(presentText(tool.tool_name), presentText(tool.tool_name))}：${presentText(tool.summary ?? tool.status)}`)
+    .join("；");
   return line(
-    "最近工具",
-    recent.map((tool) => `${String(tool.tool_name ?? "unknown")}: ${String(tool.summary ?? tool.status ?? "已执行")}`).join("；"),
+    "外显活动",
+    entries,
   );
 }
 
 function approvalsSummary(state: UiState): string {
   if (state.pendingApprovals.length === 0) {
-    return "待审批：0";
+    return "等待本轮解释：尚未接入";
   }
   return [
-    `待审批：${state.pendingApprovals.length}`,
+    `等待本轮解释：${state.pendingApprovals.length}`,
     ...state.pendingApprovals
-    .map((approval, index) => {
-      const prefix = index === state.approvalCursor ? ">" : " ";
-      const rows = [
-        `${prefix} [${index + 1}/${state.pendingApprovals.length}] ${approval.tool}`,
-        `  ${approval.summary ?? approval.actionPreview ?? "待处理"}`,
-      ];
-      if (approval.riskLevel) {
-        rows.push(`  风险：${approval.riskLevel}`);
-      }
-      if (approval.mode) {
-        rows.push(`  模式：${approval.mode}`);
-      }
-      if (approval.status) {
-        rows.push(`  状态：${approval.status}`);
-      }
-      return rows.join("\n");
-    }),
+      .map((approval, index) => {
+        const prefix = index === state.approvalCursor ? ">" : " ";
+        const rows = [
+          `${prefix} [${index + 1}/${state.pendingApprovals.length}] ${translateToolName(presentText(approval.tool), presentText(approval.tool))}`,
+          `  ${presentText(approval.summary ?? approval.actionPreview)}`,
+        ];
+        const riskLevel = presentText(approval.riskLevel);
+        if (riskLevel !== "尚未接入") {
+          rows.push(`  风险：${translateRiskLevel(riskLevel, riskLevel)}`);
+        }
+        const mode = presentText(approval.mode);
+        if (mode !== "尚未接入") {
+          rows.push(`  模式：${translatePermissionMode(mode, mode)}`);
+        }
+        const status = presentText(approval.status);
+        if (status !== "尚未接入") {
+          rows.push(`  状态：${translateRunStatus(status, status)}`);
+        }
+        return rows.join("\n");
+      }),
   ].join("\n");
 }
 
@@ -95,10 +196,16 @@ function metaSummary(state: UiState): string {
   const session = state.sessionMeta ?? {};
   const statusline = state.statusline ?? undefined;
   return [
-    line("工作区", String(statusline?.cwd ?? session.cwd ?? "暂无")),
-    line("权限模式", String(state.sidebarSnapshot?.permissionMode ?? statusline?.permission_mode ?? state.permissionMode ?? "plan")),
-    line("Session", String(statusline?.session_id ?? state.activeSessionId ?? "暂无")),
-    line("Run", String(statusline?.run_id ?? state.activeRunId ?? "暂无")),
+    line("当前环境", presentText(statusline?.cwd ?? session.cwd)),
+    line(
+      "当前权限",
+      translatePermissionMode(
+        presentText(state.sidebarSnapshot?.permissionMode ?? statusline?.permission_mode ?? state.permissionMode),
+        presentText(state.sidebarSnapshot?.permissionMode ?? statusline?.permission_mode ?? state.permissionMode),
+      ),
+    ),
+    line("会话", presentText(statusline?.session_id ?? state.activeSessionId)),
+    line("运行", presentText(statusline?.run_id ?? state.activeRunId)),
     "",
     formatModelSection(state.sidebarSnapshot?.modelStatus),
   ].join("\n");
@@ -110,84 +217,72 @@ function labeledProbability(label: string, value: number): string {
 
 function describeMood(value: number): string {
   if (value < 0.25) {
-    return "很不开心";
+    return "低正价";
   }
   if (value < 0.45) {
-    return "不太开心";
+    return "中性偏低";
   }
   if (value < 0.62) {
-    return "较开心";
+    return "中性";
   }
   if (value < 0.8) {
-    return "开心";
+    return "中性偏高";
   }
-  return "很开心";
+  return "高正价";
 }
 
 function describeEnergy(value: number): string {
   if (value < 0.2) {
-    return "很疲惫";
+    return "低唤醒";
   }
   if (value < 0.4) {
-    return "有点累";
+    return "轻度低唤醒";
   }
   if (value < 0.65) {
-    return "还算稳定";
+    return "中等唤醒";
   }
   if (value < 0.82) {
-    return "状态不错";
+    return "中高唤醒";
   }
-  return "精力充沛";
+  return "高唤醒";
 }
 
 function describeAffectResidue(value: number): string {
   if (value < 0.08) {
-    return "基本平稳";
+    return "低残留";
   }
   if (value < 0.22) {
-    return "轻微波动";
+    return "轻度残留";
   }
   if (value < 0.45) {
-    return "波动明显";
+    return "中度残留";
   }
-  return "波动很强";
+  return "高残留";
 }
 
 function describeFocus(value: string): string {
-  return {
-    task: "正在专心处理眼前的事",
-    respond: "注意力放在如何回应上",
-    wander: "思绪有些发散",
-    rest: "正在慢慢回落和恢复",
-    boot: "还在慢慢进入状态",
-  }[value] ?? value;
+  return translateFocusState(value, presentText(value));
 }
 
 function describeMode(value: string): string {
-  return {
-    interactive: "正常交流中",
-    idle: "安静待机中",
-    sleep: "在休眠整理里",
-    safe: "处于谨慎收束中",
-    plan: "正在规划整理中",
-  }[value] ?? value;
+  return translateCognitiveMode(value, presentText(value));
 }
 
 function formatModelSection(modelStatus: Record<string, unknown> | undefined): string {
   if (!modelStatus) {
-    return ["模型分层", "  暂无"].join("\n");
+    return ["模型分层", "  尚未接入"].join("\n");
   }
   const tiers = (modelStatus.tiers as Record<string, Record<string, unknown>> | undefined) ?? {};
   const bindings = (modelStatus.agent_bindings as Record<string, string> | undefined) ?? {};
   const tierRows = ["模型分层"];
   for (const [tierName, tier] of Object.entries(tiers)) {
-    const mode = String(tier.mode ?? "unknown");
+    const mode = presentText(tier.mode);
     if (mode === "local") {
-      tierRows.push(`  ${tierName}：local`);
+      tierRows.push(`  ${tierName}：本地`);
       continue;
     }
     tierRows.push(
-      `  ${tierName}：${String(tier.backend ?? "unknown")} / ${String(tier.model ?? "unconfigured")} / ${Boolean(tier.credential_present) ? "key:ok" : "key:missing"}`,
+      `  ${tierName}：${presentText(tier.backend)} / ${presentText(tier.model)} / ${Boolean(tier.credential_present) ? "密钥已接入" : "密钥尚未接入"}`,
     );
   }
   tierRows.push("");
@@ -195,7 +290,7 @@ function formatModelSection(modelStatus: Record<string, unknown> | undefined): s
   for (const agentName of ["SalienceAgent", "ValueAgent", "PerspectiveModel", "PFCAgent", "Renderer", "planner"]) {
     const tier = bindings[agentName];
     if (tier) {
-      tierRows.push(`  ${agentName} -> ${tier}`);
+      tierRows.push(`  ${translateBrainIdentifier(agentName)}：${tier}`);
     }
   }
   return tierRows.join("\n");
@@ -203,29 +298,35 @@ function formatModelSection(modelStatus: Record<string, unknown> | undefined): s
 
 export function formatCognitiveSummary(snapshot: CognitiveSnapshotState | null | undefined): string {
   if (!snapshot) {
-    return "核心目标\n  暂无";
+    return "脑态\n  尚未接入";
   }
-  return [
-    "核心目标",
-    `  ${snapshot.coreGoal}`,
+  const rows = [
+    "脑态",
+    line("当前驱动", presentText(snapshot.currentIntent)),
     "",
-    "当前意图",
-    `  ${snapshot.currentIntent}`,
-    "",
-    "生命体征",
+    "内在状态",
     line("心境", labeledProbability(describeMood(snapshot.vitalSigns.mood), snapshot.vitalSigns.mood)),
     line("能量", labeledProbability(describeEnergy(snapshot.vitalSigns.bodyEnergy), snapshot.vitalSigns.bodyEnergy)),
     line("情感余波", labeledProbability(describeAffectResidue(snapshot.vitalSigns.affectResidue), snapshot.vitalSigns.affectResidue)),
-    line("焦点", describeFocus(snapshot.vitalSigns.focus)),
-    line("模式", describeMode(snapshot.vitalSigns.mode)),
+    line("注意焦点", describeFocus(snapshot.vitalSigns.focus)),
+    line("运行方式", describeMode(snapshot.vitalSigns.mode)),
     "",
     "身份与连续性",
-    line("身份", snapshot.identity.displayName),
-    line("连续性", snapshot.identity.continuity),
+    line("身份", presentText(snapshot.identity.displayName)),
+    line("连续性", presentText(snapshot.identity.continuity)),
     "",
-    "真实性",
-    `  ${snapshot.authenticity.summary}`,
-  ].join("\n");
+    "真实性校验",
+    `  ${presentText(snapshot.authenticity.summary)}`,
+  ];
+  const source = translateAuthenticitySource(snapshot.authenticity.source);
+  if (source) {
+    rows.push(line("校验来源", source));
+  }
+  const guardAction = translateAuthenticityGuardAction(snapshot.authenticity.guardAction);
+  if (guardAction) {
+    rows.push(line("校验动作", guardAction));
+  }
+  return rows.join("\n");
 }
 
 export function formatDetailSummary(state: UiState, panel: Exclude<PanelKey, null>): string {
@@ -247,28 +348,41 @@ export function formatDetailSummary(state: UiState, panel: Exclude<PanelKey, nul
   if (panel === "meta") {
     return metaSummary(state);
   }
-  return formatCognitiveSummary(state.sidebarSnapshot?.cognitiveSnapshot);
+  return formatCognitiveSummary(state.console.state?.cognitiveSnapshot ?? state.sidebarSnapshot?.cognitiveSnapshot);
 }
 
 export function formatSidebarSummary(state: UiState): SidebarSummaryItem[] {
   const snapshot = state.sidebarSnapshot;
+  const consoleState = state.console.state;
+  const actionField = state.console.actionField;
+  const whyCurrent = state.console.whyCurrent;
+  const timeline = state.console.timeline;
   const lastTool = state.tools.at(-1);
+  const latestTimeline = timeline?.events.at(-1);
   return [
-    { label: "目标", value: snapshot?.goalSummary || "暂无", tone: "muted" },
-    { label: "步骤", value: snapshot?.currentStep || String(state.run?.current_step?.title ?? "暂无"), tone: "normal" },
     {
-      label: "工具",
-      value: lastTool ? `${String(lastTool.tool_name ?? "unknown")}: ${String(lastTool.summary ?? lastTool.status ?? "已执行")}` : "暂无",
+      label: "当前驱动",
+      value: translateActionName(presentText(actionField?.winner.action ?? snapshot?.goalSummary), presentText(actionField?.winner.action ?? snapshot?.goalSummary)),
+      tone: "muted",
+    },
+    { label: "外显活动", value: presentText(whyCurrent?.why.summary ?? snapshot?.currentStep ?? state.run?.current_step?.title), tone: "normal" },
+    {
+      label: "工具痕迹",
+      value: lastTool
+        ? `${translateToolName(presentText(lastTool.tool_name), presentText(lastTool.tool_name))}：${presentText(lastTool.summary ?? lastTool.status)}`
+        : latestTimeline
+          ? `${translateTimelineType(latestTimeline.type)}：${translateCognitivePhrase(latestTimeline.summary)}`
+          : "尚未接入",
       tone: "muted",
     },
     {
-      label: "审批",
-      value: state.pendingApprovals.length > 0 ? `${state.pendingApprovals.length} 项待处理` : "无待审批",
+      label: "等待本轮解释",
+      value: state.pendingApprovals.length > 0 ? `${state.pendingApprovals.length} 项待处理` : "尚未接入",
       tone: state.pendingApprovals.length > 0 ? "warning" : "muted",
     },
     {
-      label: "认知",
-      value: snapshot?.cognitiveSnapshot.currentIntent || "暂无",
+      label: "脑态",
+      value: presentText(consoleState?.cognitiveSnapshot.currentIntent ?? snapshot?.cognitiveSnapshot.currentIntent),
       tone: "accent",
     },
   ];

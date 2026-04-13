@@ -63,9 +63,11 @@ def test_stdio_bridge_runs_terminal_session_and_emits_events(tmp_path):
         )
         permissions_events = _read_until(process.stdout, "assistant_final")
         _send(process.stdin, {"type": "user_turn", "session_id": "sess-stdio", "text": "总结这个仓库结构"})
-        turn_events = _read_until(process.stdout, "assistant_final")
+        turn_events = _read_until(process.stdout, "approval_request")
+        turn_snapshot = _read_until(process.stdout, "sidebar_snapshot")[-1]
         approval = next((item for item in turn_events if item["type"] == "approval_request"), None)
         assert approval is not None
+        assert all(item["type"] != "tool_result" for item in turn_events)
         _send(
             process.stdin,
             {
@@ -101,21 +103,21 @@ def test_stdio_bridge_runs_terminal_session_and_emits_events(tmp_path):
     started_snapshot = next(item for item in started if item["type"] == "sidebar_snapshot")
     assert started_snapshot["permission_mode"] == "plan"
     assert started_snapshot["statusline"]["cwd"] == str(tmp_path)
+    assert started_snapshot["controlled_learning"]["learning_mode"] == "guided-learn"
+    assert started_snapshot["controlled_learning"]["trace_external_learning"] is True
     assert permissions_types[-1] == "assistant_final"
     permission_snapshot = next(item for item in permissions_events if item["type"] == "sidebar_snapshot")
     assert permission_snapshot["permission_mode"] == "ask"
     assert "run_status" in turn_types
     assert "step_update" in turn_types
     assert "tool_call" in turn_types
-    assert "tool_result" in turn_types
     assert "approval_request" in turn_types
-    assert "sidebar_snapshot" in turn_types
-    turn_snapshot = next(item for item in turn_events if item["type"] == "sidebar_snapshot")
+    assert turn_snapshot["pending_approval_count"] >= 1
+    assert "tool_result" in [item["type"] for item in approve_events]
     assert turn_snapshot["goal_summary"]
     assert turn_snapshot["current_step"]
-    assert turn_snapshot["pending_approval_count"] >= 1
     assert turn_snapshot["ui_actions"]["primary"]
-    assert turn_types[-1] == "assistant_final"
+    assert turn_types[-1] == "approval_request"
     assert approval["choices"][0]["id"] == "approve"
     assert "sidebar_snapshot" in approve_types
     assert approve_types[-1] == "assistant_final"
@@ -124,5 +126,7 @@ def test_stdio_bridge_runs_terminal_session_and_emits_events(tmp_path):
     assert "tool_result" in tool_types
     assert tool_types[-1] == "assistant_final"
     assert "sidebar_snapshot" in state_types
+    state_snapshot = next(item for item in state_events if item["type"] == "sidebar_snapshot")
+    assert state_snapshot["controlled_learning"]["learning_mode"] == "guided-learn"
     assert state_types[-1] == "assistant_final"
     assert "session_ended" in ended_types

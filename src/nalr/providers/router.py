@@ -94,6 +94,30 @@ class FakeBackend:
                     "action": sampled_action,
                 }
             }
+        elif "fragments" in request.response_schema:
+            fragment_count = max(1, int(request.metadata.get("fragment_count", 1) or 1))
+            variants = [
+                ("free_association", "我脑子里突然闪过一个词：回声。"),
+                ("environment_notice", "我注意到这个界面好像有点挤。"),
+                ("memory_fragment", "我好像还惦记着之前没续上的那段话。"),
+                ("daydream", "我在想如果现在出去走一圈会怎样。"),
+                ("blank_fragment", "我刚刚空了一瞬。"),
+            ]
+            payload = {
+                "fragments": [
+                    {
+                        "category": variants[index % len(variants)][0],
+                        "content": variants[index % len(variants)][1],
+                        "source": "model",
+                    }
+                    for index in range(fragment_count)
+                ]
+            }
+        elif "goal" in request.response_schema:
+            payload = {
+                "goal": "Inspect recent runtime traces and identify the next read-only self-check step.",
+                "reason": "fake-model route suggests a lightweight self-study pass",
+            }
         else:
             action = request.metadata.get("action", "respond")
             action_text = {
@@ -403,6 +427,123 @@ class DeepSeekBackend:
                     yield content
 
 
+class OpenAICompatibleBackend:
+    def __init__(self, client_factory: Callable[..., Any] | None = None) -> None:
+        self.client_factory = client_factory
+        self._client_cache: dict[tuple[str, str, int], Any] = {}
+
+    def _build_client(self, *, api_key: str, base_url: str, timeout_ms: int):
+        timeout_s = max(timeout_ms / 1000.0, 1.0)
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        if self.client_factory is not None:
+            return self.client_factory(base_url=base_url, api_key=api_key, timeout_s=timeout_s)
+        return httpx.Client(base_url=base_url, headers=headers, timeout=timeout_s)
+
+    def _client_for(self, *, api_key: str, base_url: str, timeout_ms: int):
+        cache_key = (api_key, base_url, timeout_ms)
+        client = self._client_cache.get(cache_key)
+        if client is None:
+            client = self._build_client(api_key=api_key, base_url=base_url, timeout_ms=timeout_ms)
+            self._client_cache[cache_key] = client
+        return client
+
+    def _request_body(self, *, route: ModelRouteConfig, request: ModelRequest, stream: bool) -> dict[str, Any]:
+        return {
+            "model": route.model,
+            "messages": [
+                {"role": "system", "content": request.system_prompt},
+                {"role": "user", "content": request.user_prompt},
+            ],
+            "stream": stream,
+        }
+
+    def _extract_payload(self, raw_payload: dict[str, Any], request: ModelRequest) -> dict[str, Any]:
+        if not isinstance(raw_payload, dict):
+            raise ModelProviderError("OpenAI-compatible backend returned a non-dict response payload")
+        choices = raw_payload.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise ModelProviderError("OpenAI-compatible backend response did not contain choices")
+        message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+        content = message.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise ModelProviderError("OpenAI-compatible backend response did not contain message content")
+        text = content.strip()
+        expected_keys = tuple(request.response_schema.keys())
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict) and expected_keys and all(key in parsed for key in expected_keys):
+            return parsed
+        if expected_keys == ("text",):
+            if isinstance(parsed, dict) and isinstance(parsed.get("text"), str):
+                return {"text": parsed["text"].strip()}
+            return {"text": text}
+        raise ModelProviderError("OpenAI-compatible backend did not contain the required structured fields")
+
+    def generate(
+        self,
+        *,
+        route: ModelRouteConfig,
+        request: ModelRequest,
+        api_key: str | None = None,
+    ) -> ModelResponse:
+        effective_key = api_key or os.getenv(route.api_key_env or "") or ""
+        client = self._client_for(api_key=effective_key, base_url=route.base_url, timeout_ms=route.timeout_ms)
+        request_body = self._request_body(route=route, request=request, stream=False)
+        started = time.perf_counter()
+        response = client.post("/chat/completions", json=request_body)
+        response.raise_for_status()
+        raw_payload = response.json()
+        raw_text = response.text
+        payload = self._extract_payload(raw_payload, request)
+        usage = raw_payload.get("usage", {}) if isinstance(raw_payload, dict) else {}
+        return ModelResponse(
+            route=route.name,
+            model=route.model,
+            payload=payload,
+            raw_text=raw_text,
+            usage=usage if isinstance(usage, dict) else {},
+            latency_ms=max(1, int((time.perf_counter() - started) * 1000)),
+            backend=route.backend,
+        )
+
+    def stream_generate(
+        self,
+        *,
+        route: ModelRouteConfig,
+        request: ModelRequest,
+        api_key: str | None = None,
+    ):
+        effective_key = api_key or os.getenv(route.api_key_env or "") or ""
+        client = self._client_for(api_key=effective_key, base_url=route.base_url, timeout_ms=route.timeout_ms)
+        request_body = self._request_body(route=route, request=request, stream=True)
+        with client.stream("POST", "/chat/completions", json=request_body) as response:
+            response.raise_for_status()
+            for raw_line in response.iter_lines():
+                if not raw_line:
+                    continue
+                line = raw_line.strip()
+                if not line.startswith("data: "):
+                    continue
+                data = line[6:]
+                if data == "[DONE]":
+                    break
+                try:
+                    payload = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                choices = payload.get("choices")
+                if not isinstance(choices, list) or not choices:
+                    continue
+                delta = choices[0].get("delta", {}) if isinstance(choices[0], dict) else {}
+                content = delta.get("content")
+                if isinstance(content, str) and content:
+                    yield content
+
+
 class ModelRouter:
     def __init__(
         self,
@@ -415,6 +556,7 @@ class ModelRouter:
             "fake": FakeBackend(),
             "doubao": DoubaoBackend(),
             "deepseek": DeepSeekBackend(),
+            "openai_compatible": OpenAICompatibleBackend(),
         }
         if backends:
             self.backends.update(backends)

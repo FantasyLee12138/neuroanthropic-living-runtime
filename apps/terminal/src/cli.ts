@@ -27,7 +27,14 @@ function printHelp(): void {
   console.log("  NALR Dream [cue]      Trigger a manual dream run");
   console.log("");
   console.log("Slash commands:");
-  console.log("  /help /status /why /steps /tools /state /probability [round|action <name>|layer <name>] /dream [cue] /pause /resume /abort /clear /compact /mode [value] /permissions [value] /model /exit");
+  console.log(
+    "  /help /status /why /steps /tools /state /probability [round|action <name>|layer <name>] " +
+      "/dream [cue] /endogenous [trigger] [mode] /why-motivation [round] /replay-motivation [round] " +
+      "/initiative [status|distribution|trigger [trigger] [mode]|why [round]] " +
+      "/monologue [status|show [limit]] " +
+      "/replay [round] [seed] /why-not [round] <action> /what-changed [window] /eval " +
+      "/pause /resume /abort /clear /compact /mode [value] /permissions [value] /model /exit",
+  );
 }
 
 async function runOneShot(prompt: string): Promise<number> {

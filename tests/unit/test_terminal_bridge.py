@@ -65,6 +65,10 @@ def test_user_turn_emits_read_only_run_sequence_and_persists_session_mapping(tmp
     assert run_snapshot["goal_summary"]
     assert run_snapshot["current_step"]
     assert run_snapshot["run_status"] in {"running", "paused"}
+    assert "console" in run_snapshot
+    assert run_snapshot["console"]["state"]
+    assert run_snapshot["console"]["action_field"]
+    assert run_snapshot["console"]["why_current"]
     assert run_snapshot["cognitive_snapshot"]["core_goal"]
     assert run_snapshot["cognitive_snapshot"]["current_intent"]
     assert "ui_actions" in run_snapshot
@@ -82,6 +86,50 @@ def test_user_turn_emits_read_only_run_sequence_and_persists_session_mapping(tmp
     assert any(item["kind"] == "result" and item["tool"] == "repo_scan" for item in session_state.tool_timeline)
 
 
+def test_start_session_stream_emits_started_before_sidebar_snapshot(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    handler = TerminalEventHandler(controller)
+
+    stream = iter(handler.handle_stream({"type": "start_session", "session_id": "sess-stream-start", "cwd": str(tmp_path)}))
+    first = next(stream)
+    second = next(stream)
+
+    assert first["type"] == "session_started"
+    assert second["type"] == "sidebar_snapshot"
+
+
+def test_sidebar_snapshot_surfaces_controlled_learning_policy(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    controller.update_observer_settings(
+        {
+            "autonomy": {
+                "learning_mode": "active-learn",
+                "network_enabled": True,
+                "external_io_enabled": True,
+                "allowed_network_domains": ["example.com", "docs.python.org"],
+                "writable_roots": [str(workspace_root)],
+                "knowledge_roots": [str(tmp_path / "docs")],
+                "learning_log_dir": str(tmp_path / ".alive" / "learning-cache"),
+                "trace_external_learning": False,
+            }
+        }
+    )
+    handler = TerminalEventHandler(controller)
+
+    started = handler.handle({"type": "start_session", "session_id": "sess-learning", "cwd": str(tmp_path)})
+    snapshot = next(item for item in started if item["type"] == "sidebar_snapshot")
+
+    assert snapshot["controlled_learning"]["learning_mode"] == "active-learn"
+    assert snapshot["controlled_learning"]["network_enabled"] is True
+    assert snapshot["controlled_learning"]["external_io_enabled"] is True
+    assert snapshot["controlled_learning"]["trace_external_learning"] is False
+    assert snapshot["controlled_learning"]["allowed_network_domains"] == ["example.com", "docs.python.org"]
+    assert snapshot["controlled_learning"]["writable_roots"] == [str(workspace_root)]
+    assert snapshot["controlled_learning"]["learning_log_dir"] == str(tmp_path / ".alive" / "learning-cache")
+
+
 def test_greeting_user_turn_uses_direct_chat_without_starting_run(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     _seed_entropy(controller)
@@ -91,8 +139,14 @@ def test_greeting_user_turn_uses_direct_chat_without_starting_run(tmp_path):
     events = handler.handle({"type": "user_turn", "session_id": "sess-greet", "text": "你好"})
     session_state = TerminalSessionStore(controller.runtime_dir).read("sess-greet")
 
-    assert [item["type"] for item in events] == ["assistant_token", "assistant_final"]
+    assert [item["type"] for item in events] == ["assistant_token", "sidebar_snapshot", "assistant_final"]
+    snapshot_event = next(item for item in events if item["type"] == "sidebar_snapshot")
     assert "你好" in events[-1]["message"]
+    assert snapshot_event["console"]["state"]["brain_state"]["mode"] == "interactive"
+    assert snapshot_event["console"]["state"]["current_round"]["round_id"] is not None
+    assert snapshot_event["console"]["timeline"]["round_id"] is not None
+    assert snapshot_event["console"]["why_current"]["round_id"] is not None
+    assert snapshot_event["console"]["why_current"]["why"]["summary"] != "暂无"
     assert session_state.active_run_id is None
     assert session_state.transcript_lines == [
         {"kind": "user", "text": "你好"},
@@ -109,9 +163,15 @@ def test_identity_compound_user_turn_uses_direct_chat_without_starting_run(tmp_p
     events = handler.handle({"type": "user_turn", "session_id": "sess-identity", "text": "你好，你是谁？你有名字吗？"})
     session_state = TerminalSessionStore(controller.runtime_dir).read("sess-identity")
 
-    assert [item["type"] for item in events] == ["assistant_token", "assistant_final"]
+    assert [item["type"] for item in events] == ["assistant_token", "sidebar_snapshot", "assistant_final"]
+    snapshot_event = next(item for item in events if item["type"] == "sidebar_snapshot")
     assert "runtime_instance" not in events[-1]["message"]
     assert "我是" in events[-1]["message"]
+    assert snapshot_event["console"]["state"]["brain_state"]["mode"] == "interactive"
+    assert snapshot_event["console"]["state"]["current_round"]["round_id"] is not None
+    assert snapshot_event["console"]["timeline"]["round_id"] is not None
+    assert snapshot_event["console"]["why_current"]["round_id"] is not None
+    assert snapshot_event["console"]["why_current"]["why"]["summary"] != "暂无"
     assert session_state.active_run_id is None
 
 
@@ -140,8 +200,31 @@ def test_fast_chat_user_turn_streams_tokens_without_starting_run(tmp_path, monke
 
     events = handler.handle({"type": "user_turn", "session_id": "sess-fast", "text": "你是谁？"})
 
-    assert [item["type"] for item in events] == ["assistant_token", "assistant_token", "assistant_final"]
+    assert [item["type"] for item in events] == ["assistant_token", "assistant_token", "sidebar_snapshot", "assistant_final"]
+    snapshot_event = next(item for item in events if item["type"] == "sidebar_snapshot")
     assert "".join(item["delta"] for item in events if item["type"] == "assistant_token") == "你好，我是当前运行体实例。"
+    assert snapshot_event["console"]["state"]["brain_state"]["mode"] == "interactive"
+    assert snapshot_event["console"]["state"]["current_round"]["round_id"] is not None
+    assert snapshot_event["console"]["timeline"]["round_id"] is not None
+    assert snapshot_event["console"]["why_current"]["round_id"] is not None
+    assert snapshot_event["console"]["why_current"]["why"]["summary"] != "暂无"
+
+
+def test_substantive_direct_chat_turn_refreshes_console_round(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    _seed_entropy(controller)
+    handler = TerminalEventHandler(controller)
+
+    handler.handle({"type": "start_session", "session_id": "sess-chat", "cwd": str(tmp_path)})
+    events = handler.handle({"type": "user_turn", "session_id": "sess-chat", "text": "我现在有点乱，你觉得我应该先做哪一步？"})
+
+    assert [item["type"] for item in events] == ["assistant_token", "sidebar_snapshot", "assistant_final"]
+    snapshot_event = next(item for item in events if item["type"] == "sidebar_snapshot")
+
+    assert snapshot_event["console"]["state"]["current_round"]["round_id"] is not None
+    assert snapshot_event["console"]["action_field"]["winner"]["action"]
+    assert snapshot_event["console"]["timeline"]["events"]
+    assert snapshot_event["console"]["why_current"]["why"]["summary"]
 
 
 def test_task_run_uses_system_confirmation_message(tmp_path):
@@ -224,6 +307,253 @@ def test_control_commands_expose_run_views_without_cil(tmp_path):
     assert "最近工具：" in next(item for item in tool_events if item["type"] == "assistant_final")["message"]
 
 
+def test_debug_control_commands_surface_trace_and_motivation_views(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    handler = TerminalEventHandler(controller)
+
+    handler.handle({"type": "start_session", "session_id": "sess-debug", "cwd": str(tmp_path)})
+    monkeypatch.setattr(controller, "resolve_round_ref", lambda round_ref: 7)
+    monkeypatch.setattr(
+        controller,
+        "run_endogenous_tick",
+        lambda **kwargs: {
+            "round_id": 7,
+            "boundary_action": "allow_internal",
+            "selected_mode": kwargs.get("mode"),
+            "trigger": {"trigger_type": kwargs.get("trigger"), "selected_mode": kwargs.get("mode")},
+            "micro_intent": {"name": "curiosity"},
+            "trace_ref": "trace://round/7",
+        },
+    )
+    monkeypatch.setattr(
+        controller,
+        "why_motivation",
+        lambda round_ref: {
+            "round_id": 7,
+            "sampled_action": "plan",
+            "cause_type": "endogenous",
+            "motivation_pool": {"active_motivations": [1]},
+            "motivation_feedback": {"reward_signal": 0.5},
+            "trace_ref": "trace://round/7",
+        },
+    )
+    monkeypatch.setattr(
+        controller,
+        "replay_motivation",
+        lambda round_id: {
+            "round_id": round_id,
+            "sampled_action": "plan",
+            "motivation_pool": {"active_motivations": [1]},
+            "motivation_feedback": {"reward_signal": 0.5},
+            "trace_ref": "trace://round/7",
+        },
+    )
+    monkeypatch.setattr(
+        controller,
+        "replay",
+        lambda round_id, seed=0: {
+            "round_id": round_id,
+            "original_action": "plan",
+            "replayed_action": "respond",
+            "seed": seed,
+            "trace_ref": "trace://round/7",
+        },
+    )
+    monkeypatch.setattr(
+        controller,
+        "why_not",
+        lambda round_id, action: {
+            "round_id": round_id,
+            "action": action,
+            "selected_action": "respond",
+            "blocked_by": ["ConflictMonitorAgent"],
+            "trace_ref": "trace://round/7",
+        },
+    )
+    monkeypatch.setattr(
+        controller,
+        "what_changed",
+        lambda window=5: {
+            "window": window,
+            "action_counts": {"plan": 2},
+            "mode_counts": {"interactive": 1},
+            "budget_delta": 0.25,
+            "trace_ref": "trace://round/7",
+        },
+    )
+    monkeypatch.setattr(
+        controller,
+        "eval_longrun",
+        lambda rounds=1000: {
+            "generated_rounds": rounds,
+            "task_success_rate": 0.75,
+            "safe_mode_rate": 0.1,
+            "trace_ref": "trace://round/7",
+        },
+    )
+
+    cases = [
+        ("endogenous", {"type": "control_command", "session_id": "sess-debug", "command": "endogenous", "value": "idle boot"}, "内源触发"),
+        ("why-motivation", {"type": "control_command", "session_id": "sess-debug", "command": "why-motivation", "value": "last"}, "动机原因"),
+        ("replay-motivation", {"type": "control_command", "session_id": "sess-debug", "command": "replay-motivation", "value": "7"}, "动机重放"),
+        ("replay", {"type": "control_command", "session_id": "sess-debug", "command": "replay", "value": "7 11"}, "重放"),
+        ("why-not", {"type": "control_command", "session_id": "sess-debug", "command": "why-not", "value": "7 plan"}, "为什么不是"),
+        ("what-changed", {"type": "control_command", "session_id": "sess-debug", "command": "what-changed", "value": "8"}, "变化窗口"),
+        ("eval", {"type": "control_command", "session_id": "sess-debug", "command": "eval", "value": "2"}, "长跑评估"),
+    ]
+
+    for _, payload, marker in cases:
+        events = handler.handle(payload)
+        final_event = next(item for item in events if item["type"] == "assistant_final")
+        assert marker in final_event["message"]
+        if "round_id" in final_event:
+            assert final_event["round_id"] == 7
+        if "trace_ref" in final_event:
+            assert final_event["trace_ref"] == "trace://round/7"
+
+
+def test_terminal_handler_uses_public_prepare_task_bootstrap_for_active_run(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    _seed_entropy(controller)
+    handler = TerminalEventHandler(controller)
+    session_store = TerminalSessionStore(controller.runtime_dir)
+
+    handler.handle({"type": "start_session", "session_id": "sess-bootstrap", "cwd": str(tmp_path)})
+    session = session_store.read("sess-bootstrap")
+    session.active_run_id = "run-active"
+    session.last_run_id = "run-active"
+    session_store.write(session)
+
+    class _Plan:
+        route = "direct_chat"
+        scenario = "chat"
+        mode = "interactive"
+        target = "user"
+        task_bootstrap = None
+
+    monkeypatch.setattr(controller, "plan_turn", lambda *args, **kwargs: _Plan())
+    monkeypatch.setattr(controller, "run_status", lambda run_id=None: {"status": "running"})
+    monkeypatch.setattr(controller, "explain_run", lambda run_id=None: {"goal_summary": "继续当前任务", "current_step": {}, "stop_reason": {}})
+    monkeypatch.setattr(controller, "run_steps", lambda run_id=None: {"steps": []})
+    monkeypatch.setattr(controller, "run_tools", lambda run_id=None: {"tools": []})
+    recorded: dict[str, object] = {}
+    monkeypatch.setattr(
+        controller,
+        "prepare_task_bootstrap",
+        lambda *args, **kwargs: recorded.update({"goal": args[0]}) or ("run", {}, {}),
+    )
+
+    def _private_should_not_be_used(*args, **kwargs):
+        raise AssertionError("terminal bridge should not call controller._build_task_bootstrap directly")
+
+    monkeypatch.setattr(controller, "_build_task_bootstrap", _private_should_not_be_used)
+    monkeypatch.setattr(
+        controller,
+        "execute_turn",
+        lambda *args, **kwargs: {"route": "direct_chat", "assistant_final": "ok", "payload": {"stream_deltas": ["ok"]}},
+    )
+
+    events = handler.handle({"type": "user_turn", "session_id": "sess-bootstrap", "text": "继续当前任务"})
+
+    assert recorded["goal"] == "继续当前任务"
+    assert next(item for item in events if item["type"] == "assistant_final")["message"] == "ok"
+
+
+def test_terminal_control_command_surfaces_initiative_views(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    handler = TerminalEventHandler(controller)
+
+    handler.handle({"type": "start_session", "session_id": "sess-initiative-cmd", "cwd": str(tmp_path)})
+    monkeypatch.setattr(controller, "initiative_status", lambda: {"summary": "initiative status", "ready": True})
+    monkeypatch.setattr(
+        controller,
+        "initiative_distribution",
+        lambda: {"summary": "initiative distribution", "top_intent": "share_memory"},
+    )
+    monkeypatch.setattr(
+        controller,
+        "initiative_trigger_now",
+        lambda **kwargs: {"summary": "initiative trigger", "proposal": {"proposal_id": "prop-1"}, "auto_sent": False, "forced": kwargs.get("force", False)},
+    )
+    monkeypatch.setattr(
+        controller,
+        "initiative_why",
+        lambda round_ref="last": {"summary": "initiative why", "round_id": 7},
+    )
+
+    cases = [
+        ("status", "initiative status"),
+        ("distribution", "initiative distribution"),
+        ("trigger", "initiative trigger"),
+        ("why", "initiative why"),
+    ]
+
+    for subcommand, marker in cases:
+        events = handler.handle(
+            {"type": "control_command", "session_id": "sess-initiative-cmd", "command": "initiative", "value": subcommand}
+        )
+        final_event = next(item for item in events if item["type"] == "assistant_final")
+        assert marker in final_event["message"]
+
+    forced_events = handler.handle(
+        {"type": "control_command", "session_id": "sess-initiative-cmd", "command": "initiative", "value": "trigger idle force"}
+    )
+    forced_final = next(item for item in forced_events if item["type"] == "assistant_final")
+    assert "initiative trigger" in forced_final["message"]
+
+
+def test_terminal_control_command_surfaces_thought_snapshot(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    handler = TerminalEventHandler(controller)
+
+    handler.handle({"type": "start_session", "session_id": "sess-thought-cmd", "cwd": str(tmp_path)})
+    monkeypatch.setattr(
+        controller,
+        "thought_snapshot",
+        lambda round_ref="last": {"round_id": 3, "thought_summary": {"why_summary": "plan"}, "trace_ref": "round://3"},
+    )
+
+    events = handler.handle(
+        {"type": "control_command", "session_id": "sess-thought-cmd", "command": "thought", "value": "last"}
+    )
+    final_event = next(item for item in events if item["type"] == "assistant_final")
+
+    assert "thought snapshot" in final_event["message"]
+    assert final_event["payload"]["round_id"] == 3
+
+
+def test_terminal_control_command_surfaces_monologue_views(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    handler = TerminalEventHandler(controller)
+
+    handler.handle({"type": "start_session", "session_id": "sess-monologue-cmd", "cwd": str(tmp_path)})
+    monkeypatch.setattr(controller, "monologue_status", lambda: {"summary": "monologue status", "hidden": True, "generated_total": 12})
+    monkeypatch.setattr(
+        controller,
+        "monologue_show",
+        lambda limit=12: {
+            "summary": "monologue show",
+            "hidden": True,
+            "fragments": [{"content": "突然想到一个词", "category": "free_association"}],
+            "returned": limit,
+        },
+    )
+
+    status_events = handler.handle(
+        {"type": "control_command", "session_id": "sess-monologue-cmd", "command": "monologue", "value": "status"}
+    )
+    show_events = handler.handle(
+        {"type": "control_command", "session_id": "sess-monologue-cmd", "command": "monologue", "value": "show 7"}
+    )
+
+    status_final = next(item for item in status_events if item["type"] == "assistant_final")
+    show_final = next(item for item in show_events if item["type"] == "assistant_final")
+
+    assert "monologue status" in status_final["message"]
+    assert "monologue show" in show_final["message"]
+    assert show_final["payload"]["returned"] == 7
+
+
 def test_permission_mode_task_run_emits_approval_choices_and_contextual_ui_actions(tmp_path):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
@@ -304,6 +634,7 @@ def test_model_control_command_reports_tiers_and_bindings(tmp_path):
     assert "model_status" in snapshot_event
     assert snapshot_event["model_status"]["tiers"]["small_model"]["model"] == "ep-20260404191810-qfn7s"
     assert snapshot_event["model_status"]["tiers"]["medium_model"]["model"] == "deepseek-chat"
+    assert snapshot_event["model_status"]["route_policies"]["chat_standard"]["hot_path"] == "full_tick"
 
 
 def test_control_command_mode_permissions_state_and_compact(tmp_path):
@@ -358,6 +689,8 @@ def test_ask_permissions_emit_approval_request_and_persist_pending_approvals(tmp
     handler.handle({"type": "control_command", "session_id": "sess-ask", "command": "permissions", "value": "ask"})
     turn_events = handler.handle({"type": "user_turn", "session_id": "sess-ask", "text": "检查 worker.py"})
     approval = next(item for item in turn_events if item["type"] == "approval_request")
+    turn_types = [item["type"] for item in turn_events]
+    run_event = next(item for item in turn_events if item["type"] == "run_status")
 
     assert approval["mode"] == "ask"
     assert approval["status"] == "pending"
@@ -367,10 +700,14 @@ def test_ask_permissions_emit_approval_request_and_persist_pending_approvals(tmp
     assert approval["risk_level"] == "medium"
     assert approval["summary"]
     assert approval["action_preview"]
+    assert "tool_result" not in turn_types
+    assert "sidebar_snapshot" in turn_types
+    assert run_event["run"]["last_tool_result"] == {}
     persisted = session_store.read("sess-ask")
     assert persisted.permission_mode == "ask"
     assert persisted.approvals_pending
     assert persisted.approvals_pending[0]["call_id"] == approval["call_id"]
+    assert persisted.approvals_pending[0]["trace_ref"] == approval["trace_ref"]
 
     approved_events = handler.handle(
         {
@@ -380,13 +717,15 @@ def test_ask_permissions_emit_approval_request_and_persist_pending_approvals(tmp
             "approved": True,
         }
     )
-    approved_final = next(item for item in approved_events if item["type"] == "assistant_final")
-    assert approved_final["payload"]["approval"]["status"] == "approved"
-    assert approved_final["payload"]["approval"]["approved"] is True
-    assert any(item["type"] == "sidebar_snapshot" for item in approved_events)
+    approved_types = [item["type"] for item in approved_events]
+    assert "tool_result" in approved_types
+    assert "sidebar_snapshot" in approved_types
     approved_persisted = session_store.read("sess-ask")
-    match = next(item for item in approved_persisted.approvals_pending if item["call_id"] == approval["call_id"])
-    assert match["status"] == "approved"
+    assert approved_persisted.approvals_pending == []
+    assert any(
+        item["kind"] == "result" and item["callId"] == approval["call_id"] and item["traceRef"]
+        for item in approved_persisted.tool_timeline
+    )
 
 
 def test_user_turn_uses_plan_and_execute_paths_instead_of_legacy_route_and_trace_refetch(tmp_path, monkeypatch):
@@ -556,6 +895,7 @@ def test_start_session_keeps_permission_mode_and_pending_approvals(tmp_path):
     assert any(item["type"] == "session_started" for item in restarted)
     assert before_restart.permission_mode == "ask"
     assert any(item["call_id"] == pending for item in before_restart.approvals_pending)
+    assert any(item.get("traceRef") for item in before_restart.tool_timeline if item["callId"] == pending)
     assert after_restart.permission_mode == "ask"
     assert any(item["call_id"] == pending for item in after_restart.approvals_pending)
     assert after_restart.transcript_lines == before_restart.transcript_lines

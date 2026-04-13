@@ -513,3 +513,49 @@ def test_skill_executor_serializes_canonical_contribution_without_alias_postchec
     assert result.output["modulated_delta"] == {"plan": 0.3}
     assert result.output["inhibitory_drive"] == {"rest": 0.2}
     assert {"raw_signal", "modulated_delta", "inhibitory_drive", "failure_taxonomy"}.issubset(result.output)
+
+
+def test_skill_executor_does_not_rewrite_breaker_file_for_steady_success(tmp_path, monkeypatch):
+    spec = SkillSpec(
+        name="steady_success",
+        owner_module="demo",
+        input_schema={"event": RoundEvent},
+        output_schema={"flag": bool},
+        timeout_ms=20,
+        cost_class="L",
+        failure_policy="fallback_to_rules",
+        trace_tags=["demo"],
+        skill_kind="planning",
+        output_kind="gate",
+        policy_check=True,
+        permission=SkillPermissionProfile(external_io=False),
+        fallback_route=FallbackRoute(strategy="fallback_to_rules", target="demo.fallback", cost_class="L"),
+        breaker_policy=CircuitBreakerPolicy(failure_threshold=3, cooldown_rounds=5),
+    )
+    executor = SkillExecutor({"steady_success": spec}, circuit_breaker_path=tmp_path / "circuit_breakers.json")
+    writes: list[str] = []
+
+    original_write_text_atomic = executor._write_text_atomic
+
+    def tracked_write(path, content):
+        writes.append(str(path))
+        return original_write_text_atomic(path, content)
+
+    monkeypatch.setattr(executor, "_write_text_atomic", tracked_write)
+
+    executor.execute(
+        round_id=1,
+        skill_name="steady_success",
+        inputs={"event": {"source": "user", "content": "ok"}},
+        provider=lambda event: {"flag": True},
+    )
+    first_write_count = len(writes)
+    executor.execute(
+        round_id=2,
+        skill_name="steady_success",
+        inputs={"event": {"source": "user", "content": "ok"}},
+        provider=lambda event: {"flag": True},
+    )
+
+    assert first_write_count >= 1
+    assert len(writes) == first_write_count

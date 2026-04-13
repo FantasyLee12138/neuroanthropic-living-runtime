@@ -23,6 +23,38 @@ model_routes:
     timeout_ms: 60000
     retries: 0
     enabled: true
+  renderer_fallback_fast:
+    backend: deepseek
+    model: deepseek-chat
+    timeout_ms: 12000
+    retries: 0
+    enabled: true
+    base_url: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
+  renderer_fallback_small:
+    backend: doubao
+    model: ep-20260404191810-qfn7s
+    timeout_ms: 12000
+    retries: 0
+    enabled: true
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    api_key_env: ARK_SMALL_MODEL_API_KEY
+  monologue_stream:
+    backend: doubao
+    model: ep-20260404191810-qfn7s
+    timeout_ms: 12000
+    retries: 0
+    enabled: true
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    api_key_env: ARK_SMALL_MODEL_API_KEY
+  autonomy_self_run:
+    backend: doubao
+    model: ep-20260404191810-qfn7s
+    timeout_ms: 12000
+    retries: 0
+    enabled: true
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    api_key_env: ARK_SMALL_MODEL_API_KEY
   chat_fast:
     backend: deepseek
     model: deepseek-chat
@@ -91,8 +123,11 @@ model_tiers:
 agent_model_bindings:
   planner: medium_model
   PFCAgent: medium_model
+  InitiativeInteractionAgent: state_machine
   PerspectiveModel: medium_model
   Renderer: large_model
+  MonologueStream: small_model
+  AutonomySelfRun: small_model
   SalienceAgent: small_model
   ValueAgent: small_model
   BodyStateAgent: state_machine
@@ -121,3 +156,22 @@ models:
   timeout_seconds: 20
   retries: 1
   max_output_tokens: 512
+initiative_trigger:
+  idle_seconds_threshold: 300
+  vitality_threshold: 0.8
+  relation_strength_threshold: 0.6
+  habit_strength_threshold: 0.45
+  proposal_posterior_threshold: 0.7
+  hourly_limit: 0
+  cooldown_seconds: 600
+  require_memory_backing: true
+  auto_send_enabled: true
+monologue_stream:
+  generator_mode: model
+  hidden_by_default: true
+  bootstrap_seconds: 6
+  min_interval_ms: 120
+  max_interval_ms: 900
+  min_fragments_per_pulse: 1
+  max_fragments_per_pulse: 3
+  default_show_limit: 12

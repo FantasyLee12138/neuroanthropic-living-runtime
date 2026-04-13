@@ -2,7 +2,7 @@ import math
 from pathlib import Path
 
 from nalr.runtime.controller import RuntimeController
-from nalr.schemas.models import ActionBookkeepingState, ActionEvidenceSignal, RoundEvent, RuntimeState
+from nalr.schemas.models import ActionBookkeepingState, ActionEvidenceSignal, QuantumEntropyRef, RoundEvent, RuntimeState
 
 
 CONFIG_ROOT = Path(__file__).resolve().parents[2] / "config"
@@ -198,6 +198,78 @@ def test_task_profile_reduces_stochastic_noise_when_control_strength_is_higher(t
     )
 
     assert task_stochastic.lambda_noise < chat_stochastic.lambda_noise
+
+
+def test_stochastic_trace_flags_when_lambda_noise_flips_top_action(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.mode = "interactive"
+    state.body_energy = 0.12
+    state.budget_remaining = 0.08
+    state.focus_lock_count = 0
+    deterministic = {
+        "plan": 0.51,
+        "respond": 0.49,
+    }
+    action_bookkeeping = ActionBookkeepingState(
+        p_base=dict(deterministic),
+        ci={action: 0.05 for action in deterministic},
+        gate={action: 1.0 for action in deterministic},
+        risk_suppressor={action: 1.0 for action in deterministic},
+    )
+    control_ledger = {
+        "ci": dict(action_bookkeeping.ci),
+        "gate": dict(action_bookkeeping.gate),
+        "risk_suppressor": dict(action_bookkeeping.risk_suppressor),
+    }
+    event = RoundEvent(
+        source="user",
+        content="Please help me decide, but I may slip into an impulsive reply.",
+        target="user",
+        valence=0.42,
+    )
+    relation_state = {
+        "closeness": 0.55,
+        "boundary_level": 0.20,
+        "relationship_risk": 0.05,
+        "privacy_level": 0.20,
+    }
+
+    def fake_truncated_normal(*, sigma, low, high, purpose, node_name):
+        del sigma, low, high, purpose
+        value = 0.18 if node_name == "xi_emo" else -0.09
+        return value, QuantumEntropyRef(source="test", endpoint="test://entropy", batch_id="batch", node_name=node_name)
+
+    monkeypatch.setattr(controller.entropy_pool, "truncated_normal", fake_truncated_normal)
+    monkeypatch.setattr(
+        controller.entropy_pool,
+        "beta_like",
+        lambda **kwargs: (0.5, QuantumEntropyRef(source="test", endpoint="test://entropy", batch_id="batch", node_name="r_intensity")),
+    )
+    monkeypatch.setattr(
+        controller.entropy_pool,
+        "uniform_range",
+        lambda low, high, **kwargs: (0.0, QuantumEntropyRef(source="test", endpoint="test://entropy", batch_id="batch", node_name=kwargs["node_name"])),
+    )
+    monkeypatch.setattr(controller, "_kl_divergence", lambda q, p: 0.0)
+
+    mixed, stochastic = controller._apply_stochastic_layer(
+        deterministic,
+        action_bookkeeping,
+        control_ledger,
+        state,
+        event,
+        {"output_warmth_variance": 0.18, "pfc_base_share": 0.18},
+        relation_state,
+        0.12,
+        23,
+        action_energy={action: math.log(max(value, 1e-9)) for action, value in deterministic.items()},
+    )
+
+    assert max(mixed, key=mixed.get) == "respond"
+    assert stochastic.winner_flip_detected is True
+    assert stochastic.winner_flip_from == "plan"
+    assert stochastic.winner_flip_to == "respond"
 
 
 def test_tick_records_resource_biases_and_temperament_drift_state(tmp_path):

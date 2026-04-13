@@ -8,6 +8,9 @@ agents:
   PFCAgent:
     enabled: true
     weight: 1.0
+  InitiativeInteractionAgent:
+    enabled: true
+    weight: 0.7
   ValueAgent:
     enabled: true
     weight: 0.9

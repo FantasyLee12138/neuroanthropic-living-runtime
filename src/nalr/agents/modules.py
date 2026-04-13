@@ -38,6 +38,7 @@ OWNER_PRIORITY_BUCKET = {
     "RelationshipAgent": "relation_boundary",
     "PerspectiveModel": "relation_boundary",
     "PFCAgent": "task_goal",
+    "InitiativeInteractionAgent": "task_goal",
     "SalienceAgent": "task_goal",
     "ValueAgent": "task_goal",
     "HippocampusAgent": "task_goal",
@@ -55,6 +56,7 @@ OWNER_CONTROL_DOMAIN = {
     "RelationshipAgent": "relation",
     "PerspectiveModel": "relation",
     "PFCAgent": "task",
+    "InitiativeInteractionAgent": "task",
     "SalienceAgent": "task",
     "ValueAgent": "task",
     "HippocampusAgent": "task",
@@ -595,6 +597,30 @@ class PFCAgent(BaseAgent):
         context: dict,
     ) -> ProbabilisticContribution:
         return self.fallback_generate_candidates(event, state, scenario, context)
+
+
+class InitiativeInteractionAgent(BaseAgent):
+    def __init__(self) -> None:
+        super().__init__(name="InitiativeInteractionAgent")
+
+    def build_initiative_prior(self, posterior: dict[str, float]) -> ProbabilisticContribution:
+        prefs = {
+            "connect": float(posterior.get("check_relation", 0.0)) * 0.08 + float(posterior.get("share_memory", 0.0)) * 0.05,
+            "respond": float(posterior.get("express_state", 0.0)) * 0.06 + float(posterior.get("share_memory", 0.0)) * 0.04,
+            "plan": float(posterior.get("follow_up_task", 0.0)) * 0.08,
+            "rest": float(posterior.get("stay_silent", 0.0)) * 0.05,
+        }
+        return _action_contribution(
+            self.name,
+            "initiative",
+            prefs,
+            confidence=0.58,
+            reason="initiative posterior projected into action field",
+            projection_reason="initiative prior projected from endogenous social drive",
+            applied_at_stage="initiative_overlay",
+            native_operator="initiative_prior",
+            sigma_scale=0.88,
+        )
 
 class UnconsciousAgent(BaseAgent):
     def __init__(self) -> None:
@@ -1922,6 +1948,7 @@ def build_agents(
         RelationshipAgent(),
         ResourceAgent(),
         PFCAgent(),
+        InitiativeInteractionAgent(),
         HabitAgent(),
         DesireAgent(),
         DMNAgent(),

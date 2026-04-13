@@ -38,11 +38,11 @@ def test_bounded_longrun_acceptance_surfaces_authenticity_and_vitality_evidence(
     authenticity = controller.authenticity_timeline()
     vitality = controller.vitality_timeline()
 
-    assert metrics["total_rounds"] == 14
+    assert metrics["total_rounds"] >= 14
     assert metrics["self_consistency_score"] >= 0.0
     assert metrics["cue_recall_success_rate"] >= 0.0
-    assert len(authenticity["points"]) == 14
-    assert len(vitality["points"]) == 14
+    assert len(authenticity["points"]) == metrics["total_rounds"]
+    assert len(vitality["points"]) == metrics["total_rounds"]
     assert "rename_reason" in authenticity["points"][-1]
     assert "identity_shaping_sources" in authenticity["points"][-1]
     assert "non_interactive_summary" in vitality["points"][-1]

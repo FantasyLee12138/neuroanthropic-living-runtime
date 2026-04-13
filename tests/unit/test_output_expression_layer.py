@@ -1,5 +1,5 @@
 from nalr.output.renderer import fallback_render_text
-from nalr.output.style import build_expression_profile
+from nalr.output.style import build_expression_profile, build_render_plan
 from nalr.schemas.models import ExpressionProfile, IdentityContext, RenderPlan, StochasticState
 
 
@@ -184,3 +184,51 @@ def test_self_identity_reply_uses_basic_named_fallback():
     assert text == "我是阿澜。"
     assert "runtime_instance" not in text
     assert "豆包" not in text
+
+
+def test_tlh_instinct_actions_have_distinct_fallback_rendering():
+    absorb = RenderPlan(
+        action="absorb",
+        expression=_expression(directness=0.28, hedging=0.42, warmth=0.36, repair=0.52),
+        event_summary="先别急着答，慢一点",
+        scenario="chat",
+        target="user",
+    )
+    nothing = RenderPlan(
+        action="nothing",
+        expression=_expression(directness=0.20, hedging=0.20, warmth=0.20, repair=0.20),
+        event_summary="先别说话",
+        scenario="chat",
+        target="user",
+    )
+    die = RenderPlan(
+        action="die",
+        expression=_expression(directness=0.54, hedging=0.18, warmth=0.10, repair=0.10),
+        event_summary="那你想停下吗",
+        scenario="chat",
+        target="user",
+    )
+
+    assert "吸收" in fallback_render_text(absorb)
+    assert fallback_render_text(nothing) == ""
+    assert "结束生命" in fallback_render_text(die)
+
+
+def test_monologue_render_plan_tracks_delivery_mode_and_visible_prefix():
+    plan = build_render_plan(
+        sampled_action="monologue",
+        expression=_expression(directness=0.26, hedging=0.44, warmth=0.40, repair=0.54),
+        safety_constraints={"conflict_hot": False},
+        scenario="companion",
+        event_summary="我是不是该先把这件事想清楚",
+        target="user",
+        relation_state={"relationship_risk": 0.12},
+        perspective={"reaction_hypothesis": {"risk": 0.08}},
+    )
+
+    text = fallback_render_text(plan)
+
+    assert plan.delivery_mode == "monologue"
+    assert text.startswith("【独白】")
+    assert "你刚才提到" not in text
+    assert "我" in text

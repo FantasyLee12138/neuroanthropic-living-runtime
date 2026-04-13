@@ -90,7 +90,13 @@ def read_snapshot_rows(snapshot_path: Path, query: str, params: list[object] | N
         return []
     conn = duckdb.connect()
     try:
-        cursor = conn.execute(query, [str(snapshot_path), *(params or [])])
+        try:
+            cursor = conn.execute(query, [str(snapshot_path), *(params or [])])
+        except duckdb.InvalidInputException as exc:
+            message = str(exc)
+            if "too small to be a Parquet file" in message or "No magic bytes found at end of file" in message:
+                return []
+            raise
         columns = [item[0] for item in cursor.description]
         return [dict(zip(columns, row, strict=False)) for row in cursor.fetchall()]
     finally:

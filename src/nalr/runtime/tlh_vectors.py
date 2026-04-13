@@ -15,6 +15,7 @@ TLH_ACTION_VECTORS: dict[str, dict[str, float]] = {
     "clarify": {"E": 0.52, "F": 0.26, "S": 0.34, "M": 0.78},
     "wander": {"E": 0.36, "F": 0.42, "S": 0.84, "M": 0.46},
     "absorb": {"E": 0.30, "F": 0.58, "S": 0.74, "M": 0.72},
+    "monologue": {"E": 0.48, "F": 0.44, "S": 0.72, "M": 0.64},
     "nothing": {"E": 0.18, "F": 0.66, "S": 0.34, "M": 0.40},
     "die": {"E": 0.08, "F": 0.88, "S": 0.22, "M": 0.12},
     "short_reply": {"E": 0.54, "F": 0.36, "S": 0.32, "M": 0.54},
@@ -25,7 +26,7 @@ REGION_ACTION_HINTS: dict[str, tuple[str, ...]] = {
     "withdraw": ("nothing",),
     "hibernate": ("rest",),
     "dissolve": ("die",),
-    "absorb": ("absorb", "wander", "recall"),
+    "absorb": ("absorb", "wander", "recall", "monologue"),
 }
 
 
@@ -134,7 +135,7 @@ def build_tlh_modulation_directions(
         sketch_center = {axis: 0.5 for axis in AXES}
     return {
         "memory_fragments": mean_action_vector(["absorb", "recall", "nothing"], vectors),
-        "spontaneous": mean_action_vector(["wander", "absorb", "recall"], vectors),
+        "spontaneous": mean_action_vector(["wander", "absorb", "recall", "monologue"], vectors),
         "reject_all": mean_action_vector(["rest", "nothing", "die"], vectors),
         "emergent_growth": sketch_center,
     }
@@ -216,5 +217,5 @@ def region_scores_from_match_scores(match_scores: dict[str, float]) -> dict[str,
         "withdraw": round(mapped.get("nothing", 0.0), 6),
         "hibernate": round(mapped.get("rest", 0.0), 6),
         "dissolve": round(mapped.get("die", 0.0), 6),
-        "absorb": round(max(mapped.get("absorb", 0.0), mapped.get("wander", 0.0), mapped.get("recall", 0.0)), 6),
+        "absorb": round(max(mapped.get("absorb", 0.0), mapped.get("wander", 0.0), mapped.get("recall", 0.0), mapped.get("monologue", 0.0)), 6),
     }

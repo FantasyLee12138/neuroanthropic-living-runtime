@@ -1,8 +1,4 @@
 entropy:
-  provider: anu_qrng
-  endpoint: "https://qrng.anu.edu.au/API/jsonI.php"
-  timeout_s: 0.6
+  provider: macos_os_urandom
   prefetch_bytes: 256
-  min_batch_bytes: 32
-  max_batch_bytes: 1024
-  hard_block_on_unavailable: false
+  hard_block_on_unavailable: true

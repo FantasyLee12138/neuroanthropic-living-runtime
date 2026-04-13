@@ -60,3 +60,13 @@ def test_rewrite_snapshot_replaces_existing_file(tmp_path):
     finally:
         conn.close()
     assert count == 1
+
+
+def test_read_snapshot_rows_returns_empty_when_snapshot_file_is_too_small(tmp_path):
+    snapshot_path = tmp_path / "runtime" / "parquet" / "persona_state.parquet"
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    snapshot_path.write_bytes(b"")
+
+    rows = read_snapshot_rows(snapshot_path, "select payload_json from read_parquet(?)")
+
+    assert rows == []

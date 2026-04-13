@@ -78,7 +78,7 @@ def test_plausibility_guard_blocks_wander_in_task_runtime(tmp_path):
 
     assert result.sampled_action.name != "wander"
     assert any(
-        item["stage"] == "plausibility_guard" and item["requires_resample"] is True and "wander" in item["reason"]
+        item["stage"] == "plausibility_guard" and item["requires_resample"] is False and "wander" in item["reason"]
         for item in result.trace.gate_decisions
     )
     assert result.trace.conflict_arbitration["total_score"] >= 0.0

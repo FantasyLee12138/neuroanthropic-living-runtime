@@ -252,6 +252,86 @@ def test_read_round_rewrites_legacy_canonical_parquet_to_canonical_payload_and_c
     assert "distribution_state_json" not in trace_columns
 
 
+def test_trace_store_prewarms_recent_signal_views_and_updates_storage_status(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    for index, cue in enumerate(("tea", "coffee", "walk"), start=1):
+        controller.tick(
+            RoundEvent(
+                source="user",
+                content=f"remember {cue} and plan step {index}",
+                target="user",
+                cue=cue,
+                valence=0.1,
+            ),
+            scenario="task",
+            mode="interactive",
+        )
+    controller.flush_pending_io(raise_on_error=True)
+
+    store = TraceStore(tmp_path / ".alive")
+    warmed = store.prewarm_recent_views(limit=2)
+    views = store.recent_round_signal_views(limit=2)
+    status = store.trace_storage_status()
+
+    assert warmed["round_count"] == 2
+    assert len(views) == 2
+    assert status["signal_view_cache_size"] >= 2
+    assert status["signal_view_cache_limit"] >= 2
+
+
+def test_cached_round_reads_skip_repeated_legacy_parquet_scan(tmp_path, monkeypatch):
+    payload = {
+        "session_id": "session-1",
+        "recorded_at": "2026-04-08T00:00:00Z",
+        "recorded_date": "2026-04-08",
+        "round_id": 1,
+        "scenario": "task",
+        "mode": "interactive",
+        "sampled_action": "plan",
+        "probability_field": {
+            "action": {
+                "winner_target": "plan",
+                "winner_posterior": {"plan": 0.8, "respond": 0.2},
+            },
+            "token_state": {},
+            "couplings": [],
+        },
+        "state_snapshot": {"mode": "interactive", "safe_mode": False, "budget_remaining": 0.8},
+        "proposal_summaries": [],
+        "gate_decisions": [],
+    }
+    seed_store = TraceStore(tmp_path)
+    seed_store._append_dataset_rows(
+        seed_store.round_canonical_dir,
+        [
+            {
+                "session_id": payload["session_id"],
+                "recorded_at": payload["recorded_at"],
+                "recorded_date": payload["recorded_date"],
+                "round_id": payload["round_id"],
+                "payload_json": json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            }
+        ],
+        schema=ROUND_CANONICAL_SCHEMA,
+        partition_keys=("recorded_date", "round_id"),
+    )
+
+    store = TraceStore(tmp_path)
+    scan_count = 0
+    original_scan = store._raw_round_payloads_from_parquet
+
+    def counted_scan():
+        nonlocal scan_count
+        scan_count += 1
+        return original_scan()
+
+    monkeypatch.setattr(store, "_raw_round_payloads_from_parquet", counted_scan)
+
+    assert store.read_round(1)["round_id"] == 1
+    assert store.list_rounds()[0]["round_id"] == 1
+    assert scan_count == 0
+
+
 def test_export_parquet_rewrites_legacy_distribution_state_to_canonical_columns(tmp_path):
     store = TraceStore(tmp_path)
     legacy_payload = {

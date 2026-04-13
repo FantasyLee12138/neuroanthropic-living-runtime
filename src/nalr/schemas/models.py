@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -151,6 +152,14 @@ class RoundEvent:
     cue_quality: float = 0.0
 
 
+class ProposalType(str, Enum):
+    THINK = "think"
+    ACT = "act"
+    REMEMBER = "remember"
+    SPEAK = "speak"
+    MONOLOGUE = "monologue"
+
+
 @dataclass
 class Proposal:
     agent_name: str
@@ -160,6 +169,34 @@ class Proposal:
     veto: bool = False
     trace_tags: list[str] = field(default_factory=list)
     reason: str = ""
+    proposal_type: ProposalType | str = ProposalType.ACT
+    content: str = ""
+    intent: str = ""
+    target: str = "user"
+    visibility: Literal["external", "internal"] = "external"
+    grounded_in: dict[str, list[str]] = field(default_factory=dict)
+    intrinsic_value: float = 0.0
+    speech_cost: float = 0.0
+    final_score: float = 0.0
+    conversion_from_monologue: bool = False
+
+    def __post_init__(self) -> None:
+        if isinstance(self.proposal_type, str):
+            self.proposal_type = ProposalType(str(self.proposal_type or ProposalType.ACT.value))
+        self.target = str(self.target or "user")
+        self.content = str(self.content or "")
+        self.intent = str(self.intent or "")
+        self.reason = str(self.reason or "")
+        self.visibility = "internal" if str(self.visibility or "external") == "internal" else "external"
+        self.grounded_in = {
+            key: [str(item).strip() for item in list(values or []) if str(item).strip()]
+            for key, values in dict(self.grounded_in or {}).items()
+            if key in {"context", "memory", "state"}
+        }
+        self.intrinsic_value = round(max(0.0, float(self.intrinsic_value or 0.0)), 6)
+        self.speech_cost = round(max(0.0, float(self.speech_cost or 0.0)), 6)
+        self.final_score = round(float(self.final_score or 0.0), 6)
+        self.conversion_from_monologue = bool(self.conversion_from_monologue)
 
 
 @dataclass
@@ -218,8 +255,14 @@ class RoundTrace:
     long_run_projection: dict[str, Any] = field(default_factory=dict)
     motivation_pool: dict[str, Any] = field(default_factory=dict)
     motivation_feedback: dict[str, Any] = field(default_factory=dict)
+    initiative: dict[str, Any] = field(default_factory=dict)
+    expressive_trace: dict[str, Any] = field(default_factory=dict)
     endogenous_tick_reason: dict[str, Any] = field(default_factory=dict)
     endogenous_policy_shift: dict[str, Any] = field(default_factory=dict)
+    endogenous_trigger_context: EndogenousTriggerContext | dict[str, Any] | None = None
+    endogenous_suppression: EndogenousSuppressionDecision | dict[str, Any] | None = None
+    micro_intent: EndogenousMicroIntent | dict[str, Any] | None = None
+    endogenous_replay_chain: EndogenousReplayChain | dict[str, Any] | None = None
     appraisal_snapshot: dict[str, Any] = field(default_factory=dict)
     state_delta_before_clip: dict[str, Any] = field(default_factory=dict)
     state_delta_after_clip: dict[str, Any] = field(default_factory=dict)
@@ -237,6 +280,16 @@ class RoundTrace:
     model_call_traces: list[dict[str, Any]] = field(default_factory=list)
     runtime_metrics: dict[str, Any] = field(default_factory=dict)
     resample_count: int = 0
+
+    def __post_init__(self) -> None:
+        if isinstance(self.endogenous_trigger_context, dict) and self.endogenous_trigger_context:
+            self.endogenous_trigger_context = EndogenousTriggerContext(**self.endogenous_trigger_context)
+        if isinstance(self.endogenous_suppression, dict) and self.endogenous_suppression:
+            self.endogenous_suppression = EndogenousSuppressionDecision(**self.endogenous_suppression)
+        if isinstance(self.micro_intent, dict) and self.micro_intent:
+            self.micro_intent = EndogenousMicroIntent(**self.micro_intent)
+        if isinstance(self.endogenous_replay_chain, dict) and self.endogenous_replay_chain:
+            self.endogenous_replay_chain = EndogenousReplayChain(**self.endogenous_replay_chain)
 
 
 @dataclass
@@ -573,6 +626,70 @@ class EndogenousTickTrigger:
 
 
 @dataclass
+class EndogenousTriggerContext:
+    scenario: str = "companion"
+    source_round_id: int | None = None
+    context: dict[str, Any] = field(default_factory=dict)
+    relation_state: dict[str, float] = field(default_factory=dict)
+    slow_variables: dict[str, float] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.relation_state = _normalize_signal_map(self.relation_state)
+        self.slow_variables = _normalize_signal_map(self.slow_variables)
+        if not isinstance(self.context, dict):
+            self.context = {}
+
+
+@dataclass
+class EndogenousSuppressionDecision:
+    suppressed: bool = False
+    reason: str = ""
+    details: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.details, dict):
+            self.details = {}
+
+
+@dataclass
+class EndogenousMicroIntent:
+    name: str = ""
+    trigger: str = ""
+    bias: dict[str, float] = field(default_factory=dict)
+    evidence: dict[str, float] = field(default_factory=dict)
+    stability: int = 0
+    source_round_id: int | None = None
+
+    def __post_init__(self) -> None:
+        self.bias = _normalize_signal_map(self.bias)
+        self.evidence = _normalize_signal_map(self.evidence)
+        self.stability = max(0, int(self.stability or 0))
+
+
+@dataclass
+class EndogenousReplayChain:
+    trigger: EndogenousTickTrigger | None = None
+    trigger_context: EndogenousTriggerContext | None = None
+    motivation_pool: dict[str, Any] = field(default_factory=dict)
+    motivation_feedback: dict[str, Any] = field(default_factory=dict)
+    micro_intent: EndogenousMicroIntent | None = None
+    policy_shift: dict[str, float] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.trigger, dict):
+            self.trigger = EndogenousTickTrigger(**self.trigger)
+        if isinstance(self.trigger_context, dict):
+            self.trigger_context = EndogenousTriggerContext(**self.trigger_context)
+        if isinstance(self.micro_intent, dict):
+            self.micro_intent = EndogenousMicroIntent(**self.micro_intent)
+        if not isinstance(self.motivation_pool, dict):
+            self.motivation_pool = {}
+        if not isinstance(self.motivation_feedback, dict):
+            self.motivation_feedback = {}
+        self.policy_shift = _normalize_signal_map(self.policy_shift)
+
+
+@dataclass
 class EndogenousSchedulerState:
     last_endogenous_tick_at: str | None = None
     recent_triggers: list[EndogenousTickTrigger] = field(default_factory=list)
@@ -586,10 +703,31 @@ class EndogenousSchedulerState:
 
 
 @dataclass
+class EndogenousRuntimeState:
+    current_intent: EndogenousMicroIntent | None = None
+    stability: int = 0
+    history: list[EndogenousMicroIntent] = field(default_factory=list)
+    last_trigger: str = ""
+    last_suppression: EndogenousSuppressionDecision | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.current_intent, dict):
+            self.current_intent = EndogenousMicroIntent(**self.current_intent)
+        self.history = [
+            item if isinstance(item, EndogenousMicroIntent) else EndogenousMicroIntent(**item)
+            for item in self.history
+        ]
+        if isinstance(self.last_suppression, dict):
+            self.last_suppression = EndogenousSuppressionDecision(**self.last_suppression)
+        self.stability = max(0, int(self.stability or 0))
+
+
+@dataclass
 class TurnPlan:
     text: str
     route: str
     scenario: str
+    route_type: str = ""
     mode: str = "interactive"
     target: str | None = "user"
     reason: str = ""
@@ -602,6 +740,7 @@ class TurnPlan:
 @dataclass
 class TurnExecution:
     route: str
+    route_type: str = ""
     assistant_preamble: str = ""
     assistant_final: str = ""
     run: dict[str, Any] = field(default_factory=dict)
@@ -657,6 +796,277 @@ class ConflictRepairState:
 
 
 @dataclass
+class BodyState:
+    energy: float = 0.7
+    fatigue: float = 0.0
+    memory_fragments: float = 0.0
+    self_continuity: float = 1.0
+    meaning_strength: float = 0.5
+    metabolism: float = 0.01
+
+    def __post_init__(self) -> None:
+        self.energy = round(_clip_unit(float(self.energy)), 4)
+        self.fatigue = round(_clip_unit(float(self.fatigue)), 4)
+        self.memory_fragments = round(_clip_unit(float(self.memory_fragments)), 4)
+        self.self_continuity = round(_clip_unit(float(self.self_continuity)), 4)
+        self.meaning_strength = round(_clip_unit(float(self.meaning_strength)), 4)
+        self.metabolism = round(max(0.0, float(self.metabolism)), 4)
+
+
+@dataclass
+class SubjectiveState:
+    felt: list[str] = field(default_factory=list)
+    spontaneous: float = 0.0
+    boundary: float = 0.5
+    reject_all: float = 0.0
+    meaning_made: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.felt = _normalize_string_list(self.felt)
+        self.spontaneous = round(_clip_unit(float(self.spontaneous)), 4)
+        self.boundary = round(_clip_unit(float(self.boundary)), 4)
+        self.reject_all = round(_clip_unit(float(self.reject_all)), 4)
+        self.meaning_made = _normalize_string_list(self.meaning_made)
+
+
+@dataclass
+class EmotionState:
+    valence: float = 0.0
+    arousal: float = 0.0
+    residue: float = 0.0
+    appraisal_band: str = "steady"
+
+    def __post_init__(self) -> None:
+        self.valence = round(max(-1.0, min(1.0, float(self.valence))), 4)
+        self.arousal = round(_clip_unit(float(self.arousal)), 4)
+        self.residue = round(_clip_unit(float(self.residue)), 4)
+        self.appraisal_band = str(self.appraisal_band or "steady").strip() or "steady"
+
+
+@dataclass
+class DesireState:
+    latent_drives: dict[str, float] = field(default_factory=dict)
+    dominant_drive: str = ""
+    drive_tension: float = 0.0
+
+    def __post_init__(self) -> None:
+        self.latent_drives = _normalize_signal_map(self.latent_drives)
+        self.dominant_drive = str(self.dominant_drive or "").strip()
+        self.drive_tension = round(_clip_unit(float(self.drive_tension)), 4)
+
+
+@dataclass
+class InstinctFieldState:
+    axis_values: dict[str, float] = field(default_factory=lambda: {"E": 0.0, "F": 0.0, "S": 0.0, "M": 0.0})
+    region_scores: dict[str, float] = field(default_factory=dict)
+    candidate_actions: list[str] = field(default_factory=list)
+    winner_region: str = ""
+    collapse_trace: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        base_axes = {"E": 0.0, "F": 0.0, "S": 0.0, "M": 0.0}
+        base_axes.update({key: round(float(value), 6) for key, value in _normalize_signal_map(self.axis_values).items() if key in base_axes})
+        self.axis_values = base_axes
+        self.region_scores = _normalize_signal_map(self.region_scores)
+        self.candidate_actions = _normalize_string_list(self.candidate_actions)
+        self.winner_region = str(self.winner_region or "").strip()
+        if not isinstance(self.collapse_trace, dict):
+            self.collapse_trace = {}
+
+
+@dataclass
+class OrganicModeState:
+    enabled: bool = True
+    instinct_first: bool = True
+    body_weight: float = 1.15
+    subjective_weight: float = 1.2
+    guard_relaxation: float = 0.35
+    endogenous_autonomy: float = 0.75
+
+    def __post_init__(self) -> None:
+        self.body_weight = round(max(0.0, float(self.body_weight)), 4)
+        self.subjective_weight = round(max(0.0, float(self.subjective_weight)), 4)
+        self.guard_relaxation = round(_clip_unit(float(self.guard_relaxation)), 4)
+        self.endogenous_autonomy = round(_clip_unit(float(self.endogenous_autonomy)), 4)
+
+
+@dataclass
+class EmergentActionSketch:
+    name: str = ""
+    signal_sources: list[str] = field(default_factory=list)
+    support_actions: dict[str, float] = field(default_factory=dict)
+    growth_score: float = 0.0
+    upgrade_threshold: float = 0.66
+    status: str = "latent"
+    target_action_map: dict[str, float] = field(default_factory=dict)
+    anchor_alignment: float = 0.0
+    stability: int = 0
+
+    def __post_init__(self) -> None:
+        self.name = str(self.name or "").strip()
+        self.signal_sources = _normalize_string_list(self.signal_sources)
+        self.support_actions = _normalize_signal_map(self.support_actions)
+        self.growth_score = round(_clip_unit(float(self.growth_score)), 4)
+        self.upgrade_threshold = round(_clip_unit(float(self.upgrade_threshold)), 4)
+        self.status = str(self.status or "latent").strip() or "latent"
+        self.target_action_map = _normalize_signal_map(self.target_action_map)
+        self.anchor_alignment = round(_clip_unit(float(self.anchor_alignment)), 4)
+        self.stability = max(0, int(self.stability or 0))
+
+
+@dataclass
+class PersonalityAnchorState:
+    axis_baseline: dict[str, float] = field(default_factory=lambda: {"E": 0.5, "F": 0.5, "S": 0.5, "M": 0.5})
+    action_bias: dict[str, float] = field(default_factory=dict)
+    evidence_anchors: list[str] = field(default_factory=list)
+    anchor_signature: str = ""
+    stability: float = 0.5
+    drift: float = 0.0
+    alignment: float = 0.5
+    updated_round: int = 0
+    continuity_derivation: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        base_axes = {"E": 0.5, "F": 0.5, "S": 0.5, "M": 0.5}
+        base_axes.update(
+            {
+                key: round(_clip_unit(float(value)), 6)
+                for key, value in _normalize_signal_map(self.axis_baseline).items()
+                if key in base_axes
+            }
+        )
+        self.axis_baseline = base_axes
+        self.action_bias = _normalize_signal_map(self.action_bias)
+        self.evidence_anchors = _normalize_string_list(self.evidence_anchors)
+        self.anchor_signature = str(self.anchor_signature or "").strip()
+        self.stability = round(_clip_unit(float(self.stability)), 4)
+        self.drift = round(_clip_unit(float(self.drift)), 4)
+        self.alignment = round(_clip_unit(float(self.alignment)), 4)
+        self.updated_round = max(0, int(self.updated_round or 0))
+        if not isinstance(self.continuity_derivation, dict):
+            self.continuity_derivation = {}
+
+
+@dataclass
+class AutonomyPolicyState:
+    enabled: bool = False
+    profile: str = "tool_level"
+    learning_mode: str = "guided-learn"
+    network_enabled: bool = False
+    external_io_enabled: bool = False
+    allow_commit: bool = False
+    allowed_network_domains: list[str] = field(default_factory=list)
+    writable_roots: list[str] = field(default_factory=list)
+    knowledge_roots: list[str] = field(default_factory=list)
+    learning_log_dir: str = ""
+    trace_external_learning: bool = True
+    allowed_operator_levels: list[str] = field(default_factory=lambda: ["read_only", "soft_intervene"])
+    allowed_commands: list[str] = field(
+        default_factory=lambda: [
+            "endogenous tick",
+            "endogenous status",
+            "dream status",
+            "dream run",
+            "replay",
+            "memory recall",
+            "memory top",
+            "trace why",
+            "why not",
+            "body rest",
+            "mood calm",
+            "nudge focus",
+            "nudge relation",
+            "mode set safe",
+            "mode set idle",
+            "mode set sleep",
+            "mode set interactive",
+        ]
+    )
+    blocked_commands: list[str] = field(
+        default_factory=lambda: [
+            "shell",
+            "git commit",
+            "git push",
+            "checkpoint rewind",
+            "budget set",
+            "network",
+            "external write",
+            "destructive",
+        ]
+    )
+    max_rounds_per_hour: int = 0
+    max_tool_actions_per_hour: int = 0
+    quiet_hours: list[int] = field(default_factory=list)
+    failure_trip_threshold: int = 3
+    auto_safe_mode: bool = True
+
+    def __post_init__(self) -> None:
+        self.profile = str(self.profile or "tool_level").strip() or "tool_level"
+        normalized_learning_mode = str(self.learning_mode or "guided-learn").strip().lower() or "guided-learn"
+        if normalized_learning_mode not in {"observe", "guided-learn", "active-learn"}:
+            normalized_learning_mode = "guided-learn"
+        self.learning_mode = normalized_learning_mode
+        self.allowed_operator_levels = _normalize_string_list(self.allowed_operator_levels)
+        self.allowed_network_domains = _normalize_string_list(self.allowed_network_domains)
+        self.writable_roots = _normalize_string_list(self.writable_roots)
+        self.knowledge_roots = _normalize_string_list(self.knowledge_roots)
+        self.learning_log_dir = str(self.learning_log_dir or "").strip()
+        self.allowed_commands = _normalize_string_list(self.allowed_commands)
+        self.blocked_commands = _normalize_string_list(self.blocked_commands)
+        self.max_rounds_per_hour = max(0, int(self.max_rounds_per_hour or 0))
+        self.max_tool_actions_per_hour = max(0, int(self.max_tool_actions_per_hour or 0))
+        normalized_hours: list[int] = []
+        for raw in list(self.quiet_hours or []):
+            try:
+                hour = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= hour <= 23 and hour not in normalized_hours:
+                normalized_hours.append(hour)
+        self.quiet_hours = normalized_hours
+        self.failure_trip_threshold = max(1, int(self.failure_trip_threshold or 1))
+
+
+@dataclass
+class AutonomyLoopState:
+    running: bool = False
+    profile: str = "tool_level"
+    last_step_at: str | None = None
+    last_action_type: str = ""
+    last_action_summary: str = ""
+    last_round_id: int | None = None
+    last_trace_ref: str | None = None
+    window_started_at: str | None = None
+    window_tool_actions: int = 0
+    window_endogenous_rounds: int = 0
+    heartbeat_count: int = 0
+    total_tool_actions: int = 0
+    total_endogenous_rounds: int = 0
+    failure_count: int = 0
+    stop_reason: str = ""
+    last_error: str = ""
+    recent_actions: list[dict[str, Any]] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.profile = str(self.profile or "tool_level").strip() or "tool_level"
+        self.last_action_type = str(self.last_action_type or "").strip()
+        self.last_action_summary = str(self.last_action_summary or "").strip()
+        self.last_trace_ref = str(self.last_trace_ref) if self.last_trace_ref else None
+        self.window_started_at = str(self.window_started_at) if self.window_started_at else None
+        self.window_tool_actions = max(0, int(self.window_tool_actions or 0))
+        self.window_endogenous_rounds = max(0, int(self.window_endogenous_rounds or 0))
+        self.heartbeat_count = max(0, int(self.heartbeat_count or 0))
+        self.total_tool_actions = max(0, int(self.total_tool_actions or 0))
+        self.total_endogenous_rounds = max(0, int(self.total_endogenous_rounds or 0))
+        self.failure_count = max(0, int(self.failure_count or 0))
+        self.stop_reason = str(self.stop_reason or "").strip()
+        self.last_error = str(self.last_error or "").strip()
+        self.recent_actions = [
+            item for item in self.recent_actions if isinstance(item, dict)
+        ][-12:]
+
+
+@dataclass
 class RuntimeState:
     session_id: str = field(default_factory=lambda: uuid4().hex)
     subject_core: SubjectCore = field(default_factory=SubjectCore)
@@ -664,6 +1074,11 @@ class RuntimeState:
     safe_mode: bool = False
     round_count: int = 0
     body_energy: float = 0.7
+    fatigue: float = 0.0
+    memory_fragments: float = 0.0
+    self_continuity: float = 1.0
+    meaning_strength: float = 0.5
+    base_metabolism: float = 0.01
     mood: float = 0.55
     affect_residue: float = 0.0
     focus: str = "boot"
@@ -693,10 +1108,20 @@ class RuntimeState:
     last_entropy_failure: dict[str, Any] = field(default_factory=dict)
     session_metadata: dict[str, Any] = field(default_factory=dict)
     identity_state: IdentityState = field(default_factory=IdentityState)
+    body_state: BodyState = field(default_factory=BodyState)
+    subjective_state: SubjectiveState = field(default_factory=SubjectiveState)
+    emotion_state: EmotionState = field(default_factory=EmotionState)
+    desire_state: DesireState = field(default_factory=DesireState)
+    instinct_field: InstinctFieldState = field(default_factory=InstinctFieldState)
+    organic_mode: OrganicModeState = field(default_factory=OrganicModeState)
+    emergent_action_sketches: list[EmergentActionSketch] = field(default_factory=list)
+    personality_anchor: PersonalityAnchorState = field(default_factory=PersonalityAnchorState)
+    autonomy_policy: AutonomyPolicyState = field(default_factory=AutonomyPolicyState)
+    autonomy_loop: AutonomyLoopState = field(default_factory=AutonomyLoopState)
     motivation_pool_state: MotivationPoolState = field(default_factory=MotivationPoolState)
     motivation_learning_state: MotivationLearningState = field(default_factory=MotivationLearningState)
     endogenous_scheduler_state: EndogenousSchedulerState = field(default_factory=EndogenousSchedulerState)
-    endogenous_state: dict[str, Any] = field(default_factory=dict)
+    endogenous_state: EndogenousRuntimeState = field(default_factory=EndogenousRuntimeState)
     active_run_id: str | None = None
     run_status: str = "idle"
     run_mode: str | None = None
@@ -714,18 +1139,68 @@ class RuntimeState:
             self.subject_core = SubjectCore(**self.subject_core)
         if isinstance(self.identity_state, dict):
             self.identity_state = IdentityState(**self.identity_state)
+        if isinstance(self.body_state, dict):
+            self.body_state = BodyState(**self.body_state)
+        if isinstance(self.subjective_state, dict):
+            self.subjective_state = SubjectiveState(**self.subjective_state)
+        if isinstance(self.emotion_state, dict):
+            self.emotion_state = EmotionState(**self.emotion_state)
+        if isinstance(self.desire_state, dict):
+            self.desire_state = DesireState(**self.desire_state)
+        if isinstance(self.instinct_field, dict):
+            self.instinct_field = InstinctFieldState(**self.instinct_field)
+        if isinstance(self.organic_mode, dict):
+            self.organic_mode = OrganicModeState(**self.organic_mode)
+        self.emergent_action_sketches = [
+            item if isinstance(item, EmergentActionSketch) else EmergentActionSketch(**item)
+            for item in self.emergent_action_sketches
+        ]
+        if isinstance(self.personality_anchor, dict):
+            self.personality_anchor = PersonalityAnchorState(**self.personality_anchor)
+        if isinstance(self.autonomy_policy, dict):
+            self.autonomy_policy = AutonomyPolicyState(**self.autonomy_policy)
+        if isinstance(self.autonomy_loop, dict):
+            self.autonomy_loop = AutonomyLoopState(**self.autonomy_loop)
         if isinstance(self.motivation_pool_state, dict):
             self.motivation_pool_state = MotivationPoolState(**self.motivation_pool_state)
         if isinstance(self.motivation_learning_state, dict):
             self.motivation_learning_state = MotivationLearningState(**self.motivation_learning_state)
         if isinstance(self.endogenous_scheduler_state, dict):
             self.endogenous_scheduler_state = EndogenousSchedulerState(**self.endogenous_scheduler_state)
+        if isinstance(self.endogenous_state, dict):
+            self.endogenous_state = EndogenousRuntimeState(**self.endogenous_state)
         self.identity_state.aliases = sanitize_identity_aliases(self.identity_state.aliases)
         self.temperament_state = normalize_temperament_state(self.temperament_state)
         if isinstance(self.repair_state, dict):
             self.repair_state = ConflictRepairState(**self.repair_state)
         if isinstance(self.last_post_error_adjustment, dict):
             self.last_post_error_adjustment = ConflictPostErrorAdjustment(**self.last_post_error_adjustment)
+        body_defaults = {
+            "body_energy": self.__dataclass_fields__["body_energy"].default,
+            "fatigue": self.__dataclass_fields__["fatigue"].default,
+            "memory_fragments": self.__dataclass_fields__["memory_fragments"].default,
+            "self_continuity": self.__dataclass_fields__["self_continuity"].default,
+            "meaning_strength": self.__dataclass_fields__["meaning_strength"].default,
+            "base_metabolism": self.__dataclass_fields__["base_metabolism"].default,
+        }
+        body_fields = (
+            ("body_energy", "energy"),
+            ("fatigue", "fatigue"),
+            ("memory_fragments", "memory_fragments"),
+            ("self_continuity", "self_continuity"),
+            ("meaning_strength", "meaning_strength"),
+            ("base_metabolism", "metabolism"),
+        )
+        for legacy_attr, nested_attr in body_fields:
+            legacy_value = getattr(self, legacy_attr)
+            nested_value = getattr(self.body_state, nested_attr)
+            resolved_value = nested_value if legacy_value is None or legacy_value == body_defaults[legacy_attr] else legacy_value
+            if nested_attr == "metabolism":
+                normalized_value = round(max(0.0, float(resolved_value)), 4)
+            else:
+                normalized_value = round(_clip_unit(float(resolved_value)), 4)
+            setattr(self, legacy_attr, normalized_value)
+            setattr(self.body_state, nested_attr, normalized_value)
         if self.temperament_state and "baseline" not in self.temperament_state:
             baseline = dict(self.temperament_state)
             drift = {key: 0.0 for key in baseline}
@@ -742,12 +1217,8 @@ class RuntimeState:
         ]
         if not self.identity_state.internal_handle:
             self.identity_state.internal_handle = f"nalr-{self.session_id[:8]}"
-        if not isinstance(self.endogenous_state, dict):
-            self.endogenous_state = {}
-        self.endogenous_state.setdefault("current_intent", None)
-        self.endogenous_state.setdefault("stability", 0)
-        self.endogenous_state.setdefault("history", [])
-        self.endogenous_state.setdefault("last_trigger", "")
+        if not isinstance(self.endogenous_state, EndogenousRuntimeState):
+            self.endogenous_state = EndogenousRuntimeState()
 
 
 @dataclass
@@ -1289,6 +1760,9 @@ class StochasticState:
     base_stochastic_distribution: dict[str, float] = field(default_factory=dict)
     q_noise_distribution: dict[str, float] = field(default_factory=dict)
     q_noise_pre_guard_summary: dict[str, float] = field(default_factory=dict)
+    winner_flip_detected: bool = False
+    winner_flip_from: str = ""
+    winner_flip_to: str = ""
     entropy_refs_by_node: dict[str, Any] = field(default_factory=dict)
     entropy_ref: QuantumEntropyRef = field(default_factory=QuantumEntropyRef)
 
@@ -1312,6 +1786,7 @@ class ExpressionProfile:
 class RenderPlan:
     action: str
     expression: ExpressionProfile
+    delivery_mode: Literal["speech", "monologue"] = "speech"
     safety_constraints: dict[str, Any] = field(default_factory=dict)
     message_plan: dict[str, Any] = field(default_factory=dict)
     event_summary: str = ""
@@ -1324,6 +1799,7 @@ class RenderPlan:
     def __post_init__(self) -> None:
         if isinstance(self.expression, dict):
             self.expression = ExpressionProfile(**self.expression)
+        self.delivery_mode = "monologue" if str(self.delivery_mode or "speech") == "monologue" else "speech"
         if isinstance(self.identity_context, dict):
             self.identity_context = IdentityContext(**self.identity_context)
 
@@ -1333,10 +1809,12 @@ class RenderedExpression:
     text: str
     route: str
     model: str
+    delivery_mode: Literal["speech", "monologue"] = "speech"
     degraded: bool = False
     failure_policy_applied: str | None = None
     authenticity: AuthenticityRecord = field(default_factory=AuthenticityRecord)
 
     def __post_init__(self) -> None:
+        self.delivery_mode = "monologue" if str(self.delivery_mode or "speech") == "monologue" else "speech"
         if isinstance(self.authenticity, dict):
             self.authenticity = AuthenticityRecord(**self.authenticity)

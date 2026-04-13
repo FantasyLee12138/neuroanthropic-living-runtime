@@ -65,8 +65,8 @@ class SupervisorLoop:
             metadata={"matched_files": matched, "file_count": len(files)},
         )
 
-    def _fallback_plan(self, goal: str, tool_result: ToolResult) -> dict[str, Any]:
-        matched = tool_result.metadata.get("matched_files", [])
+    def _fallback_plan(self, goal: str, matched: list[str] | None = None) -> dict[str, Any]:
+        matched = list(matched or [])
         if matched:
             title = f"检查相关文件：{matched[0]}"
             detail = f"先阅读命中的文件，再决定后续是否需要搜索更多上下文。"
@@ -83,9 +83,90 @@ class SupervisorLoop:
             "confidence": 0.62,
         }
 
+    def prepare_bootstrap(self, request: RunRequest, *, session_id: str, recorded_at: str) -> tuple[RunState, dict[str, Any], dict[str, Any]]:
+        plan = self._fallback_plan(request.goal, matched=None)
+        if self.planner is not None:
+            try:
+                model_plan = self.planner(request.goal, {})
+            except Exception:
+                model_plan = None
+            if isinstance(model_plan, dict):
+                filtered = {
+                    key: value
+                    for key, value in model_plan.items()
+                    if value is not None and value != "" and value != []
+                }
+                plan = {**plan, **filtered}
+
+        step = TaskNode(
+            node_id=f"step-{hashlib.sha1(request.goal.encode('utf-8')).hexdigest()[:8]}",
+            title=str(plan["next_step"]),
+            detail=str(plan.get("detail", "")),
+            tool_choice=str(plan.get("tool_choice", "repo_scan")),
+            status="running",
+            expected_observation=str(plan.get("expected_observation", "")),
+            success_criteria=str(plan.get("success_criteria", "")),
+            confidence=float(plan.get("confidence", 0.5)),
+            metadata={"matched_files": []},
+        )
+        run_state = RunState(
+            goal=request.goal,
+            goal_summary=str(plan.get("goal_summary", request.goal[:80])),
+            status="running",
+            current_step_id=step.node_id,
+            pending_steps=[step],
+            completed_steps=[],
+            last_tool_result=None,
+            policy={
+                "allow_commit": request.allow_commit,
+                "operator_level": request.operator_level,
+                "dirty_worktree_policy": "pause",
+                "pause_on_commit_boundary": True,
+                "continue_on_recoverable_failure": True,
+                "max_retries_per_step": 2,
+            },
+            budget={"max_steps": 12, "max_retries_per_step": 2},
+            dirty_worktree_detected=False,
+            commit_permission_required=not request.allow_commit,
+            created_at=recorded_at,
+            updated_at=recorded_at,
+            session_id=session_id,
+        )
+        step_trace = {
+            "run_id": run_state.run_id,
+            "step_id": step.node_id,
+            "title": step.title,
+            "detail": step.detail,
+            "status": step.status,
+            "tool_choice": step.tool_choice,
+            "expected_observation": step.expected_observation,
+            "success_criteria": step.success_criteria,
+            "confidence": step.confidence,
+            "matched_files": step.metadata.get("matched_files", []),
+        }
+        tool_trace = {
+            "run_id": run_state.run_id,
+            "tool_name": str(plan.get("tool_choice", "repo_scan")),
+            "status": "awaiting_approval",
+            "summary": f"{str(plan.get('tool_choice', 'repo_scan'))} requires operator approval",
+            "output_excerpt": "",
+            "input": {"goal": request.goal},
+            "matched_files": [],
+            "file_count": 0,
+        }
+        return run_state, step_trace, tool_trace
+
+    def execute_prepared_tool(self, tool_name: str, *, goal: str) -> ToolResult:
+        if tool_name == "repo_scan":
+            return self._repo_scan(goal)
+        raise ValueError(f"unsupported prepared tool: {tool_name}")
+
     def bootstrap(self, request: RunRequest, *, session_id: str, recorded_at: str) -> tuple[RunState, dict[str, Any], dict[str, Any]]:
         tool_result = self._repo_scan(request.goal)
-        plan = self._fallback_plan(request.goal, tool_result)
+        plan = self._fallback_plan(
+            request.goal,
+            matched=list(tool_result.metadata.get("matched_files", []) or []),
+        )
         if self.planner is not None:
             try:
                 model_plan = self.planner(request.goal, tool_result.metadata)

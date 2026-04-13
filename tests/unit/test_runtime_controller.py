@@ -11,6 +11,7 @@ from nalr.agents.modules import ValueAgent
 from nalr.providers.router import ModelResponse
 from nalr.runtime.controller import RuntimeController
 from nalr.runtime.entropy import QuantumEntropyUnavailableError
+from nalr.runtime.metadata import utc_now_iso
 from nalr.schemas.models import (
     ActionCandidate,
     EndogenousTickTrigger,
@@ -93,6 +94,38 @@ def test_tick_records_trace_and_top_drivers(tmp_path):
     assert any(item.agent_name == "PFCAgent" for item in result.trace.contributions)
 
 
+def test_runtime_controller_exposes_split_mid_round_helpers(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    round_context = controller.build_round_context(
+        RoundEvent(
+            source="user",
+            content="帮我决定是继续写还是先休息。",
+            target="user",
+            cue="继续",
+            valence=0.1,
+        ),
+        "companion",
+        "interactive",
+    )
+
+    collected = controller.collect_parallel_contributions(round_context=round_context, scenario="companion")
+
+    assert "action_signals" in collected
+    assert "direct_action_contributions" in collected
+    assert "identity_context" in collected
+
+    arbitrate_payload = controller.integrate_and_arbitrate(
+        round_context=round_context,
+        collected=collected,
+        scenario="companion",
+        turn_started=time.perf_counter(),
+    )
+
+    assert arbitrate_payload["sampled_action"].name
+    assert arbitrate_payload["rendered_expression"].text
+    assert arbitrate_payload["trace"].round_id == round_context["state"].round_count
+
+
 def test_tick_uses_macos_system_entropy_when_pytest_seed_disabled(tmp_path, monkeypatch):
     monkeypatch.setenv("NALR_DISABLE_TEST_QRNG_SEED", "1")
     monkeypatch.setattr("os.urandom", lambda byte_count: bytes([128]) * byte_count)
@@ -166,6 +199,12 @@ def test_model_status_surfaces_agent_tiers_and_bindings(tmp_path):
     assert status["agent_bindings"]["planner"] == "medium_model"
     assert status["agent_bindings"]["PerspectiveModel"] == "medium_model"
     assert status["agent_bindings"]["PFCAgent"] == "medium_model"
+    assert status["route_policies"]["chat_fast"]["latency_budget_ms"] == 700
+    assert status["route_policies"]["chat_fast"]["default_tier"] in {"medium_model", "small_model"}
+    assert status["route_policies"]["chat_standard"]["hot_path"] == "full_tick"
+    assert "authenticity_risk_high" in status["route_policies"]["chat_standard"]["upgrade_conditions"]
+    assert status["route_policies"]["endogenous_light"]["entry_mode"] == "idle"
+    assert status["route_policies"]["dream_sleep"]["entry_mode"] == "sleep"
 
 
 def test_value_agent_build_value_contribution_matches_controller_compatibility_path(tmp_path):
@@ -762,6 +801,31 @@ def test_resolve_round_ref_accepts_latest_alias(tmp_path):
     assert controller.resolve_round_ref("latest") == 1
 
 
+def test_console_recent_rounds_avoids_metrics_timeline_for_recent_rows(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    for cue in ("tea", "coffee", "walk"):
+        controller.tick(
+            RoundEvent(
+                source="user",
+                content=f"记住 {cue}",
+                target="user",
+                cue=cue,
+            ),
+            scenario="chat",
+            mode="interactive",
+        )
+
+    def fail_metrics_timeline() -> dict[str, object]:
+        raise AssertionError("metrics_timeline should not be called")
+
+    monkeypatch.setattr(controller, "metrics_timeline", fail_metrics_timeline)
+
+    rounds = controller.console_recent_rounds(limit=2)
+
+    assert [row["round_id"] for row in rounds] == [2, 3]
+    assert all("sampled_action" in row for row in rounds)
+
+
 def test_command_safe_mode_and_checkpoint_emit_command_trace(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
 
@@ -887,6 +951,20 @@ def test_cognitive_snapshot_humanizes_chat_intent_without_internal_tokens(tmp_pa
     assert snapshot["current_intent"].startswith("正在自然交流，准备")
     assert "general_exchange" not in snapshot["current_intent"]
     assert "respond" not in snapshot["current_intent"]
+
+
+def test_runtime_bootstraps_with_low_permission_autonomy_enabled(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    state = controller.load_runtime_state()
+    status = controller.autonomy_status()
+
+    assert state.autonomy_policy.enabled is True
+    assert state.autonomy_policy.profile == "tool_level"
+    assert state.autonomy_loop.running is True
+    assert status["enabled"] is True
+    assert status["running"] is True
+    assert status["profile"] == "tool_level"
 
 
 def test_cognitive_snapshot_uses_human_readable_continuity_before_naming(tmp_path):
@@ -1024,7 +1102,26 @@ def test_plan_turn_uses_fast_chat_for_simple_identity_prompt_without_task_bootst
     plan = controller.plan_turn("你好，你是谁？你有名字吗？")
 
     assert plan.route == "fast_chat"
+    assert plan.route_type == "chat_fast"
     assert plan.task_bootstrap is None
+
+
+def test_plan_turn_marks_normal_chat_as_chat_standard(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    plan = controller.plan_turn("最近的内在状态怎么样？")
+
+    assert plan.route == "direct_chat"
+    assert plan.route_type == "chat_standard"
+
+
+def test_plan_turn_marks_long_reflective_chat_as_chat_deep(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    plan = controller.plan_turn("请你详细分析一下我最近总是觉得疲惫、分心、又想推进事情，但每次都卡住的状态，并系统比较一下可能的内在原因和接下来最值得优先做的调整。")
+
+    assert plan.route == "direct_chat"
+    assert plan.route_type == "chat_deep"
 
 
 def test_execute_turn_fast_chat_uses_chat_fast_route_once(tmp_path, monkeypatch):
@@ -1046,6 +1143,7 @@ def test_execute_turn_fast_chat_uses_chat_fast_route_once(tmp_path, monkeypatch)
     execution = controller.execute_turn(plan)
 
     assert execution.route == "fast_chat"
+    assert execution.route_type == "chat_fast"
     assert execution.assistant_final == "你好，我是当前运行体实例。"
     assert calls == ["chat_fast"]
 
@@ -1325,6 +1423,54 @@ def test_tick_records_late_perspective_and_rendered_expression(tmp_path):
     assert result.trace.rendered_expression["text"] == result.rendered_expression.text
 
 
+def test_chat_standard_skips_late_perspective_when_only_route_gate_is_left(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.config["models"]["perspective"]["risk_threshold"] = 0.0
+
+    result = controller.tick(
+        RoundEvent(
+            source="user",
+            content="帮我回 Alex 一句。",
+            target="alex",
+            valence=0.04,
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    skill_names = [item["skill_name"] for item in result.trace.skill_traces]
+    late_perspective_gate = next(
+        item for item in result.trace.gate_decisions if item["stage"] == "late_perspective"
+    )
+
+    assert result.trace.runtime_metrics["route_type"] == "chat_standard"
+    assert "infer_other_state" not in skill_names
+    assert "simulate_other_reaction" not in skill_names
+    assert late_perspective_gate["allowed"] is False
+
+
+def test_chat_deep_keeps_late_perspective_for_reflective_reply(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.config["models"]["perspective"]["risk_threshold"] = 0.0
+
+    result = controller.tick(
+        RoundEvent(
+            source="user",
+            content="请你详细分析一下我该怎么回复 Alex，比较不同语气的后果，再给我一个更稳妥的表达版本。",
+            target="alex",
+            valence=-0.08,
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    skill_names = [item["skill_name"] for item in result.trace.skill_traces]
+
+    assert result.trace.runtime_metrics["route_type"] == "chat_deep"
+    assert "infer_other_state" in skill_names
+    assert "simulate_other_reaction" in skill_names
+
+
 def test_fallback_renderer_uses_event_context_in_text(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
 
@@ -1342,6 +1488,44 @@ def test_fallback_renderer_uses_event_context_in_text(tmp_path):
     assert result.rendered_expression.text
     assert "核心问题" not in result.rendered_expression.text
     assert ("规划" in result.rendered_expression.text) or ("晚饭" in result.rendered_expression.text) or ("面" in result.rendered_expression.text)
+
+
+def test_renderer_provider_failure_prefers_model_backed_humanized_fallback_before_template(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    route_calls: list[str] = []
+
+    def fake_generate(route_name, request):
+        route_calls.append(route_name)
+        if route_name == "renderer":
+            raise RuntimeError("renderer unavailable")
+        if route_name == "renderer_fallback_fast":
+            return ModelResponse(
+                route="renderer_fallback_fast",
+                model="stub-deepseek",
+                payload={"text": "我先接住你这句，再把今晚怎么安排慢慢理出来。"},
+                backend="deepseek",
+            )
+        raise RuntimeError(f"unexpected route {route_name}")
+
+    controller.model_router.generate = fake_generate
+
+    result = controller.tick(
+        RoundEvent(
+            source="user",
+            content="帮我规划今晚，并记住我晚饭想吃面。",
+            target="user",
+            cue="面",
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    renderer_index = route_calls.index("renderer")
+    assert route_calls[renderer_index : renderer_index + 2] == ["renderer", "renderer_fallback_fast"]
+    assert result.rendered_expression.text == "我先接住你这句，再把今晚怎么安排慢慢理出来。"
+    assert result.rendered_expression.model == "stub-deepseek"
+    assert result.rendered_expression.degraded is True
 
 
 def test_identity_guard_resamples_provider_leak_for_self_identity_queries(tmp_path):
@@ -1382,6 +1566,93 @@ def test_identity_guard_resamples_provider_leak_for_self_identity_queries(tmp_pa
     assert why_payload["rendered_expression"]["authenticity"]["guard_action"] == "resample"
     assert why_payload["render_plan"]["identity_context"]["query_kind"] == "self_identity"
     assert why_payload["renderer_decision_integrity"]["decision_mutated"] is False
+
+
+def test_chat_standard_renderer_violation_falls_back_without_resample_when_not_authenticity_sensitive(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    renderer_calls: list[str] = []
+
+    def fake_generate(route_name, request):
+        renderer_calls.append(route_name)
+        if route_name == "renderer":
+            return ModelResponse(route="renderer", model="stub-small", payload={"text": "先给一个普通版本。"})
+        if route_name == "renderer_fallback_fast":
+            return ModelResponse(
+                route="renderer_fallback_fast",
+                model="stub-deepseek",
+                payload={"text": "我先把这轮状态放稳一点，再继续回答你刚才的问题。"},
+                backend="deepseek",
+            )
+        raise RuntimeError(f"skip live provider for {route_name}")
+
+    eval_calls = {"count": 0}
+
+    def fake_evaluate(text, render_plan):
+        eval_calls["count"] += 1
+        if eval_calls["count"] == 1:
+            return {
+                "provider_leak_detected": False,
+                "false_self_claim_detected": False,
+                "self_grounding_score": 0.21,
+                "provider_leak_penalty": 0.0,
+                "false_self_claim_penalty": 0.0,
+                "violation_types": ["style_drift"],
+                "state_sources": ["focus"],
+            }
+        return {
+            "provider_leak_detected": False,
+            "false_self_claim_detected": False,
+            "self_grounding_score": 0.82,
+            "provider_leak_penalty": 0.0,
+            "false_self_claim_penalty": 0.0,
+            "violation_types": [],
+            "state_sources": ["focus"],
+        }
+
+    controller.model_router.generate = fake_generate
+    controller._evaluate_authenticity = fake_evaluate
+
+    result = controller.tick(
+        RoundEvent(source="user", content="最近状态怎么样？", target="user"),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    assert result.trace.runtime_metrics["route_type"] == "chat_standard"
+    renderer_index = renderer_calls.index("renderer")
+    assert renderer_calls[renderer_index : renderer_index + 2] == ["renderer", "renderer_fallback_fast"]
+    assert result.rendered_expression.authenticity["guard_action"] == "fallback"
+    assert result.rendered_expression.model == "stub-deepseek"
+    assert result.rendered_expression.text == "我先把这轮状态放稳一点，再继续回答你刚才的问题。"
+
+
+def test_renderer_fallback_uses_template_bottom_line_only_after_model_chain_fails(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    route_calls: list[str] = []
+
+    def fake_generate(route_name, request):
+        route_calls.append(route_name)
+        raise RuntimeError(f"{route_name} unavailable")
+
+    controller.model_router.generate = fake_generate
+
+    result = controller.tick(
+        RoundEvent(
+            source="user",
+            content="帮我规划今晚，并记住我晚饭想吃面。",
+            target="user",
+            cue="面",
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    renderer_index = route_calls.index("renderer")
+    assert route_calls[renderer_index : renderer_index + 3] == ["renderer", "renderer_fallback_fast", "renderer_fallback_small"]
+    assert result.rendered_expression.model == "fallback"
+    assert "晚饭" in result.rendered_expression.text or "面" in result.rendered_expression.text or "规划" in result.rendered_expression.text
 
 
 def test_renderer_integrity_reads_field_native_gate_not_action_bookkeeping_snapshot(tmp_path, monkeypatch):
@@ -2711,6 +2982,778 @@ def test_autonomy_lifecycle_surfaces_status_and_console_payload(tmp_path):
     assert stopped["stop_reason"] == "user_stop"
 
 
+def test_autonomy_step_prefers_sleep_before_endogenous_tick_when_fatigue_is_critical(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.body_energy = 0.05
+    state.body_state.energy = 0.05
+    state.fatigue = 0.97
+    state.body_state.fatigue = 0.97
+    state.mode = "interactive"
+    controller._save_state(state, sync=True)
+
+    monkeypatch.setattr(controller, "run_endogenous_tick", lambda *args, **kwargs: pytest.fail("recovery should preempt endogenous tick"))
+
+    status = controller.autonomy_step()
+    restored = controller.load_runtime_state()
+
+    assert restored.mode == "sleep"
+    assert status["last_action_type"] == "command"
+    assert status["last_action_summary"] == "mode set sleep: applied"
+
+
+def test_autonomy_status_surfaces_rest_peak_when_fatigue_is_critical(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.body_energy = 0.05
+    state.body_state.energy = 0.05
+    state.fatigue = 0.97
+    state.body_state.fatigue = 0.97
+    state.mode = "interactive"
+    controller._save_state(state, sync=True)
+
+    status = controller.autonomy_status()
+
+    assert status["candidate_peak"] == "rest"
+    assert status["candidate_scores"]["rest"] > status["candidate_scores"]["nothing"]
+
+
+def test_autonomy_step_runs_dream_once_critical_fatigue_is_already_sleeping(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.body_energy = 0.04
+    state.body_state.energy = 0.04
+    state.fatigue = 0.98
+    state.body_state.fatigue = 0.98
+    state.mode = "sleep"
+    controller._save_state(state, sync=True)
+
+    monkeypatch.setattr(controller, "run_endogenous_tick", lambda *args, **kwargs: pytest.fail("dream path should preempt endogenous tick"))
+    monkeypatch.setattr(controller, "dream_status", lambda: {"enabled": True})
+
+    observed: dict[str, str] = {}
+
+    def fake_run_dream(*, mode: str = "sleep", cue: str | None = None):
+        observed["mode"] = mode
+        observed["cue"] = cue or ""
+        return {"trace_ref": "dream://runs/test-critical"}
+
+    monkeypatch.setattr(controller, "run_dream", fake_run_dream)
+
+    status = controller.autonomy_step()
+
+    assert observed["mode"] == "sleep"
+    assert status["last_action_type"] == "dream_pass"
+    assert "dream pass in sleep" in status["last_action_summary"]
+
+
+def test_run_dream_in_sleep_reduces_fatigue_below_severe_threshold(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.body_energy = 0.04
+    state.body_state.energy = 0.04
+    state.fatigue = 0.98
+    state.body_state.fatigue = 0.98
+    state.mode = "sleep"
+    controller._save_state(state, sync=True)
+
+    payload = controller.run_dream(mode="sleep", cue="settle")
+    updated = controller.load_runtime_state()
+
+    assert payload["mode"] == "sleep"
+    assert updated.fatigue < 0.94
+    assert updated.fatigue < 0.98
+
+
+def test_autonomy_step_prefers_idle_before_endogenous_tick_when_fatigue_is_high(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.body_energy = 0.16
+    state.body_state.energy = 0.16
+    state.fatigue = 0.86
+    state.body_state.fatigue = 0.86
+    state.mode = "interactive"
+    controller._save_state(state, sync=True)
+
+    monkeypatch.setattr(controller, "run_endogenous_tick", lambda *args, **kwargs: pytest.fail("idle recovery should preempt endogenous tick"))
+
+    status = controller.autonomy_step()
+    restored = controller.load_runtime_state()
+
+    assert restored.mode == "idle"
+    assert status["last_action_type"] == "command"
+    assert status["last_action_summary"] == "mode set idle: applied"
+
+
+def test_autonomy_step_prefers_body_rest_before_endogenous_tick_when_fatigue_is_elevated(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.body_energy = 0.24
+    state.body_state.energy = 0.24
+    state.fatigue = 0.72
+    state.body_state.fatigue = 0.72
+    state.mode = "interactive"
+    controller._save_state(state, sync=True)
+
+    monkeypatch.setattr(controller, "run_endogenous_tick", lambda *args, **kwargs: pytest.fail("rest recovery should preempt endogenous tick"))
+
+    before_energy = controller.load_runtime_state().body_energy
+    before_fatigue = controller.load_runtime_state().fatigue
+    status = controller.autonomy_step()
+    restored = controller.load_runtime_state()
+
+    assert restored.body_energy > before_energy
+    assert restored.fatigue < before_fatigue
+    assert status["last_action_type"] == "command"
+    assert status["last_action_summary"] == "body rest: applied"
+
+
+def test_autonomy_step_can_start_readonly_self_run_when_stable_and_no_active_run(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.round_count = 3
+    state.body_energy = 0.82
+    state.body_state.energy = 0.82
+    state.fatigue = 0.18
+    state.body_state.fatigue = 0.18
+    state.memory_fragments = 0.36
+    state.body_state.memory_fragments = 0.36
+    state.self_continuity = 0.34
+    state.body_state.self_continuity = 0.34
+    state.meaning_strength = 0.22
+    state.body_state.meaning_strength = 0.22
+    state.mode = "interactive"
+    controller._save_state(state, sync=True)
+
+    monkeypatch.setattr(controller.endogenous_scheduler, "build_trigger", lambda **kwargs: None)
+
+    captured: dict[str, str] = {}
+
+    def fake_start_run(goal: str, **kwargs):
+        captured["goal"] = goal
+        captured["operator_level"] = str(kwargs.get("operator_level"))
+        run_state = controller.load_runtime_state()
+        run_state.active_run_id = "run-autonomy-1"
+        run_state.run_status = "running"
+        run_state.current_goal = goal
+        controller._save_state(run_state, sync=True)
+        return {
+            "run_id": "run-autonomy-1",
+            "status": "running",
+            "goal": goal,
+            "goal_summary": "autonomy self-study",
+            "trace_ref": "run://run-autonomy-1",
+        }
+
+    monkeypatch.setattr(controller, "start_run", fake_start_run)
+
+    status = controller.autonomy_step()
+    restored = controller.load_runtime_state()
+
+    assert restored.active_run_id == "run-autonomy-1"
+    assert restored.run_status == "running"
+    assert captured["operator_level"] == "read_only"
+    assert captured["goal"]
+    assert status["last_action_type"] == "self_run"
+    assert "autonomy self-study" in status["last_action_summary"]
+
+
+def test_autonomy_status_reports_candidate_competition_for_self_run(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.round_count = 3
+    state.body_energy = 0.82
+    state.body_state.energy = 0.82
+    state.fatigue = 0.18
+    state.body_state.fatigue = 0.18
+    state.memory_fragments = 0.36
+    state.body_state.memory_fragments = 0.36
+    state.self_continuity = 0.34
+    state.body_state.self_continuity = 0.34
+    state.meaning_strength = 0.22
+    state.body_state.meaning_strength = 0.22
+    state.mode = "interactive"
+    controller._save_state(state, sync=True)
+
+    status = controller.autonomy_status()
+
+    assert status["decision_surface"] == "autonomy_action_field_probe"
+    assert status["candidate_peak"] == "self_run"
+    assert status["candidate_scores"]["self_run"] > status["candidate_scores"]["nothing"]
+
+
+def test_autonomy_status_suppresses_self_run_candidate_when_budget_too_low(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.round_count = 3
+    state.body_energy = 0.82
+    state.body_state.energy = 0.82
+    state.fatigue = 0.18
+    state.body_state.fatigue = 0.18
+    state.memory_fragments = 0.36
+    state.body_state.memory_fragments = 0.36
+    state.self_continuity = 0.34
+    state.body_state.self_continuity = 0.34
+    state.meaning_strength = 0.22
+    state.body_state.meaning_strength = 0.22
+    state.budget_remaining = 0.1
+    state.mode = "interactive"
+    controller._save_state(state, sync=True)
+
+    status = controller.autonomy_status()
+
+    assert status["candidate_scores"]["self_run"] == 0.0
+
+
+def test_autonomy_runtime_status_is_lightweight_and_skips_field_probe(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    def fail_probe():
+        raise AssertionError("lightweight runtime status must not trigger autonomy field probe")
+
+    monkeypatch.setattr(controller, "_autonomy_action_field_probe", fail_probe)
+
+    status = controller.autonomy_runtime_status()
+
+    assert status["enabled"] is True
+    assert status["running"] is True
+    assert "candidate_scores" not in status
+    assert "decision_surface" not in status
+
+
+def test_build_base_distribution_includes_monologue_action_slot(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.mode = "idle"
+    controller._save_state(state, sync=True)
+
+    round_context = controller.build_round_context(
+        RoundEvent(
+            source="endogenous",
+            content="endogenous trigger idle",
+            target="self",
+            cue="endogenous:idle",
+        ),
+        "companion",
+        "endogenous_light",
+    )
+
+    distribution = controller._build_base_distribution(
+        round_context["state"],
+        round_context["scenario_cfg"],
+        round_context["mode_cfg"],
+        round_context["relation_state"],
+    )
+
+    assert "monologue" in distribution
+    assert distribution["monologue"] > 0.0
+
+
+def test_collect_parallel_contributions_includes_self_run_field_bias_for_endogenous_round(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.round_count = 3
+    state.body_energy = 0.82
+    state.body_state.energy = 0.82
+    state.fatigue = 0.18
+    state.body_state.fatigue = 0.18
+    state.memory_fragments = 0.36
+    state.body_state.memory_fragments = 0.36
+    state.self_continuity = 0.34
+    state.body_state.self_continuity = 0.34
+    state.meaning_strength = 0.22
+    state.body_state.meaning_strength = 0.22
+    state.mode = "idle"
+    controller._save_state(state, sync=True)
+
+    round_context = controller.build_round_context(
+        RoundEvent(
+            source="endogenous",
+            content="endogenous trigger idle",
+            target="self",
+            cue="endogenous:idle",
+        ),
+        "companion",
+        "endogenous_light",
+    )
+
+    collected = controller.collect_parallel_contributions(
+        round_context=round_context,
+        scenario="companion",
+    )
+
+    contribution = collected["direct_action_contributions"]["AutonomySelfRun"]
+    assert contribution.module_name == "AutonomySelfRun"
+    assert contribution.modulated_delta["self_run"] > 0.0
+
+
+def test_collect_parallel_contributions_includes_monologue_stream_field_bias_for_endogenous_round(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.round_count = 2
+    state.mode = "idle"
+    controller._save_state(state, sync=True)
+
+    def fake_catch_up(bucket, *, now_iso=None, fragment_builder=None):
+        updated = controller.monologue_runtime.ensure_bucket(bucket, now_iso=now_iso)
+        updated["last_generated_at"] = "2026-04-08T12:00:00Z"
+        updated["generated_total"] = int(updated.get("generated_total", 0) or 0) + 2
+        updated["category_counts"] = {"free_association": 1, "blank_fragment": 1}
+        generated = [
+            {
+                "fragment_id": "frag-1",
+                "recorded_at": "2026-04-08T12:00:00Z",
+                "category": "free_association",
+                "content": "我脑子里突然蹦出一个词。",
+                "source": "model",
+            },
+            {
+                "fragment_id": "frag-2",
+                "recorded_at": "2026-04-08T12:00:00Z",
+                "category": "blank_fragment",
+                "content": "……",
+                "source": "model",
+            },
+        ]
+        return updated, generated
+
+    monkeypatch.setattr(controller.monologue_runtime, "catch_up", fake_catch_up)
+
+    round_context = controller.build_round_context(
+        RoundEvent(
+            source="endogenous",
+            content="endogenous trigger idle",
+            target="self",
+            cue="endogenous:idle",
+        ),
+        "companion",
+        "endogenous_light",
+    )
+
+    collected = controller.collect_parallel_contributions(
+        round_context=round_context,
+        scenario="companion",
+    )
+
+    contribution = collected["direct_action_contributions"]["MonologueStream"]
+    assert contribution.module_name == "MonologueStream"
+    assert contribution.modulated_delta["monologue"] > 0.0
+    assert contribution.modulated_delta["respond"] < 0.0
+
+
+def test_endogenous_tick_can_realize_self_run_via_main_action_field(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.round_count = 3
+    state.body_energy = 0.82
+    state.body_state.energy = 0.82
+    state.fatigue = 0.18
+    state.body_state.fatigue = 0.18
+    state.memory_fragments = 0.36
+    state.body_state.memory_fragments = 0.36
+    state.self_continuity = 0.34
+    state.body_state.self_continuity = 0.34
+    state.meaning_strength = 0.22
+    state.body_state.meaning_strength = 0.22
+    state.mode = "idle"
+    controller._save_state(state, sync=True)
+
+    monkeypatch.setattr(
+        controller,
+        "_sample_action_from_distribution",
+        lambda distribution, sample_value=0.5: ActionCandidate(name="self_run", probability=1.0, rationale="forced-self-run"),
+    )
+
+    captured: dict[str, str] = {}
+
+    def fake_start_run(goal: str, **kwargs):
+        captured["goal"] = goal
+        captured["operator_level"] = str(kwargs.get("operator_level"))
+        run_state = controller.load_runtime_state()
+        run_state.active_run_id = "run-endogenous-self-run"
+        run_state.run_status = "running"
+        controller._save_state(run_state, sync=True)
+        return {
+            "run_id": "run-endogenous-self-run",
+            "status": "running",
+            "goal": goal,
+            "goal_summary": goal,
+            "trace_ref": "run://run-endogenous-self-run",
+        }
+
+    monkeypatch.setattr(controller, "start_run", fake_start_run)
+
+    payload = controller.run_endogenous_tick(trigger="idle", scenario="companion")
+    trace = controller.trace_round(payload["round_id"])
+
+    assert trace["sampled_action"] == "self_run"
+    assert captured["operator_level"] == "read_only"
+    assert captured["goal"]
+    assert trace["rendered_expression"]["text"] == ""
+
+
+def test_endogenous_tick_can_realize_monologue_via_main_action_field(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.round_count = 2
+    state.mode = "idle"
+    controller._save_state(state, sync=True)
+
+    monkeypatch.setattr(
+        controller,
+        "_sample_action_from_distribution",
+        lambda distribution, sample_value=0.5: ActionCandidate(name="monologue", probability=1.0, rationale="forced-monologue"),
+    )
+
+    payload = controller.run_endogenous_tick(trigger="idle", scenario="companion")
+    trace = controller.trace_round(payload["round_id"])
+
+    assert trace["sampled_action"] == "monologue"
+    assert trace["rendered_expression"]["delivery_mode"] == "monologue"
+    assert trace["rendered_expression"]["text"].startswith("【独白】")
+
+
+def test_monologue_trace_payload_surfaces_hidden_stream_evidence(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.round_count = 2
+    state.mode = "idle"
+    controller._save_state(state, sync=True)
+
+    def fake_catch_up(bucket, *, now_iso=None, fragment_builder=None):
+        updated = controller.monologue_runtime.ensure_bucket(bucket, now_iso=now_iso)
+        updated["last_generated_at"] = "2026-04-08T12:00:00Z"
+        updated["generated_total"] = int(updated.get("generated_total", 0) or 0) + 2
+        updated["category_counts"] = {"free_association": 1, "blank_fragment": 1}
+        generated = [
+            {
+                "fragment_id": "frag-a",
+                "recorded_at": "2026-04-08T12:00:00Z",
+                "category": "free_association",
+                "content": "我脑子里突然蹦出一个词。",
+                "source": "model",
+            },
+            {
+                "fragment_id": "frag-b",
+                "recorded_at": "2026-04-08T12:00:01Z",
+                "category": "blank_fragment",
+                "content": "……",
+                "source": "model",
+            },
+        ]
+        return updated, generated
+
+    monkeypatch.setattr(controller.monologue_runtime, "catch_up", fake_catch_up)
+    monkeypatch.setattr(
+        controller,
+        "_sample_action_from_distribution",
+        lambda distribution, sample_value=0.5: ActionCandidate(name="monologue", probability=1.0, rationale="forced-monologue"),
+    )
+
+    payload = controller.run_endogenous_tick(trigger="idle", scenario="companion")
+    trace = controller.trace_round(payload["round_id"])
+    why_current = controller.console_why_current(payload["round_id"])
+
+    monologue_stream = trace["expressive_trace"]["monologue_stream"]
+
+    assert monologue_stream["active"] is True
+    assert monologue_stream["fresh_generated"] is True
+    assert monologue_stream["sample_fragments"][0]["content"] == "我脑子里突然蹦出一个词。"
+    assert why_current["why"]["expressive_trace"]["monologue_stream"]["sample_fragments"][0]["category"] == "free_association"
+
+
+def test_why_not_monologue_surfaces_hidden_stream_reason_summary(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.round_count = 2
+    state.mode = "idle"
+    controller._save_state(state, sync=True)
+
+    def fake_catch_up(bucket, *, now_iso=None, fragment_builder=None):
+        updated = controller.monologue_runtime.ensure_bucket(bucket, now_iso=now_iso)
+        updated["last_generated_at"] = "2026-04-08T12:00:00Z"
+        updated["generated_total"] = int(updated.get("generated_total", 0) or 0) + 2
+        updated["category_counts"] = {"free_association": 1, "blank_fragment": 1}
+        generated = [
+            {
+                "fragment_id": "frag-a",
+                "recorded_at": "2026-04-08T12:00:00Z",
+                "category": "free_association",
+                "content": "我脑子里突然蹦出一个词。",
+                "source": "model",
+            },
+            {
+                "fragment_id": "frag-b",
+                "recorded_at": "2026-04-08T12:00:01Z",
+                "category": "blank_fragment",
+                "content": "……",
+                "source": "model",
+            },
+        ]
+        return updated, generated
+
+    monkeypatch.setattr(controller.monologue_runtime, "catch_up", fake_catch_up)
+    monkeypatch.setattr(
+        controller,
+        "_sample_action_from_distribution",
+        lambda distribution, sample_value=0.5: ActionCandidate(name="respond", probability=1.0, rationale="forced-respond"),
+    )
+
+    payload = controller.run_endogenous_tick(trigger="idle", scenario="companion")
+    why_not_payload = controller.why_not(payload["round_id"], "monologue")
+    console_payload = controller.console_why_not("monologue", payload["round_id"])
+
+    assert why_not_payload["action"] == "monologue"
+    assert why_not_payload["expressive_trace"]["monologue_stream"]["active"] is True
+    assert "独白" in why_not_payload["summary"]
+    assert "monologue_stream" in console_payload["why_not"]["expressive_trace"]
+    assert "独白" in console_payload["why_not"]["summary"]
+
+
+def test_endogenous_tick_self_run_can_continue_readonly_repo_scan_run(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.round_count = 3
+    state.body_energy = 0.82
+    state.body_state.energy = 0.82
+    state.fatigue = 0.18
+    state.body_state.fatigue = 0.18
+    state.memory_fragments = 0.36
+    state.body_state.memory_fragments = 0.36
+    state.self_continuity = 0.34
+    state.body_state.self_continuity = 0.34
+    state.meaning_strength = 0.22
+    state.body_state.meaning_strength = 0.22
+    state.mode = "idle"
+    controller._save_state(state, sync=True)
+
+    controller.start_run(
+        "Inspect the repository and identify the next read-only self-check step.",
+        allow_commit=False,
+        operator_level="read_only",
+        defer_bootstrap_tool=True,
+    )
+
+    monkeypatch.setattr(
+        controller,
+        "_sample_action_from_distribution",
+        lambda distribution, sample_value=0.5: ActionCandidate(name="self_run", probability=1.0, rationale="forced-self-run"),
+    )
+
+    payload = controller.run_endogenous_tick(trigger="idle", scenario="companion")
+    trace = controller.trace_round(payload["round_id"])
+    run = controller.run_status()
+
+    assert trace["sampled_action"] == "self_run"
+    assert trace["rendered_expression"]["text"] == ""
+    assert run["last_tool_result"]["tool_name"] == "repo_scan"
+
+
+def test_collect_parallel_contributions_excludes_self_run_when_only_non_repo_scan_tool_is_pending(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.round_count = 3
+    state.body_energy = 0.82
+    state.body_state.energy = 0.82
+    state.fatigue = 0.18
+    state.body_state.fatigue = 0.18
+    state.memory_fragments = 0.36
+    state.body_state.memory_fragments = 0.36
+    state.self_continuity = 0.34
+    state.body_state.self_continuity = 0.34
+    state.meaning_strength = 0.22
+    state.body_state.meaning_strength = 0.22
+    state.mode = "idle"
+    controller._save_state(state, sync=True)
+
+    controller.start_run(
+        "Inspect the repository and identify the next read-only self-check step.",
+        allow_commit=False,
+        operator_level="read_only",
+        defer_bootstrap_tool=True,
+    )
+    run_status = controller.run_status()
+    tools = controller.run_tools(run_status["run_id"])["tools"]
+    pending_repo_scan = next(item for item in tools if str(item.get("status") or "") == "awaiting_approval")
+    controller.resolve_run_tool_approval(run_status["run_id"], str(pending_repo_scan["call_id"]), approved=True)
+    controller.trace_store.append_tool_trace(
+        {
+            "run_id": run_status["run_id"],
+            "call_id": "tool-edit-endogenous",
+            "tool_name": "edit_file",
+            "arguments": {"path": "README.md"},
+            "status": "awaiting_approval",
+            "trace_ref": f"run://{run_status['run_id']}/tools/tool-edit-endogenous",
+            "round_id": None,
+        },
+        session_id=controller.load_runtime_state().session_id,
+        recorded_at=utc_now_iso(),
+        sync=True,
+    )
+
+    round_context = controller.build_round_context(
+        RoundEvent(
+            source="endogenous",
+            content="endogenous trigger idle",
+            target="self",
+            cue="endogenous:idle",
+        ),
+        "companion",
+        "endogenous_light",
+    )
+
+    collected = controller.collect_parallel_contributions(
+        round_context=round_context,
+        scenario="companion",
+    )
+
+    assert "AutonomySelfRun" not in collected["direct_action_contributions"]
+
+
+def test_autonomy_self_run_prefers_small_model_goal_when_available(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    route = controller._route_config_for_binding("AutonomySelfRun", route_name="autonomy_self_run")
+
+    assert route is not None
+    assert getattr(route, "effective_tier", "") == "small_model"
+
+    state = controller.load_runtime_state()
+    state.round_count = 2
+    state.body_energy = 0.86
+    state.body_state.energy = 0.86
+    state.fatigue = 0.14
+    state.body_state.fatigue = 0.14
+    state.memory_fragments = 0.41
+    state.body_state.memory_fragments = 0.41
+    state.self_continuity = 0.31
+    state.body_state.self_continuity = 0.31
+    state.mode = "interactive"
+    controller._save_state(state, sync=True)
+
+    monkeypatch.setattr(controller.endogenous_scheduler, "build_trigger", lambda **kwargs: None)
+
+    seen: dict[str, str] = {}
+
+    def fake_generate_config(route_config, request):
+        seen["route"] = route_config.name
+        seen["tier"] = str(getattr(route_config, "effective_tier", ""))
+        return ModelResponse(
+            route=route_config.name,
+            model="stub-small",
+            payload={
+                "goal": "Inspect recent runtime traces and identify the next read-only self-check step.",
+                "reason": "continuity drift remains elevated",
+            },
+            backend=route_config.backend,
+        )
+
+    def fake_start_run(goal: str, **kwargs):
+        seen["goal"] = goal
+        run_state = controller.load_runtime_state()
+        run_state.active_run_id = "run-autonomy-model"
+        run_state.run_status = "running"
+        controller._save_state(run_state, sync=True)
+        return {
+            "run_id": "run-autonomy-model",
+            "status": "running",
+            "goal": goal,
+            "goal_summary": goal,
+            "trace_ref": "run://run-autonomy-model",
+        }
+
+    monkeypatch.setattr(controller.model_router, "generate_config", fake_generate_config)
+    monkeypatch.setattr(controller, "start_run", fake_start_run)
+
+    controller.autonomy_step()
+
+    assert seen["route"] == "autonomy_self_run"
+    assert seen["tier"] == "small_model"
+    assert seen["goal"] == "Inspect recent runtime traces and identify the next read-only self-check step."
+
+
+def test_autonomy_step_auto_approves_repo_scan_for_active_readonly_run(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    monkeypatch.setattr(controller.endogenous_scheduler, "build_trigger", lambda **kwargs: None)
+
+    controller.start_run(
+        "Inspect the repository and identify the next read-only self-check step.",
+        allow_commit=False,
+        operator_level="read_only",
+        defer_bootstrap_tool=True,
+    )
+
+    status = controller.autonomy_step()
+    run = controller.run_status()
+    tools = controller.run_tools()["tools"]
+
+    assert run["status"] == "running"
+    assert run["last_tool_result"]["tool_name"] == "repo_scan"
+    assert any(str(item.get("status") or "") == "ok" for item in tools)
+    assert status["last_action_type"] == "self_run_tool"
+    assert "repo_scan" in status["last_action_summary"]
+
+
+def test_autonomy_step_does_not_auto_approve_non_repo_scan_tools(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    monkeypatch.setattr(controller.endogenous_scheduler, "build_trigger", lambda **kwargs: None)
+
+    controller.start_run(
+        "Inspect the repository and identify the next read-only self-check step.",
+        allow_commit=False,
+        operator_level="read_only",
+        defer_bootstrap_tool=True,
+    )
+    run_status = controller.run_status()
+    tools = controller.run_tools(run_status["run_id"])["tools"]
+    pending_repo_scan = next(item for item in tools if str(item.get("status") or "") == "awaiting_approval")
+    call_id = str(pending_repo_scan["call_id"])
+    controller.resolve_run_tool_approval(run_status["run_id"], call_id, approved=True)
+    controller.trace_store.append_tool_trace(
+        {
+            "run_id": run_status["run_id"],
+            "call_id": "tool-edit-1",
+            "tool_name": "edit_file",
+            "arguments": {"path": "README.md"},
+            "status": "awaiting_approval",
+            "trace_ref": f"run://{run_status['run_id']}/tools/tool-edit-1",
+            "round_id": None,
+        },
+        session_id=controller.load_runtime_state().session_id,
+        recorded_at=utc_now_iso(),
+        sync=True,
+    )
+
+    status = controller.autonomy_step()
+    tools = controller.run_tools()["tools"]
+
+    assert any(
+        str(item.get("tool_name") or "") == "edit_file" and str(item.get("status") or "") == "awaiting_approval"
+        for item in tools
+    )
+    assert status["last_action_type"] != "self_run_tool"
+
+
+def test_autonomy_step_does_not_auto_approve_repo_scan_for_non_readonly_run(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    monkeypatch.setattr(controller.endogenous_scheduler, "build_trigger", lambda **kwargs: None)
+
+    controller.start_run(
+        "Inspect the repository and identify the next write-capable step.",
+        allow_commit=True,
+        operator_level="workspace_write",
+        defer_bootstrap_tool=True,
+    )
+
+    status = controller.autonomy_step()
+    run = controller.run_status()
+    tools = controller.run_tools(run["run_id"])["tools"]
+    pending_repo_scan = next(item for item in tools if str(item.get("tool_name") or "") == "repo_scan")
+
+    assert run["status"] == "running"
+    assert str(pending_repo_scan.get("status") or "") == "awaiting_approval"
+    assert status["last_action_type"] != "self_run_tool"
+
+
 def test_autonomy_execute_command_rejects_blocked_command_with_reason(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     state = controller.load_runtime_state()
@@ -2745,6 +3788,29 @@ def test_autonomy_start_resets_windowed_budgets_and_expired_window_does_not_stop
     assert stepped["stop_reason"] != "round_budget_reached"
 
 
+def test_autonomy_step_treats_zero_hourly_budgets_as_unlimited(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.autonomy_policy.enabled = True
+    state.autonomy_loop.running = True
+    state.autonomy_policy.max_rounds_per_hour = 0
+    state.autonomy_policy.max_tool_actions_per_hour = 0
+    state.autonomy_loop.window_started_at = utc_now_iso()
+    state.autonomy_loop.window_tool_actions = 999
+    state.autonomy_loop.window_endogenous_rounds = 999
+    controller._save_state(state, sync=True)
+    monkeypatch.setattr(controller.endogenous_scheduler, "build_trigger", lambda **kwargs: None)
+    monkeypatch.setattr(controller, "_autonomy_candidate_action", lambda state, policy: "nothing")
+
+    status = controller.autonomy_step()
+
+    assert status["running"] is True
+    assert status["stop_reason"] != "tool_budget_reached"
+    assert status["stop_reason"] != "round_budget_reached"
+    assert status["budget_usage"]["max_rounds_per_hour"] == 0
+    assert status["budget_usage"]["max_tool_actions_per_hour"] == 0
+
+
 def test_autonomy_start_can_clear_safe_mode_for_observer_resume(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     state = controller.load_runtime_state()
@@ -2758,6 +3824,122 @@ def test_autonomy_start_can_clear_safe_mode_for_observer_resume(tmp_path):
     assert started["running"] is True
     assert restored.safe_mode is False
     assert restored.mode == "interactive"
+
+
+def test_reset_persona_restores_default_autonomy_boot_policy(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.stop_autonomy(reason="manual_stop")
+
+    restored = controller.reset_persona()
+
+    assert restored.autonomy_policy.enabled is True
+    assert restored.autonomy_loop.running is True
+    assert restored.session_metadata.get("autonomy_user_disabled") is not True
+    assert restored.session_metadata.get("autonomy_default_enabled_at")
+
+
+def test_console_refresh_payload_surfaces_latency_split_and_internal_labels_for_endogenous_round(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    endogenous = controller.run_endogenous_tick(trigger="idle")
+    payload = controller.console_refresh_payload(endogenous["round_id"])
+    current_round = payload["state"]["current_round"]
+    recent_actions = controller.console_recent_actions(limit=1)
+    current_intent = payload["state"]["cognitive_snapshot"]["current_intent"]
+
+    assert current_round["cause_type"] == "endogenous"
+    assert str(current_round["route_type"]).startswith("endogenous_")
+    assert current_round["total_turn_ms"] >= 1
+    assert current_round["model_wait_ms"] >= 0
+    assert current_round["local_compute_ms"] >= 0
+    assert current_round["latency_dominant"] in {"model_wait", "local_compute", "mixed"}
+    assert current_round["mode_label"]
+    assert "endogenous_light" not in current_round["mode_label"]
+    assert "回应" not in current_intent
+    assert "endogenous_light" not in recent_actions["actions"][0]["summary"]
+
+
+def test_state_payload_exposes_runtime_metrics_as_first_class_diagnostics(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="给我一个简短近况。",
+            target="user",
+            cue="近况",
+            valence=0.05,
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    payload = controller.state_payload()
+    runtime_metrics = payload["runtime_metrics"]
+    performance = payload["performance"]
+
+    assert runtime_metrics["route_type"]
+    assert runtime_metrics["model_call_count"] >= 0
+    assert runtime_metrics["total_turn_ms"] >= 1
+    assert runtime_metrics["local_compute_ms"] >= 0
+    assert performance["latency"]["local_compute_ms"] == runtime_metrics["local_compute_ms"]
+    assert performance["latency"]["latency_dominant"] in {"model_wait", "local_compute", "mixed"}
+
+
+def test_chat_tick_runtime_metrics_use_chat_standard_route_type(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    result = controller.tick(
+        RoundEvent(
+            source="user",
+            content="最近的内在状态怎么样？",
+            target="user",
+            cue="状态",
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    assert result.trace.runtime_metrics["route_type"] == "chat_standard"
+
+
+def test_chat_tick_runtime_metrics_can_upgrade_to_chat_deep_route_type(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    result = controller.tick(
+        RoundEvent(
+            source="user",
+            content="请你详细分析一下我最近总是觉得疲惫、分心、又想推进事情，但每次都卡住的状态，并系统比较一下可能的内在原因和接下来最值得优先做的调整。",
+            target="user",
+            cue="疲惫与卡住",
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    assert result.trace.runtime_metrics["route_type"] == "chat_deep"
+
+
+def test_endogenous_tick_runtime_metrics_use_endogenous_light_route_type(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    payload = controller.run_endogenous_tick(trigger="idle", mode="endogenous_light")
+    trace = controller.trace_round(payload["round_id"])
+
+    assert trace["runtime_metrics"]["route_type"] == "endogenous_light"
+
+
+def test_endogenous_replay_runtime_metrics_use_endogenous_deep_route_type(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    controller.tick(
+        RoundEvent(source="user", content="先留下一轮上下文。", target="user", cue="上下文"),
+        scenario="chat",
+        mode="interactive",
+    )
+    payload = controller.run_endogenous_tick(trigger="idle", mode="endogenous_replay")
+    trace = controller.trace_round(payload["round_id"])
+
+    assert trace["runtime_metrics"]["route_type"] == "endogenous_deep"
 
 
 def test_probability_field_observability_surfaces_tool_affordance_for_active_run(tmp_path):
