@@ -1,0 +1,22 @@
+[
+  {
+    "cue": "alphba7f452",
+    "count": 4,
+    "gist_strength": 1.0,
+    "detail_strength": 1.0,
+    "last_content": "stabilize-two: keep continuity around alphba7f452",
+    "interference": 0.0853,
+    "interference_source": "alphaa7f452",
+    "interfered": true,
+    "last_cue_quality": 1.0,
+    "last_affect_intensity": 0.0007,
+    "last_recalled_round": 5,
+    "context_slot": "user::user",
+    "last_gate_decision": "applied",
+    "last_gate_reason": "applied",
+    "last_write_resource_pressure": 0.0845,
+    "write_suppressed_count": 0,
+    "episode_id": "ep-0a9faf0bad",
+    "separation_id": "sep-5b92aa1da3"
+  }
+]

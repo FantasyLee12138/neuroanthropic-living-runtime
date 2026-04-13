@@ -67,6 +67,10 @@ def validate_inbound_event(payload: dict[str, Any]) -> dict[str, Any]:
     if event_type == "close_session":
         if "detach" in payload and not isinstance(payload.get("detach"), bool):
             raise ProtocolError("detach must be a boolean when provided")
+        if "purge" in payload and not isinstance(payload.get("purge"), bool):
+            raise ProtocolError("purge must be a boolean when provided")
+        if "cleanup_old" in payload and not isinstance(payload.get("cleanup_old"), bool):
+            raise ProtocolError("cleanup_old must be a boolean when provided")
         if "transcript_mode" in payload:
             mode = payload.get("transcript_mode")
             if mode not in {"full", "compact"}:

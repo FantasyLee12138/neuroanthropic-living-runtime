@@ -1,9 +1,17 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { createSessionId, resolveInteractiveSessionId } from "./client.js";
+import {
+  createSessionId,
+  DEFAULT_SESSION_CLOSE_TIMEOUT_MS,
+  DEFAULT_SESSION_START_TIMEOUT_MS,
+  registerBridgeProcessCleanup,
+  resolveInteractiveSessionId,
+  sessionCloseTimeoutMs,
+  sessionStartTimeoutMs,
+} from "./client.js";
 
 function makeRepoRoot(): string {
   const root = mkdtempSync(path.join(tmpdir(), "nalr-client-"));
@@ -21,6 +29,8 @@ describe("client session restore", () => {
     }
     created.length = 0;
     delete process.env.NALR_HOME;
+    delete process.env.NALR_SESSION_START_TIMEOUT_MS;
+    delete process.env.NALR_SESSION_CLOSE_TIMEOUT_MS;
   });
 
   it("reuses current session when status is active or detached", () => {
@@ -55,5 +65,64 @@ describe("client session restore", () => {
     expect(resolved).not.toBe("sess-ended");
     expect(resolved).toMatch(/^nalr-/);
     expect(createSessionId("nalr")).toMatch(/^nalr-/);
+  });
+
+  it("uses longer default bridge timeouts and allows env overrides", () => {
+    expect(sessionStartTimeoutMs()).toBe(DEFAULT_SESSION_START_TIMEOUT_MS);
+    expect(sessionCloseTimeoutMs()).toBe(DEFAULT_SESSION_CLOSE_TIMEOUT_MS);
+
+    process.env.NALR_SESSION_START_TIMEOUT_MS = "60000";
+    process.env.NALR_SESSION_CLOSE_TIMEOUT_MS = "22000";
+
+    expect(sessionStartTimeoutMs()).toBe(60000);
+    expect(sessionCloseTimeoutMs()).toBe(22000);
+  });
+
+  it("disposes the bridge when the host process exits", () => {
+    const dispose = vi.fn();
+    const listeners = new Map<string, (...args: unknown[]) => void>();
+    const processLike = {
+      pid: 4321,
+      once(event: string, listener: (...args: unknown[]) => void) {
+        listeners.set(event, listener);
+        return this;
+      },
+      off(event: string) {
+        listeners.delete(event);
+        return this;
+      },
+      kill: vi.fn(),
+    };
+
+    const unregister = registerBridgeProcessCleanup({ dispose }, processLike as any);
+    listeners.get("exit")?.();
+
+    expect(dispose).toHaveBeenCalledTimes(1);
+
+    unregister();
+  });
+
+  it("disposes the bridge and re-raises termination signals", () => {
+    const dispose = vi.fn();
+    const listeners = new Map<string, (...args: unknown[]) => void>();
+    const processLike = {
+      pid: 9876,
+      once(event: string, listener: (...args: unknown[]) => void) {
+        listeners.set(event, listener);
+        return this;
+      },
+      off(event: string) {
+        listeners.delete(event);
+        return this;
+      },
+      kill: vi.fn(),
+    };
+
+    registerBridgeProcessCleanup({ dispose }, processLike as any);
+    listeners.get("SIGTERM")?.();
+
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(processLike.kill).toHaveBeenCalledWith(9876, "SIGTERM");
+    expect(listeners.has("SIGTERM")).toBe(false);
   });
 });

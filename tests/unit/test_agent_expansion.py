@@ -76,9 +76,10 @@ def test_plausibility_guard_blocks_wander_in_task_runtime(tmp_path):
         mode="idle",
     )
 
+    dmn_stage = next(item for item in result.trace.proposal_summaries if item["stage"] == "dmn")
+    plausibility_stage = next(item for item in result.trace.gate_decisions if item["stage"] == "plausibility_guard")
+
+    assert dmn_stage["top_action"] == "wander"
     assert result.sampled_action.name != "wander"
-    assert any(
-        item["stage"] == "plausibility_guard" and item["requires_resample"] is False and "wander" in item["reason"]
-        for item in result.trace.gate_decisions
-    )
+    assert plausibility_stage["requires_resample"] is False
     assert result.trace.conflict_arbitration["total_score"] >= 0.0

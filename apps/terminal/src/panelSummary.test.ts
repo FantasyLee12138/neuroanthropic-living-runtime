@@ -64,10 +64,15 @@ describe("panelSummary", () => {
               roundId: 18,
               sampledAction: "respond",
               traceRef: "round://18",
+              routeBudgetMs: 700,
               causeType: "endogenous",
               causeLabel: "内生整理",
               mode: "endogenous_light",
               modeLabel: "内生整理",
+              activationSet: ["Router", "HotStateLoader", "Reflection/DMN"],
+              memoryTiersRead: ["hot", "warm"],
+              backgroundJobs: [{ kind: "memory_consolidation" }],
+              deepenReason: "long_horizon_alignment",
               totalTurnMs: 420,
               modelWaitMs: 310,
               localComputeMs: 110,
@@ -118,6 +123,10 @@ describe("panelSummary", () => {
     expect(summary).toContain("当前驱动：内生整理");
     expect(summary).toContain("处理来源：内生整理");
     expect(summary).toContain("本轮时延：模型等待占主导（模型 310ms / 本地 110ms）");
+    expect(summary).toContain("激活模块：Router · HotStateLoader · Reflection/DMN");
+    expect(summary).toContain("记忆层：hot → warm");
+    expect(summary).toContain("后台任务：1 项");
+    expect(summary).toContain("加深原因：long_horizon_alignment");
   });
 
   it("renders why, steps, and tools as compact summaries", () => {
@@ -182,6 +191,13 @@ describe("panelSummary", () => {
                 top_intent: "respond",
                 intrinsic_value: 0.46,
                 speech_cost: 0.19,
+                should_send: false,
+                suppression_reason: "cooldown_active",
+                memory_backing: {
+                  cue: "写作业",
+                  topic_source: "current_goal",
+                  topic_relevance: 1,
+                },
               },
               expressiveTrace: {
                 monologueStream: {
@@ -203,6 +219,9 @@ describe("panelSummary", () => {
     );
 
     expect(summary).toContain("当前选择依据：先回应当前对话，再把零散念头留在隐藏流里。");
+    expect(summary).toContain("主动性判定：external · respond · should_send=false");
+    expect(summary).toContain("抑制原因：cooldown_active");
+    expect(summary).toContain("记忆牵引：写作业 · source=current_goal · relevance=1.00");
     expect(summary).toContain("隐藏独白流：最近 2 条碎片，累计 42 条，默认不显示");
     expect(summary).toContain("样本：先喝口水；啊…");
   });
@@ -264,13 +283,12 @@ describe("panelSummary", () => {
               credential_present: true
             }
           },
-          agent_bindings: {
-            SalienceAgent: "small_model",
-            ValueAgent: "small_model",
-            PerspectiveModel: "medium_model",
-            PFCAgent: "large_model",
-            Renderer: "large_model",
-            planner: "medium_model"
+          module_model_bindings: {
+            cognitive_packet: "small_model",
+            deliberation: "large_model",
+            tool_planner: "medium_model",
+            deep_renderer: "large_model",
+            consolidation_summarizer: "small_model"
           }
         },
         cognitiveSnapshot: {
@@ -313,7 +331,9 @@ describe("panelSummary", () => {
     expect(meta).toContain("当前权限：需确认");
     expect(meta).toContain("模型分层");
     expect(meta).toContain("small_model：doubao / ep-20260404191810-qfn7s / 密钥已接入");
-    expect(meta).toContain("社会认知建模：medium_model");
+    expect(meta).toContain("主要模块模型绑定");
+    expect(meta).toContain("cognitive_packet：small_model");
+    expect(meta).toContain("deep_renderer：large_model");
   });
 
   it("renders a compact sidebar summary for the default shell", () => {

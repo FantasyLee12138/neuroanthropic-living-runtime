@@ -305,6 +305,45 @@ def test_longrun_projection_surfaces_anchor_summary_after_real_rounds(tmp_path):
     assert projection["personality_anchor_summary"]["anchor_alignment"] >= 0.0
 
 
+def test_longrun_projection_uses_recent_round_window_without_full_history_scan():
+    class DummyTraceStore:
+        def recent_rounds(self, *, limit: int = 20):
+            assert limit == 12
+            return [
+                {
+                    "top_drivers": [
+                        {"action_name": "plan", "score": 0.6},
+                        {"action_name": "respond", "score": 0.2},
+                    ]
+                },
+                {
+                    "top_drivers": [
+                        {"action_name": "respond", "score": 0.7},
+                        {"action_name": "rest", "score": 0.1},
+                    ]
+                },
+            ]
+
+        def list_rounds(self):
+            raise AssertionError("build_round_projection should not scan full history")
+
+    analyzer = LongRunAnalyzer(DummyTraceStore(), lambda: {}, ("plan", "respond", "clarify", "wander", "rest", "recall"))
+
+    projection = analyzer.build_round_projection(
+        round_id=7,
+        vitality_snapshot={"affect_residue": 0.08, "relationship_drift": 0.02, "resource_scarcity": 0.01},
+        authenticity={"self_grounding_score": 0.82},
+        identity_evolution={},
+        shaping_events=[],
+        personality_anchor={"axis_baseline": {"E": 0.5, "F": 0.5, "S": 0.5, "M": 0.5}, "alignment": 0.9, "stability": 0.8},
+        top_drivers=[{"action_name": "plan", "score": 0.9}],
+    )
+
+    summary = projection["personality_anchor_summary"]
+    assert summary["dominant_actions"][0] == "plan"
+    assert "respond" in summary["dominant_actions"]
+
+
 def test_personality_anchor_accumulates_recent_driver_bias(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     state = controller.load_runtime_state()

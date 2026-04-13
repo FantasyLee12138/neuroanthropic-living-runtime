@@ -55,7 +55,7 @@ class DreamOrchestrator:
         top_memories = self.memory_store.memory_top(limit=5)
         hot = [item.get("cue") for item in top_memories if item.get("tier") == "hot" and item.get("cue")]
         warm = [item.get("cue") for item in top_memories if item.get("tier") == "warm" and item.get("cue")]
-        archive = [item.get("cue") for item in top_memories if item.get("tier") == "archive" and item.get("cue")]
+        cold = [item.get("cue") for item in top_memories if item.get("tier") == "cold" and item.get("cue")]
         effective_cue = cue or (hot[0] if hot else None) or (warm[0] if warm else None)
         return DreamSnapshot(
             sleep_session_id=f"{mode}-{state.session_id[:8]}-{state.round_count}",
@@ -64,7 +64,7 @@ class DreamOrchestrator:
             memory_refs={
                 "hot": [item for item in [effective_cue, *hot] if item][:3],
                 "warm": warm[:3],
-                "archive_sample_pool": archive[:3],
+                "cold_sample_pool": cold[:3],
             },
             resource_state={
                 "daily_token_surplus_rate": round(float(state.budget_remaining), 4),

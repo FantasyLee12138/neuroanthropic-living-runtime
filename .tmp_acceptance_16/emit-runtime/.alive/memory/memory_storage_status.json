@@ -1,0 +1,7 @@
+{
+  "read_source_default": "parquet",
+  "storage_state": "healthy",
+  "parquet_live_ready": true,
+  "degraded_reason": null,
+  "last_sync_at": "2026-04-13T03:42:45Z"
+}

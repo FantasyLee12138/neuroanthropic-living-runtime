@@ -1,0 +1,10 @@
+{
+  "read_source_default": "parquet",
+  "storage_state": "healthy",
+  "trace_sync_state": "healthy",
+  "parquet_live_ready": true,
+  "degraded_reason": null,
+  "last_sync_at": "2026-04-13T03:42:45Z",
+  "signal_view_cache_size": 13,
+  "signal_view_cache_limit": 100
+}

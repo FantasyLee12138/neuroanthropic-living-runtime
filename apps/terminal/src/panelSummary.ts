@@ -66,6 +66,19 @@ function statusSummary(state: UiState): string {
     const localCompute = currentRound?.localComputeMs == null ? "?" : `${currentRound.localComputeMs}ms`;
     rows.push(line("本轮时延", `${latencySummary}（模型 ${modelWait} / 本地 ${localCompute}）`));
   }
+  if (currentRound?.activationSet?.length) {
+    rows.push(line("激活模块", currentRound.activationSet.join(" · ")));
+  }
+  if (currentRound?.memoryTiersRead?.length) {
+    rows.push(line("记忆层", currentRound.memoryTiersRead.join(" → ")));
+  }
+  if (currentRound?.backgroundJobs?.length) {
+    rows.push(line("后台任务", `${currentRound.backgroundJobs.length} 项`));
+  }
+  const deepenReason = presentText(currentRound?.deepenReason);
+  if (deepenReason !== "尚未接入") {
+    rows.push(line("加深原因", deepenReason));
+  }
   return rows.join("\n");
 }
 
@@ -75,6 +88,7 @@ function whySummary(state: UiState): string {
   const why = state.lastWhy ?? {};
   const currentStep = (why.current_step as Record<string, unknown> | undefined) ?? {};
   const stopReason = (why.stop_reason as Record<string, unknown> | undefined) ?? {};
+  const initiative = (consoleWhy?.initiative ?? {}) as Record<string, unknown>;
   const reason = presentText(consoleWhy?.summary ?? currentStep.expected_observation ?? currentStep.detail);
   const rows = [
     line(whyCurrentLabel(), presentText(consoleWhy?.summary ?? why.goal_summary ?? why.goal)),
@@ -110,6 +124,25 @@ function whySummary(state: UiState): string {
   }
   if (actionField?.contributionStack.length) {
     rows.push(line(contributionSectionTitle(), actionField.contributionStack.map((item) => `${translateBrainIdentifier(item.source)}(${formatScore(item.weight)})`).join("；")));
+  }
+  const initiativeMode = presentText(initiative.expression_mode);
+  const initiativeIntent = presentText(initiative.top_intent);
+  if (initiativeMode !== "尚未接入" || initiativeIntent !== "尚未接入") {
+    const shouldSend = typeof initiative.should_send === "boolean" ? String(initiative.should_send) : "尚未接入";
+    rows.push(line("主动性判定", `${initiativeMode} · ${initiativeIntent} · should_send=${shouldSend}`));
+  }
+  const suppressionReason = presentText(initiative.suppression_reason);
+  if (suppressionReason !== "尚未接入") {
+    rows.push(line("抑制原因", suppressionReason));
+  }
+  const memoryBacking = ((initiative.memory_backing ?? {}) as Record<string, unknown>);
+  const cue = presentText(memoryBacking.cue ?? memoryBacking.summary);
+  if (cue !== "尚未接入") {
+    const topicSource = presentText(memoryBacking.topic_source ?? memoryBacking.topicSource);
+    const topicRelevance = typeof (memoryBacking.topic_relevance ?? memoryBacking.topicRelevance) === "number"
+      ? formatScore(Number(memoryBacking.topic_relevance ?? memoryBacking.topicRelevance))
+      : "尚未接入";
+    rows.push(line("记忆牵引", `${cue} · source=${topicSource} · relevance=${topicRelevance}`));
   }
   rows.push(...summarizeMonologueStream(consoleWhy?.expressiveTrace));
   return rows.join("\n");
@@ -273,7 +306,7 @@ function formatModelSection(modelStatus: Record<string, unknown> | undefined): s
     return ["模型分层", "  尚未接入"].join("\n");
   }
   const tiers = (modelStatus.tiers as Record<string, Record<string, unknown>> | undefined) ?? {};
-  const bindings = (modelStatus.agent_bindings as Record<string, string> | undefined) ?? {};
+  const bindings = (modelStatus.module_model_bindings as Record<string, string> | undefined) ?? {};
   const tierRows = ["模型分层"];
   for (const [tierName, tier] of Object.entries(tiers)) {
     const mode = presentText(tier.mode);
@@ -286,11 +319,11 @@ function formatModelSection(modelStatus: Record<string, unknown> | undefined): s
     );
   }
   tierRows.push("");
-  tierRows.push("主要绑定");
-  for (const agentName of ["SalienceAgent", "ValueAgent", "PerspectiveModel", "PFCAgent", "Renderer", "planner"]) {
-    const tier = bindings[agentName];
+  tierRows.push("主要模块模型绑定");
+  for (const moduleName of ["cognitive_packet", "deliberation", "tool_planner", "deep_renderer", "consolidation_summarizer"]) {
+    const tier = bindings[moduleName];
     if (tier) {
-      tierRows.push(`  ${translateBrainIdentifier(agentName)}：${tier}`);
+      tierRows.push(`  ${moduleName}：${tier}`);
     }
   }
   return tierRows.join("\n");

@@ -1,7 +1,7 @@
 # Backup Docs Index
 
 本索引记录旧文档的原路径、新路径和保留原因。
-这些文件已经不再作为当前前台事实源继续维护，当前主线以 [`/Users/fantasylee/类脑架构/BEREAL_v0.6_MASTER_SPEC.md`](/Users/fantasylee/类脑架构/BEREAL_v0.6_MASTER_SPEC.md) 为准。
+当前活跃根文档已经收敛为 [`README.md`](/Users/fantasylee/类脑架构/README.md)、[`架构宣言.md`](/Users/fantasylee/类脑架构/架构宣言.md)、[`PLAN1.6.md`](/Users/fantasylee/类脑架构/PLAN1.6.md)；其余 root 文档继续归档如下。
 
 ## Root
 
@@ -10,10 +10,17 @@
 | `/Users/fantasylee/类脑架构/NALR_v0.57_architecture.md` | `/Users/fantasylee/类脑架构/archive/backup-docs/root/NALR_v0.57_architecture.md` | 已吸收 | 历史 v0.57 概率场架构说明 |
 | `/Users/fantasylee/类脑架构/NALR_v057_neuromodulation_updated_spec.md` | `/Users/fantasylee/类脑架构/archive/backup-docs/root/NALR_v057_neuromodulation_updated_spec.md` | 已吸收 | 历史神经调制执行规范 |
 | `/Users/fantasylee/类脑架构/开发文档v0.56.md` | `/Users/fantasylee/类脑架构/archive/backup-docs/root/开发文档v0.56.md` | 已吸收 | 历史工程规格基线 |
+| `/Users/fantasylee/类脑架构/NALR_Alive_Console_Product_Design.md` | `/Users/fantasylee/类脑架构/archive/backup-docs/root/NALR_Alive_Console_Product_Design.md` | 已归档 | 早期 Alive Console 产品设计稿 |
+| `/Users/fantasylee/类脑架构/NALR_Alive_Console_Product_Design.pdf` | `/Users/fantasylee/类脑架构/archive/backup-docs/root/NALR_Alive_Console_Product_Design.pdf` | 已归档 | 早期 Alive Console 产品设计稿 PDF 副本 |
 | `/Users/fantasylee/类脑架构/架构宣言.md` | `/Users/fantasylee/类脑架构/archive/backup-docs/root/架构宣言.md` | 已吸收 | 历史理念文档 |
 | `/Users/fantasylee/类脑架构/v056_acceptance_matrix.md` | `/Users/fantasylee/类脑架构/archive/backup-docs/root/v056_acceptance_matrix.md` | 部分吸收 | 历史验收矩阵 |
 | `/Users/fantasylee/类脑架构/接入模型（初版doubao).md` | `/Users/fantasylee/类脑架构/archive/backup-docs/root/接入模型（初版doubao).md` | 部分吸收 | 早期模型接入记录 |
 | `/Users/fantasylee/类脑架构/终端接口嵌入计划_v0.1_NALR.md` | `/Users/fantasylee/类脑架构/archive/backup-docs/root/终端接口嵌入计划_v0.1_NALR.md` | 部分吸收 | 早期终端嵌入计划 |
+| `/Users/fantasylee/类脑架构/Agents_UI.md` | `/Users/fantasylee/类脑架构/archive/backup-docs/root/Agents_UI.md` | 已归档 | 重复的 AGENTS 指南副本 |
+| `/Users/fantasylee/类脑架构/BEREAL_v0.6_MASTER_SPEC.md` | `/Users/fantasylee/类脑架构/archive/backup-docs/root/BEREAL_v0.6_MASTER_SPEC.md` | 已归档 | 冻结 substrate |
+| `/Users/fantasylee/类脑架构/PLANS.md` | `/Users/fantasylee/类脑架构/archive/backup-docs/root/PLANS.md` | 已归档 | 旧 1.5 ledger |
+| `/Users/fantasylee/类脑架构/Think_Like_Human(TLH)_v1.0.md` | `/Users/fantasylee/类脑架构/archive/backup-docs/root/Think_Like_Human(TLH)_v1.0.md` | 已归档 | TLH 兼容入口旧副本 |
+| `/Users/fantasylee/类脑架构/Think_Like_Human(TLH)_v1.5.md` | `/Users/fantasylee/类脑架构/archive/backup-docs/root/Think_Like_Human(TLH)_v1.5.md` | 已归档 | 旧 TLH 主文档 |
 | `/Users/fantasylee/类脑架构/模型模型API&调用方式` | `/Users/fantasylee/类脑架构/archive/backup-docs/root/模型模型API&调用方式` | 部分吸收 | 历史模型 API 记录 |
 
 ## Development

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -46,6 +47,7 @@ class MonologueStreamRuntime:
             "bootstrap_seconds": 6,
             "min_interval_ms": 120,
             "max_interval_ms": 900,
+            "max_catch_up_pulses": 24,
             "min_fragments_per_pulse": 1,
             "max_fragments_per_pulse": 3,
             "default_show_limit": 12,
@@ -54,6 +56,7 @@ class MonologueStreamRuntime:
         defaults.update(dict(payload or {}))
         min_interval_ms = max(40, int(defaults.get("min_interval_ms", 120) or 120))
         max_interval_ms = max(min_interval_ms, int(defaults.get("max_interval_ms", 900) or 900))
+        max_catch_up_pulses = max(1, int(defaults.get("max_catch_up_pulses", 24) or 24))
         min_fragments = max(1, int(defaults.get("min_fragments_per_pulse", 1) or 1))
         max_fragments = max(min_fragments, int(defaults.get("max_fragments_per_pulse", 3) or 3))
         generator_mode = str(defaults.get("generator_mode", "local") or "local").strip().lower()
@@ -64,6 +67,7 @@ class MonologueStreamRuntime:
             "bootstrap_seconds": max(1, int(defaults.get("bootstrap_seconds", 6) or 6)),
             "min_interval_ms": min_interval_ms,
             "max_interval_ms": max_interval_ms,
+            "max_catch_up_pulses": max_catch_up_pulses,
             "min_fragments_per_pulse": min_fragments,
             "max_fragments_per_pulse": max_fragments,
             "default_show_limit": max(1, int(defaults.get("default_show_limit", 12) or 12)),
@@ -98,6 +102,90 @@ class MonologueStreamRuntime:
             "settings": settings,
         }
 
+    def prepare_catch_up(self, bucket: dict[str, Any] | None, *, now_iso: str | None = None) -> dict[str, Any]:
+        now_dt = _parse_iso(now_iso or utc_now_iso())
+        data = self.ensure_bucket(bucket, now_iso=_to_iso(now_dt))
+        settings = self.merge_settings(data.get("settings"))
+        seed = str(data["seed"])
+        pulse_index = int(data["pulse_index"])
+        next_pulse_dt = _parse_iso(data["next_pulse_at"])
+        due_pulses: deque[dict[str, Any]] = deque(maxlen=int(settings["max_catch_up_pulses"]))
+
+        while next_pulse_dt <= now_dt:
+            interval_rng = random.Random(f"{seed}:pulse:{pulse_index}")
+            fragment_rng = random.Random(f"{seed}:pulse:{pulse_index}")
+            due_pulses.append(
+                {
+                    "pulse_index": pulse_index,
+                    "pulse_dt": _to_iso(next_pulse_dt),
+                    "fragment_count": fragment_rng.randint(
+                        int(settings["min_fragments_per_pulse"]),
+                        int(settings["max_fragments_per_pulse"]),
+                    ),
+                }
+            )
+            pulse_index += 1
+            next_pulse_dt = next_pulse_dt + timedelta(
+                milliseconds=interval_rng.randint(
+                    int(settings["min_interval_ms"]),
+                    int(settings["max_interval_ms"]),
+                )
+            )
+
+        return {
+            "bucket": data,
+            "seed": seed,
+            "settings": settings,
+            "now_iso": _to_iso(now_dt),
+            "pulse_index": pulse_index,
+            "next_pulse_at": _to_iso(next_pulse_dt),
+            "due_pulses": list(due_pulses),
+        }
+
+    def execute_catch_up(
+        self,
+        prepared: dict[str, Any],
+        *,
+        fragment_builder: Callable[..., list[dict[str, Any]]] | None = None,
+    ) -> list[dict[str, Any]]:
+        settings = self.merge_settings(dict(prepared.get("settings", {}) or {}))
+        seed = str(prepared.get("seed") or dict(prepared.get("bucket", {}) or {}).get("seed") or uuid4().hex)
+        generated: list[dict[str, Any]] = []
+        for pulse in list(prepared.get("due_pulses", []) or []):
+            pulse_data = dict(pulse or {})
+            rows = self._build_pulse_fragments(
+                seed=seed,
+                pulse_index=int(pulse_data.get("pulse_index", 0) or 0),
+                pulse_dt=_parse_iso(str(pulse_data.get("pulse_dt") or prepared.get("now_iso") or utc_now_iso())),
+                fragment_count=max(1, int(pulse_data.get("fragment_count", 1) or 1)),
+                generator_mode=str(settings["generator_mode"]),
+                fragment_builder=fragment_builder,
+            )
+            if rows:
+                generated.extend(rows)
+        return generated
+
+    def commit_catch_up(
+        self,
+        prepared: dict[str, Any],
+        generated: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        data = dict(prepared.get("bucket", {}) or {})
+        settings = self.merge_settings(prepared.get("settings"), data.get("settings"))
+        data["settings"] = settings
+        data["pulse_index"] = max(0, int(prepared.get("pulse_index", data.get("pulse_index", 0)) or 0))
+        data["next_pulse_at"] = str(prepared.get("next_pulse_at") or data.get("next_pulse_at") or _to_iso(_parse_iso(prepared.get("now_iso"))))
+        if generated:
+            data["last_generated_at"] = generated[-1]["recorded_at"]
+            data["generated_total"] = int(data.get("generated_total", 0) or 0) + len(generated)
+            category_counts = dict(data.get("category_counts", {}) or {})
+            for row in generated:
+                category = str(row.get("category") or "unclassified")
+                category_counts[category] = int(category_counts.get(category, 0) or 0) + 1
+            data["category_counts"] = category_counts
+            self._append_fragments(generated)
+        return data, generated
+
     def catch_up(
         self,
         bucket: dict[str, Any] | None,
@@ -105,55 +193,19 @@ class MonologueStreamRuntime:
         now_iso: str | None = None,
         fragment_builder: Callable[..., list[dict[str, Any]]] | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        now_dt = _parse_iso(now_iso or utc_now_iso())
-        data = self.ensure_bucket(bucket, now_iso=_to_iso(now_dt))
-        settings = self.merge_settings(data.get("settings"))
-        seed = str(data["seed"])
-        pulse_index = int(data["pulse_index"])
-        next_pulse_dt = _parse_iso(data["next_pulse_at"])
-        generated: list[dict[str, Any]] = []
+        prepared = self.prepare_catch_up(bucket, now_iso=now_iso)
+        generated = self.execute_catch_up(prepared, fragment_builder=fragment_builder)
+        return self.commit_catch_up(prepared, generated)
 
-        while next_pulse_dt <= now_dt:
-            pulse_rng = random.Random(f"{seed}:pulse:{pulse_index}")
-            fragment_count = pulse_rng.randint(
-                int(settings["min_fragments_per_pulse"]),
-                int(settings["max_fragments_per_pulse"]),
-            )
-            rows = self._build_pulse_fragments(
-                seed=seed,
-                pulse_index=pulse_index,
-                pulse_dt=next_pulse_dt,
-                fragment_count=fragment_count,
-                generator_mode=str(settings["generator_mode"]),
-                fragment_builder=fragment_builder,
-            )
-            if rows:
-                generated.extend(rows)
-                data["last_generated_at"] = rows[-1]["recorded_at"]
-                data["generated_total"] = int(data["generated_total"]) + len(rows)
-                category_counts = dict(data.get("category_counts", {}) or {})
-                for row in rows:
-                    category = str(row.get("category") or "unclassified")
-                    category_counts[category] = int(category_counts.get(category, 0) or 0) + 1
-                data["category_counts"] = category_counts
-            pulse_index += 1
-            next_pulse_dt = next_pulse_dt + timedelta(
-                milliseconds=pulse_rng.randint(
-                    int(settings["min_interval_ms"]),
-                    int(settings["max_interval_ms"]),
-                )
-            )
-
-        data["pulse_index"] = pulse_index
-        data["next_pulse_at"] = _to_iso(next_pulse_dt)
-        data["settings"] = settings
-        if generated:
-            self._append_fragments(generated)
-        return data, generated
-
-    def status_payload(self, bucket: dict[str, Any]) -> dict[str, Any]:
+    def status_payload(self, bucket: dict[str, Any], *, now_iso: str | None = None) -> dict[str, Any]:
         settings = self.merge_settings(bucket.get("settings"))
         category_counts = dict(bucket.get("category_counts", {}) or {})
+        now_dt = _parse_iso(now_iso or utc_now_iso())
+        next_pulse_at = str(bucket.get("next_pulse_at") or "")
+        next_pulse_dt = _parse_iso(next_pulse_at) if next_pulse_at else None
+        overdue_seconds = 0.0
+        if next_pulse_dt is not None and next_pulse_dt <= now_dt:
+            overdue_seconds = max(0.0, (now_dt - next_pulse_dt).total_seconds())
         top_categories = [
             {"category": name, "count": count}
             for name, count in sorted(category_counts.items(), key=lambda item: (-int(item[1]), str(item[0])))[:5]
@@ -167,7 +219,10 @@ class MonologueStreamRuntime:
             "started_at": str(bucket.get("started_at") or ""),
             "last_generated_at": str(bucket.get("last_generated_at") or ""),
             "last_viewed_at": str(bucket.get("last_viewed_at") or ""),
-            "next_pulse_at": str(bucket.get("next_pulse_at") or ""),
+            "next_pulse_at": next_pulse_at,
+            "next_pulse_due": bool(overdue_seconds > 0.0),
+            "stale": bool(overdue_seconds > 0.0),
+            "overdue_seconds": round(float(overdue_seconds), 3),
             "storage_path": str(self.storage_path),
             "top_categories": top_categories,
         }
@@ -186,12 +241,14 @@ class MonologueStreamRuntime:
         }
 
     def read_fragments(self, *, limit: int) -> list[dict[str, Any]]:
+        resolved_limit = max(1, int(limit))
         try:
-            content = self.storage_path.read_text(encoding="utf-8")
+            with self.storage_path.open("r", encoding="utf-8") as handle:
+                tail_lines = list(deque(handle, maxlen=resolved_limit))
         except OSError:
             return []
         rows: list[dict[str, Any]] = []
-        for line in content.splitlines():
+        for line in tail_lines:
             stripped = line.strip()
             if not stripped:
                 continue
@@ -201,7 +258,7 @@ class MonologueStreamRuntime:
                 continue
             if isinstance(row, dict):
                 rows.append(row)
-        return rows[-max(1, int(limit)) :]
+        return rows
 
     def _append_fragments(self, rows: list[dict[str, Any]]) -> None:
         if not rows:

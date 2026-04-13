@@ -15,6 +15,21 @@ class LongRunAnalyzer:
         self.identity_payload = identity_payload
         self.core_actions = core_actions
 
+    def _recent_round_window(self, *, limit: int) -> list[dict[str, Any]]:
+        reader = getattr(self.trace_store, "recent_rounds", None)
+        if callable(reader):
+            return list(reader(limit=limit))
+        return list(self.trace_store.list_rounds()[-limit:])
+
+    def _timeline_round_rows(self) -> list[dict[str, Any]]:
+        metrics_reader = getattr(self.trace_store, "metrics_round_rows_view", None)
+        if callable(metrics_reader):
+            return list(metrics_reader())
+        summary_reader = getattr(self.trace_store, "list_round_summaries", None)
+        if callable(summary_reader):
+            return list(summary_reader())
+        return self.trace_store.list_rounds()
+
     def _conflict_arbitration_summary(self, trace: dict[str, Any]) -> dict[str, Any]:
         summary = dict(trace.get("conflict_arbitration", {}) or {})
         probability_field = dict(trace.get("probability_field", {}) or {})
@@ -49,7 +64,7 @@ class LongRunAnalyzer:
         top_drivers: list[dict[str, Any]],
         rounds_window: int = 12,
     ) -> dict[str, Any]:
-        rounds = self.trace_store.list_rounds()[-rounds_window:]
+        rounds = self._recent_round_window(limit=rounds_window)
         driver_counts: dict[str, float] = {}
         for trace in rounds:
             for driver in list(trace.get("top_drivers", []) or [])[:3]:
@@ -268,8 +283,15 @@ class LongRunAnalyzer:
             scores.append(round(_clip(action_var * 0.5 + warmth_var * 0.3 + directness_var * 0.2), 4))
         return self._average(scores)
 
-    def metrics_summary(self) -> dict[str, Any]:
-        rounds = self.trace_store.list_rounds()
+    def metrics_summary(self, *, rounds: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        if rounds is None:
+            summary_reader = getattr(self.trace_store, "list_round_summaries", None)
+            if callable(summary_reader):
+                rounds = list(summary_reader())
+            else:
+                rounds = self.trace_store.list_rounds()
+        else:
+            rounds = list(rounds)
         sampled_actions: dict[str, int] = {}
         modes: dict[str, int] = {}
         driver_counts: dict[str, int] = {}
@@ -389,7 +411,7 @@ class LongRunAnalyzer:
 
     def authenticity_timeline(self) -> dict[str, Any]:
         points = []
-        for trace in self.trace_store.list_rounds():
+        for trace in self._timeline_round_rows():
             identity_context = trace.get("render_plan", {}).get("identity_context", {})
             authenticity = trace.get("authenticity", trace.get("rendered_expression", {}).get("authenticity", {}))
             identity_evolution = trace.get("identity_evolution", {})
@@ -417,7 +439,7 @@ class LongRunAnalyzer:
 
     def vitality_timeline(self) -> dict[str, Any]:
         points = []
-        for trace in self.trace_store.list_rounds():
+        for trace in self._timeline_round_rows():
             vitality = trace.get("vitality_snapshot", {})
             non_interactive_events = trace.get("vitality_events", [])
             summary = [str(item.get("shaping_detail")) for item in non_interactive_events if item.get("non_interactive") and item.get("shaping_detail")]

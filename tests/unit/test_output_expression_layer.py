@@ -1,3 +1,4 @@
+import nalr.output.renderer as renderer_module
 from nalr.output.renderer import fallback_render_text
 from nalr.output.style import build_expression_profile, build_render_plan
 from nalr.schemas.models import ExpressionProfile, IdentityContext, RenderPlan, StochasticState
@@ -212,6 +213,74 @@ def test_tlh_instinct_actions_have_distinct_fallback_rendering():
     assert "吸收" in fallback_render_text(absorb)
     assert fallback_render_text(nothing) == ""
     assert "结束生命" in fallback_render_text(die)
+
+
+def test_fallback_renderer_replies_to_plain_greeting_without_generic_template():
+    plan = RenderPlan(
+        action="respond",
+        expression=_expression(directness=0.36, hedging=0.28, warmth=0.66, repair=0.22),
+        safety_constraints={"conflict_hot": False},
+        event_summary="晚上好",
+        scenario="chat",
+        target="user",
+    )
+
+    text = fallback_render_text(plan)
+
+    assert text == "晚上好，我在。"
+
+
+def test_fallback_renderer_anchors_followup_to_specific_memory_cue():
+    plan = RenderPlan(
+        action="plan",
+        expression=_expression(directness=0.72, hedging=0.18, warmth=0.60, repair=0.18),
+        safety_constraints={"conflict_hot": False},
+        message_plan={
+            "memory_cue": "写作业",
+            "recall_strength": 0.42,
+            "slow_variables": {"resource_scarcity": 0.18},
+        },
+        event_summary="我们继续吧",
+        scenario="task",
+        target="user",
+        relation_state={"relationship_risk": 0.12},
+        perspective={"reaction_hypothesis": {"risk": 0.08}},
+    )
+
+    text = fallback_render_text(plan)
+
+    assert "写作业" in text
+    assert "继续吧" in text
+
+
+def test_fallback_renderer_answers_time_query_with_local_clock(monkeypatch):
+    class _FakeNow:
+        def astimezone(self):
+            return self
+
+        def strftime(self, fmt: str) -> str:
+            assert fmt == "%H:%M"
+            return "21:37"
+
+    class _FakeDateTime:
+        @staticmethod
+        def now():
+            return _FakeNow()
+
+    monkeypatch.setattr(renderer_module, "datetime", _FakeDateTime)
+
+    plan = RenderPlan(
+        action="respond",
+        expression=_expression(directness=0.40, hedging=0.24, warmth=0.58, repair=0.18),
+        safety_constraints={"conflict_hot": False},
+        event_summary="现在几点了？",
+        scenario="chat",
+        target="user",
+    )
+
+    text = fallback_render_text(plan)
+
+    assert text == "现在是 21:37。"
 
 
 def test_monologue_render_plan_tracks_delivery_mode_and_visible_prefix():

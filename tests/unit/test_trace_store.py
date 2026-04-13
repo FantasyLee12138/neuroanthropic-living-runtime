@@ -3,10 +3,11 @@ from pathlib import Path
 
 import duckdb
 
+import nalr.trace.store as trace_store_module
 from nalr.runtime.controller import RuntimeController
-from nalr.schemas.models import RoundEvent
+from nalr.schemas.models import CommandResult, RoundEvent
 from nalr.trace.exporter import TraceExporter
-from nalr.trace.store import ROUND_CANONICAL_SCHEMA, TraceStore, canonical_probability_field_payload
+from nalr.trace.store import ROUND_CANONICAL_SCHEMA, ROUND_SUMMARY_SCHEMA, TraceStore, canonical_probability_field_payload
 from nalr.storage.parquet_io import read_dataset_rows
 
 
@@ -16,6 +17,17 @@ CONFIG_ROOT = Path(__file__).resolve().parents[2] / "config"
 class _FailingConnection:
     def execute(self, query: str, params: list[object]):
         raise duckdb.IOException("IO Error: No files found that match '/tmp/missing.parquet'")
+
+    def close(self) -> None:
+        return None
+
+
+class _InvalidParquetConnection:
+    def __init__(self, message: str) -> None:
+        self._message = message
+
+    def execute(self, query: str, params: list[object]):
+        raise duckdb.InvalidInputException(self._message)
 
     def close(self) -> None:
         return None
@@ -35,6 +47,411 @@ def test_query_payload_rows_returns_empty_when_duckdb_reports_missing_parquet(tm
     )
 
     assert rows == []
+
+
+def test_query_payload_rows_returns_empty_for_transient_invalid_parquet_files(tmp_path, monkeypatch):
+    store = TraceStore(tmp_path)
+    parquet_path = store.parquet_dir / "round_canonical.parquet"
+    parquet_path.write_text("placeholder", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "nalr.trace.store.duckdb.connect",
+        lambda: _InvalidParquetConnection(
+            "Invalid Input Error: File '/tmp/part.parquet' too small to be a Parquet file"
+        ),
+    )
+
+    rows = store._query_payload_rows(
+        parquet_path,
+        "select payload_json from read_parquet(?)",
+        [str(parquet_path)],
+    )
+
+    assert rows == []
+
+
+def test_list_rounds_skips_transient_invalid_json_round_files(tmp_path):
+    store = TraceStore(tmp_path)
+    broken_path = store.rounds_dir / "round_0001.json"
+    valid_path = store.rounds_dir / "round_0002.json"
+    broken_path.parent.mkdir(parents=True, exist_ok=True)
+    broken_path.write_text("", encoding="utf-8")
+    valid_path.write_text(
+        json.dumps(
+            {
+                "session_id": "observer-main",
+                "round_id": 2,
+                "sampled_action": "respond",
+                "recorded_at": "2026-04-12T00:00:02Z",
+                "recorded_date": "2026-04-12",
+                "probability_field": {},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    rows = store.list_rounds()
+
+    assert [row["round_id"] for row in rows] == [2]
+
+
+class _NoFrontInsertBytearray(bytearray):
+    def __setitem__(self, key, value):
+        if isinstance(key, slice) and key.start in (None, 0) and key.stop == 0:
+            raise AssertionError("front insertion should not be used when tail-reading jsonl")
+        return super().__setitem__(key, value)
+
+
+def test_read_jsonl_tail_keeps_order_without_front_insertion(tmp_path, monkeypatch):
+    store = TraceStore(tmp_path)
+    rows = [
+        {"round_id": index, "recorded_at": f"2026-04-12T00:00:{index:02d}Z", "recorded_date": "2026-04-12"}
+        for index in range(1, 6)
+    ]
+    store.rounds_jsonl_path.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(trace_store_module, "bytearray", _NoFrontInsertBytearray, raising=False)
+
+    tail = store._read_jsonl_tail(store.rounds_jsonl_path, limit=3)
+
+    assert [row["round_id"] for row in tail] == [3, 4, 5]
+
+
+def test_recent_rounds_prefers_jsonl_tail_in_chronological_order(tmp_path):
+    store = TraceStore(tmp_path)
+    rows = [
+        {
+            "session_id": "observer-main",
+            "round_id": index,
+            "sampled_action": "respond",
+            "recorded_at": f"2026-04-12T00:00:{index:02d}Z",
+            "recorded_date": "2026-04-12",
+            "probability_field": {},
+        }
+        for index in range(1, 6)
+    ]
+    store._round_cache.clear()
+    store._round_cache_complete = False
+    store._trace_sync_status_cache["storage_state"] = "healthy"
+    store.rounds_jsonl_path.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows),
+        encoding="utf-8",
+    )
+
+    recent = store.recent_rounds(limit=3)
+
+    assert [row["round_id"] for row in recent] == [3, 4, 5]
+
+
+def test_recent_skill_traces_prefers_recent_jsonl_tail_without_full_cache_load(tmp_path, monkeypatch):
+    store = TraceStore(tmp_path)
+    rows = [
+        {
+            "session_id": "observer-main",
+            "recorded_at": f"2026-04-12T00:00:{index:02d}Z",
+            "recorded_date": "2026-04-12",
+            "round_id": index,
+            "skill_name": f"skill-{index}",
+            "owner_module": "Renderer",
+            "latency_ms": index * 10,
+        }
+        for index in range(1, 5)
+    ]
+    store._skill_cache_loaded = False
+    store._trace_sync_status_cache["storage_state"] = "healthy"
+    store.skill_jsonl_path.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows),
+        encoding="utf-8",
+    )
+    store._skill_cache.append(
+        {
+            "session_id": "observer-main",
+            "recorded_at": "2026-04-12T00:00:05Z",
+            "recorded_date": "2026-04-12",
+            "round_id": 5,
+            "skill_name": "skill-5",
+            "owner_module": "Renderer",
+            "latency_ms": 50,
+        }
+    )
+
+    monkeypatch.setattr(
+        store,
+        "_ensure_skill_cache_loaded",
+        lambda: (_ for _ in ()).throw(AssertionError("recent_skill_traces should not full-load skill history")),
+    )
+
+    recent = store.recent_skill_traces(limit=3)
+
+    assert [row["round_id"] for row in recent] == [3, 4, 5]
+    assert store._skill_cache_loaded is False
+
+
+def test_list_round_summaries_reads_compact_dataset_without_full_round_scan(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    result = controller.tick(
+        RoundEvent(
+            source="user",
+            content="Please summarize this round compactly.",
+            target="user",
+            cue="compact",
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+    controller.flush_pending_io(raise_on_error=True)
+    store = controller.trace_store
+
+    monkeypatch.setattr(
+        store,
+        "list_rounds",
+        lambda: (_ for _ in ()).throw(AssertionError("list_round_summaries should not full-scan round history when summary data exists")),
+    )
+
+    summaries = store.list_round_summaries()
+
+    assert summaries[-1]["round_id"] == result.round_id
+    assert summaries[-1]["rendered_expression"]["text"]
+    assert "motivation_pool" in summaries[-1]
+    assert summaries[-1]["summary_version"] >= 2
+    assert "total_score" in summaries[-1]["conflict_arbitration"]
+
+
+def test_round_summary_payload_includes_conflict_and_metrics_fields(tmp_path):
+    store = TraceStore(tmp_path)
+
+    summary = store._round_summary_payload(
+        {
+            "session_id": "session-1",
+            "recorded_at": "2026-04-13T00:00:00Z",
+            "recorded_date": "2026-04-13",
+            "round_id": 7,
+            "scenario": "chat",
+            "mode": "interactive",
+            "sampled_action": "plan",
+            "cause_type": "endogenous",
+            "state_snapshot": {
+                "budget_remaining": 0.72,
+                "safe_mode": True,
+                "focus_lock_count": 2,
+                "mood": 0.44,
+                "conflict_learning_state": {
+                    "adjustment_reasons": {"repair": 2},
+                    "last_learning_signal": {"delta": 0.2},
+                },
+            },
+            "conflict_arbitration": {
+                "total_score": 0.61,
+                "components": {"identity": 0.3},
+                "critical_conflict": True,
+                "critical_conflict_streak": 3,
+                "winning_priority": "identity",
+                "circuit_breaker": {"hot_rounds_remaining": 2},
+                "compromise": {"template": "soften"},
+                "repair_mode": "repair",
+                "repair_state_snapshot": {"stage": "stabilizing"},
+                "post_error_adjustment": {"sigma": -0.1},
+                "repair_ledger_tail": [{"reason": "identity_repair"}],
+                "conflict_safe_mode_owned": True,
+            },
+        }
+    )
+
+    assert summary["summary_version"] >= 2
+    assert summary["cause_type"] == "endogenous"
+    assert summary["state_snapshot"]["budget_remaining"] == 0.72
+    assert summary["state_snapshot"]["conflict_learning_state"]["adjustment_reasons"] == {"repair": 2}
+    assert summary["conflict_arbitration"]["total_score"] == 0.61
+    assert summary["conflict_arbitration"]["components"] == {"identity": 0.3}
+    assert summary["conflict_arbitration"]["critical_conflict_streak"] == 3
+    assert summary["conflict_arbitration"]["compromise"]["template"] == "soften"
+    assert summary["conflict_arbitration"]["repair_state_snapshot"]["stage"] == "stabilizing"
+    assert summary["conflict_arbitration"]["repair_ledger_summary"] == {"entries": 1, "latest_reason": "identity_repair"}
+    assert summary["conflict_arbitration"]["conflict_safe_mode_owned"] is True
+
+
+def test_list_round_summaries_rebuilds_stale_summary_versions(tmp_path):
+    store = TraceStore(tmp_path)
+    payload = {
+        "session_id": "session-1",
+        "recorded_at": "2026-04-13T00:00:00Z",
+        "recorded_date": "2026-04-13",
+        "round_id": 1,
+        "scenario": "chat",
+        "mode": "interactive",
+        "sampled_action": "respond",
+        "cause_type": "endogenous",
+        "state_snapshot": {"budget_remaining": 0.5},
+        "conflict_arbitration": {"total_score": 0.25},
+    }
+    store._append_dataset_rows(
+        store.round_canonical_dir,
+        [
+            {
+                "session_id": payload["session_id"],
+                "recorded_at": payload["recorded_at"],
+                "recorded_date": payload["recorded_date"],
+                "round_id": payload["round_id"],
+                "payload_json": json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            }
+        ],
+        schema=ROUND_CANONICAL_SCHEMA,
+        partition_keys=("recorded_date", "round_id"),
+    )
+    store._append_dataset_rows(
+        store.round_summary_dir,
+        [
+            {
+                "session_id": payload["session_id"],
+                "recorded_at": payload["recorded_at"],
+                "recorded_date": payload["recorded_date"],
+                "round_id": payload["round_id"],
+                "payload_json": json.dumps(
+                    {
+                        "session_id": payload["session_id"],
+                        "recorded_at": payload["recorded_at"],
+                        "recorded_date": payload["recorded_date"],
+                        "round_id": payload["round_id"],
+                        "mode": payload["mode"],
+                        "sampled_action": payload["sampled_action"],
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            }
+        ],
+        schema=ROUND_SUMMARY_SCHEMA,
+        partition_keys=("recorded_date", "round_id"),
+    )
+
+    refreshed = TraceStore(tmp_path).list_round_summaries()
+
+    assert refreshed[-1]["summary_version"] >= 2
+    assert refreshed[-1]["cause_type"] == "endogenous"
+    assert refreshed[-1]["conflict_arbitration"]["total_score"] == 0.25
+
+
+def test_command_subjectivity_totals_read_compact_file_without_full_command_scan(tmp_path, monkeypatch):
+    store = TraceStore(tmp_path)
+    store.command_subjectivity_totals_path.write_text(
+        json.dumps(
+            {
+                "summary_version": 1,
+                "total_commands": 3,
+                "boundary_violation_count": 1,
+                "external_count": 2,
+                "internal_count": 1,
+                "last_recorded_at": "2026-04-13T00:00:00Z",
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        store,
+        "_ensure_command_cache_loaded",
+        lambda: (_ for _ in ()).throw(AssertionError("command_subjectivity_totals should not full-load command payloads when compact totals exist")),
+    )
+
+    totals = store.command_subjectivity_totals()
+
+    assert totals["total_commands"] == 3
+    assert totals["boundary_violation_count"] == 1
+    assert totals["external_count"] == 2
+    assert totals["internal_count"] == 1
+
+
+def test_command_subjectivity_totals_persist_and_update_incrementally(tmp_path):
+    store = TraceStore(tmp_path)
+    store.append_command(
+        "state show",
+        CommandResult(applied=True, scope="runtime", delta={}, operator_level="read_only", cause_type="external_stimulus"),
+        "before-1",
+        "after-1",
+        session_id="session-1",
+        recorded_at="2026-04-13T00:00:00Z",
+        sync=True,
+    )
+    store.append_command(
+        "endogenous tick",
+        CommandResult(
+            applied=True,
+            scope="runtime",
+            delta={},
+            operator_level="debug_control",
+            cause_type="endogenous",
+            violation_code="boundary_violation",
+        ),
+        "before-2",
+        "after-2",
+        session_id="session-1",
+        recorded_at="2026-04-13T00:00:01Z",
+        sync=True,
+    )
+
+    payload = json.loads(store.command_subjectivity_totals_path.read_text(encoding="utf-8"))
+    reloaded = TraceStore(tmp_path).command_subjectivity_totals()
+
+    assert payload["total_commands"] == 2
+    assert payload["boundary_violation_count"] == 1
+    assert payload["external_count"] == 1
+    assert payload["internal_count"] == 1
+    assert reloaded == payload
+
+
+def test_round_subjectivity_totals_read_compact_file_without_loading_round_history(tmp_path, monkeypatch):
+    store = TraceStore(tmp_path)
+    store.round_subjectivity_totals_path.write_text(
+        json.dumps(
+            {
+                "summary_version": 1,
+                "total_rounds": 4,
+                "external_round_count": 1,
+                "endogenous_round_count": 3,
+                "last_recorded_at": "2026-04-13T00:00:00Z",
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        store,
+        "_ensure_round_summary_loaded",
+        lambda: (_ for _ in ()).throw(AssertionError("round_subjectivity_totals should not load round summaries when compact totals exist")),
+    )
+
+    totals = store.round_subjectivity_totals()
+
+    assert totals["total_rounds"] == 4
+    assert totals["external_round_count"] == 1
+    assert totals["endogenous_round_count"] == 3
+
+
+def test_round_subjectivity_totals_persist_and_update_incrementally(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(source="user", content="第一轮外源输入", target="user", cue="one"),
+        scenario="chat",
+        mode="interactive",
+    )
+    controller.run_endogenous_tick(trigger="idle", mode="endogenous_light")
+    controller.flush_pending_io(raise_on_error=True)
+
+    store = controller.trace_store
+    payload = json.loads(store.round_subjectivity_totals_path.read_text(encoding="utf-8"))
+    reloaded = TraceStore(tmp_path / ".alive").round_subjectivity_totals()
+
+    assert payload["total_rounds"] >= 2
+    assert payload["external_round_count"] >= 1
+    assert payload["endogenous_round_count"] >= 1
+    assert reloaded == payload
 
 
 def test_canonical_probability_field_payload_ignores_top_level_trace_state() -> None:
@@ -279,6 +696,65 @@ def test_trace_store_prewarms_recent_signal_views_and_updates_storage_status(tmp
     assert status["signal_view_cache_limit"] >= 2
 
 
+def test_read_round_record_uses_round_cache_before_parquet_lookup(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    result = controller.tick(
+        RoundEvent(
+            source="user",
+            content="Please keep the latest round cached.",
+            target="user",
+            cue="cached",
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+    controller.flush_pending_io(raise_on_error=True)
+    store = controller.trace_store
+
+    monkeypatch.setattr(
+        store,
+        "_read_round_from_parquet",
+        lambda round_id: (_ for _ in ()).throw(AssertionError("parquet lookup should not run on cache hit")),
+    )
+
+    payload, read_source = store.read_round_record(result.round_id)
+
+    assert payload["round_id"] == result.round_id
+    assert read_source == "memory_cache"
+
+
+def test_trace_storage_status_reuses_cached_parquet_live_ready(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="Create a trace row so parquet is live.",
+            target="user",
+            cue="live",
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+    controller.flush_pending_io(raise_on_error=True)
+    store = controller.trace_store
+
+    baseline = store.trace_storage_status()
+    assert baseline["parquet_live_ready"] is True
+
+    original_rglob = Path.rglob
+
+    def guarded_rglob(self, pattern):
+        if self == store.round_canonical_dir and pattern == "*.parquet":
+            raise AssertionError("trace_storage_status should not rescan parquet directories")
+        return original_rglob(self, pattern)
+
+    monkeypatch.setattr(Path, "rglob", guarded_rglob)
+
+    repeated = store.trace_storage_status()
+
+    assert repeated["parquet_live_ready"] is True
+
+
 def test_cached_round_reads_skip_repeated_legacy_parquet_scan(tmp_path, monkeypatch):
     payload = {
         "session_id": "session-1",
@@ -330,6 +806,45 @@ def test_cached_round_reads_skip_repeated_legacy_parquet_scan(tmp_path, monkeypa
     assert store.read_round(1)["round_id"] == 1
     assert store.list_rounds()[0]["round_id"] == 1
     assert scan_count == 0
+
+
+def test_list_rounds_round_count_cache_avoids_repeated_parquet_scan(tmp_path, monkeypatch):
+    store = TraceStore(tmp_path)
+    store._round_cache = {
+        1: {
+            "session_id": "session-1",
+            "recorded_at": "2026-04-12T00:00:00Z",
+            "recorded_date": "2026-04-12",
+            "round_id": 1,
+            "probability_field": {},
+        },
+        2: {
+            "session_id": "session-1",
+            "recorded_at": "2026-04-12T00:00:01Z",
+            "recorded_date": "2026-04-12",
+            "round_id": 2,
+            "probability_field": {},
+        },
+    }
+    store._round_cache_complete = False
+    store._trace_sync_status_cache["storage_state"] = "healthy"
+    store._round_count_cache_ttl = 60.0
+
+    call_count = 0
+
+    def counted_round_count():
+        nonlocal call_count
+        call_count += 1
+        return 1
+
+    monkeypatch.setattr(store, "_round_count_from_parquet", counted_round_count)
+
+    first = store.list_rounds()
+    second = store.list_rounds()
+
+    assert [row["round_id"] for row in first] == [1, 2]
+    assert [row["round_id"] for row in second] == [1, 2]
+    assert call_count == 1
 
 
 def test_export_parquet_rewrites_legacy_distribution_state_to_canonical_columns(tmp_path):

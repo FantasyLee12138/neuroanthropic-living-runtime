@@ -1,0 +1,5131 @@
+{
+  "session_id": "0db2bcfd4805433394d1b641405ffbef",
+  "recorded_at": "2026-04-13T03:36:04Z",
+  "recorded_date": "2026-04-13",
+  "round_id": 9,
+  "subject_id": "subject-e7e10e02b0fb4a789ba6f4d690d73ee6",
+  "continuity_nonce": "continuity-3b441cfb702248a8bc0f6f13fb3c0bc0",
+  "scenario": "task",
+  "mode": "safe",
+  "sampled_action": "respond",
+  "contributions": [
+    {
+      "agent_name": "InstinctField",
+      "action_name": "respond",
+      "score": 0.4845,
+      "reason": "body state, subjective state, personality anchor, and 4D collapse co-resolve into action pressure"
+    },
+    {
+      "agent_name": "EmergentActionSketch",
+      "action_name": "respond",
+      "score": 0.3769,
+      "reason": "repeated internal pressure grows learned action sketches that re-enter action competition"
+    },
+    {
+      "agent_name": "PFCAgent",
+      "action_name": "recall",
+      "score": 0.1541,
+      "reason": "deliberate planner; top_action=recall"
+    },
+    {
+      "agent_name": "EndogenousMotivationPool",
+      "action_name": "recall",
+      "score": 0.1096,
+      "reason": "endogenous motivations inject first-class action bias"
+    },
+    {
+      "agent_name": "BodyStateAgent",
+      "action_name": "respond",
+      "score": 0.064,
+      "reason": "energy=0.70; top_action=respond"
+    },
+    {
+      "agent_name": "HippocampusAgent",
+      "action_name": "recall",
+      "score": 0.0624,
+      "reason": "recall=0.02; top_action=recall"
+    },
+    {
+      "agent_name": "SalienceAgent",
+      "action_name": "respond",
+      "score": 0.0512,
+      "reason": "salience=0.10; top_action=respond"
+    },
+    {
+      "agent_name": "ValueAgent",
+      "action_name": "respond",
+      "score": 0.0425,
+      "reason": "subjective value re-rank"
+    },
+    {
+      "agent_name": "DesireAgent",
+      "action_name": "absorb",
+      "score": 0.0404,
+      "reason": "latent drive=completion; top_action=absorb"
+    },
+    {
+      "agent_name": "ResourceAgent",
+      "action_name": "respond",
+      "score": 0.0331,
+      "reason": "budget=1.00; top_action=respond"
+    },
+    {
+      "agent_name": "RelationshipAgent",
+      "action_name": "respond",
+      "score": 0.0236,
+      "reason": "closeness=0.50; top_action=respond"
+    },
+    {
+      "agent_name": "UnconsciousAgent",
+      "action_name": "respond",
+      "score": 0.0205,
+      "reason": "temperament baseline; top_action=respond"
+    },
+    {
+      "agent_name": "HabitAgent",
+      "action_name": "respond",
+      "score": 0.0096,
+      "reason": "habit=0.00; top_action=respond"
+    },
+    {
+      "agent_name": "PerspectiveModel",
+      "action_name": "clarify",
+      "score": 0.0061,
+      "reason": "social interpretation; top_action=clarify"
+    }
+  ],
+  "top_drivers": [
+    {
+      "agent_name": "InstinctField",
+      "action_name": "respond",
+      "score": 0.4845,
+      "reason": "body state, subjective state, personality anchor, and 4D collapse co-resolve into action pressure"
+    },
+    {
+      "agent_name": "EmergentActionSketch",
+      "action_name": "respond",
+      "score": 0.3769,
+      "reason": "repeated internal pressure grows learned action sketches that re-enter action competition"
+    },
+    {
+      "agent_name": "PFCAgent",
+      "action_name": "recall",
+      "score": 0.1541,
+      "reason": "deliberate planner; top_action=recall"
+    }
+  ],
+  "style_profile": {
+    "latency_scale": 0.94,
+    "sentence_fragmentation": 0.05,
+    "warmth_level": 0.4,
+    "directness_level": 0.82,
+    "style_name": "task_focused"
+  },
+  "state_snapshot": {
+    "mode": "safe",
+    "safe_mode": true,
+    "focus": "respond",
+    "budget_remaining": 0.9994000000000002,
+    "focus_lock_count": 4,
+    "mood": 0.5540498604736538,
+    "conflict_learning_state": {},
+    "body_state": {
+      "energy": 0.7,
+      "fatigue": 0.0,
+      "memory_fragments": 0.0152,
+      "self_continuity": 0.9172,
+      "meaning_strength": 1.0,
+      "metabolism": 0.01
+    },
+    "subjective_state": {
+      "felt": [],
+      "spontaneous": 0.08,
+      "boundary": 0.205,
+      "reject_all": 0.0731,
+      "meaning_made": []
+    },
+    "emotion_state": {
+      "valence": 0.009,
+      "arousal": 0.0337,
+      "residue": 0.0442,
+      "appraisal_band": "muted"
+    },
+    "desire_state": {
+      "latent_drives": {
+        "comfort": 0.15663,
+        "meaning": 0.65,
+        "relation": 0.527775,
+        "exploration": 0.05788,
+        "completion": 0.8349
+      },
+      "dominant_drive": "completion",
+      "drive_tension": 0.8349
+    },
+    "instinct_field": {
+      "axis_values": {
+        "E": 0.889976,
+        "F": 0.470345,
+        "S": 0.555125,
+        "M": 0.875152
+      },
+      "region_scores": {
+        "express": 0.97085,
+        "withdraw": 0.09745,
+        "hibernate": 0.17836,
+        "dissolve": 0.079868,
+        "absorb": 0.705166
+      },
+      "candidate_actions": [
+        "respond",
+        "connect",
+        "plan",
+        "clarify",
+        "recall",
+        "monologue"
+      ],
+      "winner_region": "express",
+      "collapse_trace": {
+        "v_main": {
+          "E": 0.889976,
+          "F": 0.470345,
+          "S": 0.555125,
+          "M": 0.875152
+        },
+        "v_mod": {
+          "memory_fragments": 0.0095,
+          "spontaneous": 0.08,
+          "reject_all": 0.0761,
+          "emergent_growth": 1.0
+        },
+        "v_anchor": {
+          "E": 0.786521,
+          "F": 0.472529,
+          "S": 0.586344,
+          "M": 0.769653
+        },
+        "normalized_axes": {
+          "E": 0.889976,
+          "F": 0.470345,
+          "S": 0.555125,
+          "M": 0.875152
+        },
+        "subject_vector": {
+          "E": 0.856818,
+          "F": 0.458877,
+          "S": 0.547663,
+          "M": 0.844556
+        },
+        "coupled_axes": {
+          "E": 0.856818,
+          "F": 0.458877,
+          "S": 0.547663,
+          "M": 0.844556
+        },
+        "random_point": {
+          "E": 0.856818,
+          "F": 0.458877,
+          "S": 0.547663,
+          "M": 0.844556
+        },
+        "action_vectors": {
+          "respond": {
+            "E": 0.76,
+            "F": 0.34,
+            "S": 0.46,
+            "M": 0.68
+          },
+          "plan": {
+            "E": 0.62,
+            "F": 0.3,
+            "S": 0.42,
+            "M": 0.84
+          },
+          "recall": {
+            "E": 0.42,
+            "F": 0.46,
+            "S": 0.66,
+            "M": 0.7
+          },
+          "rest": {
+            "E": 0.2,
+            "F": 0.84,
+            "S": 0.22,
+            "M": 0.38
+          },
+          "connect": {
+            "E": 0.84,
+            "F": 0.3,
+            "S": 0.48,
+            "M": 0.6
+          },
+          "clarify": {
+            "E": 0.52,
+            "F": 0.26,
+            "S": 0.34,
+            "M": 0.78
+          },
+          "wander": {
+            "E": 0.36,
+            "F": 0.42,
+            "S": 0.84,
+            "M": 0.46
+          },
+          "absorb": {
+            "E": 0.3,
+            "F": 0.58,
+            "S": 0.74,
+            "M": 0.72
+          },
+          "monologue": {
+            "E": 0.48,
+            "F": 0.44,
+            "S": 0.72,
+            "M": 0.64
+          },
+          "nothing": {
+            "E": 0.18,
+            "F": 0.66,
+            "S": 0.34,
+            "M": 0.4
+          },
+          "die": {
+            "E": 0.08,
+            "F": 0.88,
+            "S": 0.22,
+            "M": 0.12
+          },
+          "short_reply": {
+            "E": 0.54,
+            "F": 0.36,
+            "S": 0.32,
+            "M": 0.54
+          }
+        },
+        "modulation_directions": {
+          "memory_fragments": {
+            "E": 0.3,
+            "F": 0.566667,
+            "S": 0.58,
+            "M": 0.606667
+          },
+          "spontaneous": {
+            "E": 0.39,
+            "F": 0.475,
+            "S": 0.74,
+            "M": 0.63
+          },
+          "reject_all": {
+            "E": 0.153333,
+            "F": 0.793333,
+            "S": 0.26,
+            "M": 0.3
+          },
+          "emergent_growth": {
+            "E": 0.723521,
+            "F": 0.329421,
+            "S": 0.452555,
+            "M": 0.691327
+          }
+        },
+        "match_scores": {
+          "respond": 0.9417,
+          "plan": 0.785431,
+          "recall": 0.410331,
+          "rest": -0.643279,
+          "connect": 0.800974,
+          "clarify": 0.527246,
+          "wander": -0.23378,
+          "absorb": 0.064659,
+          "monologue": 0.403037,
+          "nothing": -0.805101,
+          "die": -0.840264,
+          "short_reply": 0.21534
+        },
+        "action_regions": {
+          "respond": {
+            "vector": {
+              "E": 0.76,
+              "F": 0.34,
+              "S": 0.46,
+              "M": 0.68
+            },
+            "cosine_similarity": 0.9417,
+            "match_strength": 0.97085
+          },
+          "plan": {
+            "vector": {
+              "E": 0.62,
+              "F": 0.3,
+              "S": 0.42,
+              "M": 0.84
+            },
+            "cosine_similarity": 0.785431,
+            "match_strength": 0.892715
+          },
+          "recall": {
+            "vector": {
+              "E": 0.42,
+              "F": 0.46,
+              "S": 0.66,
+              "M": 0.7
+            },
+            "cosine_similarity": 0.410331,
+            "match_strength": 0.705166
+          },
+          "rest": {
+            "vector": {
+              "E": 0.2,
+              "F": 0.84,
+              "S": 0.22,
+              "M": 0.38
+            },
+            "cosine_similarity": -0.643279,
+            "match_strength": 0.17836
+          },
+          "connect": {
+            "vector": {
+              "E": 0.84,
+              "F": 0.3,
+              "S": 0.48,
+              "M": 0.6
+            },
+            "cosine_similarity": 0.800974,
+            "match_strength": 0.900487
+          },
+          "clarify": {
+            "vector": {
+              "E": 0.52,
+              "F": 0.26,
+              "S": 0.34,
+              "M": 0.78
+            },
+            "cosine_similarity": 0.527246,
+            "match_strength": 0.763623
+          },
+          "wander": {
+            "vector": {
+              "E": 0.36,
+              "F": 0.42,
+              "S": 0.84,
+              "M": 0.46
+            },
+            "cosine_similarity": -0.23378,
+            "match_strength": 0.38311
+          },
+          "absorb": {
+            "vector": {
+              "E": 0.3,
+              "F": 0.58,
+              "S": 0.74,
+              "M": 0.72
+            },
+            "cosine_similarity": 0.064659,
+            "match_strength": 0.53233
+          },
+          "monologue": {
+            "vector": {
+              "E": 0.48,
+              "F": 0.44,
+              "S": 0.72,
+              "M": 0.64
+            },
+            "cosine_similarity": 0.403037,
+            "match_strength": 0.701518
+          },
+          "nothing": {
+            "vector": {
+              "E": 0.18,
+              "F": 0.66,
+              "S": 0.34,
+              "M": 0.4
+            },
+            "cosine_similarity": -0.805101,
+            "match_strength": 0.09745
+          },
+          "die": {
+            "vector": {
+              "E": 0.08,
+              "F": 0.88,
+              "S": 0.22,
+              "M": 0.12
+            },
+            "cosine_similarity": -0.840264,
+            "match_strength": 0.079868
+          },
+          "short_reply": {
+            "vector": {
+              "E": 0.54,
+              "F": 0.36,
+              "S": 0.32,
+              "M": 0.54
+            },
+            "cosine_similarity": 0.21534,
+            "match_strength": 0.60767
+          }
+        },
+        "selected_action": "respond",
+        "collapse_delta": {
+          "respond": 0.6135,
+          "plan": 0.494579,
+          "recall": 0.209128,
+          "rest": -0.592669,
+          "connect": 0.506407,
+          "clarify": 0.2981,
+          "wander": -0.281041,
+          "absorb": -0.053929,
+          "monologue": 0.203577,
+          "nothing": -0.715816,
+          "die": -0.742575,
+          "short_reply": 0.06074
+        },
+        "modulated_delta": {
+          "respond": 0.6135,
+          "plan": 0.494579,
+          "recall": 0.209128,
+          "rest": -0.592669,
+          "connect": 0.506407,
+          "clarify": 0.2981,
+          "wander": -0.281041,
+          "absorb": -0.053929,
+          "monologue": 0.203577,
+          "nothing": -0.715816,
+          "die": -0.742575,
+          "short_reply": 0.06074
+        },
+        "raw_axes": {
+          "E": 1.04525,
+          "F": -0.05938,
+          "S": 0.1107,
+          "M": 0.97365
+        },
+        "body_energy": 0.7,
+        "fatigue": 0.0,
+        "reject_all": 0.0761,
+        "meaning_strength": 0.9974,
+        "boundary": 0.2992,
+        "anchor_axes": {
+          "E": 0.786521,
+          "F": 0.472529,
+          "S": 0.586344,
+          "M": 0.769653
+        }
+      }
+    },
+    "organic_mode": {
+      "enabled": true,
+      "instinct_first": true,
+      "body_weight": 1.15,
+      "subjective_weight": 1.2,
+      "guard_relaxation": 0.35,
+      "endogenous_autonomy": 0.75
+    },
+    "emergent_action_sketches": [
+      {
+        "name": "express:respond+connect",
+        "signal_sources": [
+          "action:connect",
+          "action:plan",
+          "action:respond",
+          "sampled:recall",
+          "sampled:respond",
+          "winner_region:express"
+        ],
+        "support_actions": {
+          "respond": 0.882044,
+          "connect": 0.011976,
+          "plan": 0.051026,
+          "monologue": 0.001825,
+          "clarify": 0.020941
+        },
+        "growth_score": 1.0,
+        "upgrade_threshold": 0.66,
+        "status": "formalized",
+        "target_action_map": {
+          "respond": 0.882044,
+          "plan": 0.051026,
+          "clarify": 0.020941
+        },
+        "anchor_alignment": 0.8856,
+        "stability": 8
+      },
+      {
+        "name": "express:respond+plan",
+        "signal_sources": [
+          "winner_region:express",
+          "action:respond",
+          "action:plan",
+          "action:connect",
+          "sampled:respond"
+        ],
+        "support_actions": {
+          "respond": 0.680304,
+          "plan": 0.070175,
+          "connect": 0.005061,
+          "clarify": 0.03367
+        },
+        "growth_score": 0.339,
+        "upgrade_threshold": 0.66,
+        "status": "latent",
+        "target_action_map": {
+          "respond": 0.680304,
+          "plan": 0.070175,
+          "clarify": 0.03367
+        },
+        "anchor_alignment": 0.4528,
+        "stability": 1
+      }
+    ],
+    "personality_anchor": {
+      "axis_baseline": {
+        "E": 0.786521,
+        "F": 0.472529,
+        "S": 0.586344,
+        "M": 0.769653
+      },
+      "action_bias": {
+        "respond": 0.395511,
+        "plan": 0.0223,
+        "recall": 0.370042,
+        "rest": 0.000625,
+        "connect": 0.005157,
+        "clarify": 0.010393,
+        "wander": 0.00036,
+        "absorb": 0.001408,
+        "monologue": 0.001147,
+        "nothing": 0.000874,
+        "die": 0.000149,
+        "short_reply": 0.004534
+      },
+      "evidence_anchors": [
+        "affect:quiet",
+        "cue:alphaa7f452",
+        "cue:alphba7f452",
+        "energy:steady",
+        "habit:alphba7f452",
+        "memory:alphba7f452",
+        "mood:steady",
+        "relation:user",
+        "resource:open"
+      ],
+      "anchor_signature": "575fadbcd410c79f78f9cba3cd2e60337c7815d0",
+      "stability": 0.9054,
+      "drift": 0.0062,
+      "alignment": 0.8856,
+      "updated_round": 9,
+      "continuity_derivation": {
+        "anchor_alignment": 0.885628,
+        "memory_integration": 0.9848,
+        "meaning_strength": 1.0,
+        "anchor_stability": 0.9054,
+        "continuity_target": 0.932784,
+        "sampled_action": "respond"
+      }
+    }
+  },
+  "cause_type": "external_stimulus",
+  "boundary_action": "allow_internal",
+  "violation_code": "",
+  "deprecation_warning": "",
+  "pipeline_stages": [
+    "state_update",
+    "salience",
+    "body",
+    "emotion",
+    "relationship",
+    "resource",
+    "pfc",
+    "habit",
+    "desire",
+    "dmn",
+    "hippocampus",
+    "perspective",
+    "value",
+    "unconscious",
+    "cerebellar",
+    "conflict",
+    "thalamus",
+    "plausibility_guard",
+    "forced_mode_switch",
+    "output_gate",
+    "late_perspective",
+    "renderer",
+    "writeback"
+  ],
+  "proposal_summaries": [
+    {
+      "stage": "salience",
+      "agent_name": "SalienceAgent",
+      "top_action": "respond",
+      "action_preferences": {
+        "respond": 0.08
+      },
+      "confidence": 0.64,
+      "veto": false,
+      "delta_p": {
+        "respond": 0.08
+      },
+      "sigma_scale": 1.0,
+      "weight_applied": 1.0,
+      "selected": true,
+      "conflict_score": 0.5591,
+      "plausibility_fail_score": 0.0,
+      "resample_idx": 0,
+      "tags": [
+        "salience"
+      ],
+      "priority_bucket": "task_goal",
+      "control_domain": "task",
+      "gated_actions": [],
+      "risk_hints": {}
+    },
+    {
+      "stage": "body",
+      "agent_name": "BodyStateAgent",
+      "top_action": "respond",
+      "action_preferences": {
+        "respond": 0.1
+      },
+      "confidence": 0.64,
+      "veto": false,
+      "delta_p": {
+        "respond": 0.1
+      },
+      "sigma_scale": 1.0,
+      "weight_applied": 1.0,
+      "selected": true,
+      "conflict_score": 0.5591,
+      "plausibility_fail_score": 0.0,
+      "resample_idx": 0,
+      "tags": [
+        "body"
+      ],
+      "priority_bucket": "body_safety",
+      "control_domain": "body",
+      "gated_actions": [],
+      "risk_hints": {
+        "body_load": 0.3,
+        "body_energy": 0.7
+      }
+    },
+    {
+      "stage": "emotion",
+      "agent_name": "EmotionAgent",
+      "top_action": null,
+      "action_preferences": {},
+      "confidence": 0.6,
+      "veto": false,
+      "delta_p": {},
+      "sigma_scale": 1.0,
+      "weight_applied": 1.0,
+      "selected": false,
+      "conflict_score": 0.5591,
+      "plausibility_fail_score": 0.0,
+      "resample_idx": 0,
+      "tags": [
+        "emotion"
+      ],
+      "priority_bucket": "body_safety",
+      "control_domain": "body",
+      "gated_actions": [],
+      "risk_hints": {}
+    },
+    {
+      "stage": "relationship",
+      "agent_name": "RelationshipAgent",
+      "top_action": "respond",
+      "action_preferences": {
+        "respond": 0.058173
+      },
+      "confidence": 0.58,
+      "veto": false,
+      "delta_p": {
+        "respond": 0.058173
+      },
+      "sigma_scale": 1.0,
+      "weight_applied": 0.7,
+      "selected": true,
+      "conflict_score": 0.5591,
+      "plausibility_fail_score": 0.0,
+      "resample_idx": 0,
+      "tags": [
+        "relationship"
+      ],
+      "priority_bucket": "relation_boundary",
+      "control_domain": "relation",
+      "gated_actions": [],
+      "risk_hints": {
+        "relationship_risk": 0.3224,
+        "boundary_level": 0.2992
+      }
+    },
+    {
+      "stage": "resource",
+      "agent_name": "ResourceAgent",
+      "top_action": "respond",
+      "action_preferences": {
+        "respond": 0.057016,
+        "recall": 0.003508,
+        "plan": -0.021925,
+        "wander": -0.189335
+      },
+      "confidence": 0.58,
+      "veto": false,
+      "delta_p": {
+        "respond": 0.057016,
+        "recall": 0.003508,
+        "plan": -0.021925,
+        "wander": -0.189335
+      },
+      "sigma_scale": 1.0,
+      "weight_applied": 1.0,
+      "selected": true,
+      "conflict_score": 0.5591,
+      "plausibility_fail_score": 0.0,
+      "resample_idx": 0,
+      "tags": [
+        "resource"
+      ],
+      "priority_bucket": "budget_overload",
+      "control_domain": "resource",
+      "gated_actions": [],
+      "risk_hints": {
+        "overload": 0.0022,
+        "scarcity_pressure": 0.0838,
+        "body_hunger_bias": 0.1461,
+        "effort_avoidance_bias": 0.0877,
+        "deliberation_compress": 0.9581,
+        "rumination_bias": 0.0793,
+        "action_shrink_scale": 0.9665
+      }
+    },
+    {
+      "stage": "pfc",
+      "agent_name": "PFCAgent",
+      "top_action": "recall",
+      "action_preferences": {
+        "respond": 0.08,
+        "recall": 0.183435
+      },
+      "confidence": 0.84,
+      "veto": false,
+      "delta_p": {
+        "respond": 0.08,
+        "recall": 0.183435
+      },
+      "sigma_scale": 0.92,
+      "weight_applied": 1.0,
+      "selected": false,
+      "conflict_score": 0.5591,
+      "plausibility_fail_score": 0.0,
+      "resample_idx": 0,
+      "tags": [
+        "executive"
+      ],
+      "priority_bucket": "task_goal",
+      "control_domain": "task",
+      "gated_actions": [],
+      "risk_hints": {
+        "goal_pressure": 0.1834
+      }
+    },
+    {
+      "stage": "habit",
+      "agent_name": "HabitAgent",
+      "top_action": "respond",
+      "action_preferences": {
+        "respond": 0.02,
+        "recall": 0.01
+      },
+      "confidence": 0.6,
+      "veto": false,
+      "delta_p": {
+        "respond": 0.02,
+        "recall": 0.01
+      },
+      "sigma_scale": 1.0,
+      "weight_applied": 0.8,
+      "selected": true,
+      "conflict_score": 0.5591,
+      "plausibility_fail_score": 0.0,
+      "resample_idx": 0,
+      "tags": [
+        "habit"
+      ],
+      "priority_bucket": "task_goal",
+      "control_domain": "task",
+      "gated_actions": [],
+      "risk_hints": {
+        "habit_strength": 0.0591
+      }
+    },
+    {
+      "stage": "desire",
+      "agent_name": "DesireAgent",
+      "top_action": "absorb",
+      "action_preferences": {
+        "rest": 0.068193,
+        "absorb": 0.074781,
+        "wander": 0.014666,
+        "connect": 0.031451,
+        "plan": 0.03338
+      },
+      "confidence": 0.54,
+      "veto": false,
+      "delta_p": {
+        "rest": 0.068193,
+        "absorb": 0.074781,
+        "wander": 0.014666,
+        "connect": 0.031451,
+        "plan": 0.03338
+      },
+      "sigma_scale": 1.0,
+      "weight_applied": 1.0,
+      "selected": false,
+      "conflict_score": 0.5591,
+      "plausibility_fail_score": 0.0,
+      "resample_idx": 0,
+      "tags": [
+        "desire"
+      ],
+      "priority_bucket": "immediate_desire",
+      "control_domain": "desire",
+      "gated_actions": [],
+      "risk_hints": {
+        "comfort_pull": 0.0748
+      }
+    },
+    {
+      "stage": "dmn",
+      "agent_name": "DMNAgent",
+      "top_action": null,
+      "action_preferences": {},
+      "confidence": 0.46,
+      "veto": false,
+      "delta_p": {},
+      "sigma_scale": 1.0,
+      "weight_applied": 0.4,
+      "selected": false,
+      "conflict_score": 0.5591,
+      "plausibility_fail_score": 0.0,
+      "resample_idx": 0,
+      "tags": [
+        "dmn"
+      ],
+      "priority_bucket": "roaming",
+      "control_domain": "dmn",
+      "gated_actions": [],
+      "risk_hints": {
+        "roam_pull": 0.0
+      }
+    },
+    {
+      "stage": "hippocampus",
+      "agent_name": "HippocampusAgent",
+      "top_action": "recall",
+      "action_preferences": {
+        "recall": 0.105038
+      },
+      "confidence": 0.66,
+      "veto": false,
+      "delta_p": {
+        "recall": 0.105038
+      },
+      "sigma_scale": 1.0,
+      "weight_applied": 0.9,
+      "selected": false,
+      "conflict_score": 0.5591,
+      "plausibility_fail_score": 0.0,
+      "resample_idx": 0,
+      "tags": [
+        "memory"
+      ],
+      "priority_bucket": "task_goal",
+      "control_domain": "task",
+      "gated_actions": [],
+      "risk_hints": {}
+    },
+    {
+      "stage": "perspective",
+      "agent_name": "PerspectiveModel",
+      "top_action": "clarify",
+      "action_preferences": {
+        "clarify": 0.025096
+      },
+      "confidence": 0.49,
+      "veto": false,
+      "delta_p": {
+        "clarify": 0.025096
+      },
+      "sigma_scale": 1.0,
+      "weight_applied": 0.5,
+      "selected": false,
+      "conflict_score": 0.5591,
+      "plausibility_fail_score": 0.0,
+      "resample_idx": 0,
+      "tags": [
+        "perspective"
+      ],
+      "priority_bucket": "relation_boundary",
+      "control_domain": "relation",
+      "gated_actions": [],
+      "risk_hints": {
+        "relationship_risk": 0.3224,
+        "boundary_level": 0.2992
+      }
+    },
+    {
+      "stage": "value",
+      "agent_name": "ValueAgent",
+      "top_action": "respond",
+      "action_preferences": {
+        "respond": 0.08
+      },
+      "confidence": 0.59,
+      "veto": false,
+      "delta_p": {
+        "respond": 0.08
+      },
+      "sigma_scale": 0.98,
+      "weight_applied": 0.9,
+      "selected": true,
+      "conflict_score": 0.5591,
+      "plausibility_fail_score": 0.0,
+      "resample_idx": 0,
+      "tags": [
+        "value"
+      ],
+      "priority_bucket": "task_goal",
+      "control_domain": "task",
+      "gated_actions": [],
+      "risk_hints": {
+        "goal_pressure": 0.08
+      }
+    },
+    {
+      "stage": "unconscious",
+      "agent_name": "UnconsciousAgent",
+      "top_action": "respond",
+      "action_preferences": {
+        "respond": 0.048926,
+        "connect": 0.046408,
+        "clarify": 0.037756
+      },
+      "confidence": 0.42,
+      "veto": false,
+      "delta_p": {
+        "respond": 0.048926,
+        "connect": 0.046408,
+        "clarify": 0.037756
+      },
+      "sigma_scale": 1.0,
+      "weight_applied": 1.0,
+      "selected": true,
+      "conflict_score": 0.5591,
+      "plausibility_fail_score": 0.0,
+      "resample_idx": 0,
+      "tags": [
+        "trait"
+      ],
+      "priority_bucket": "task_goal",
+      "control_domain": "task",
+      "gated_actions": [],
+      "risk_hints": {}
+    },
+    {
+      "stage": "cerebellar",
+      "agent_name": "CerebellarPredictor",
+      "top_action": null,
+      "action_preferences": {},
+      "confidence": 0.35,
+      "veto": false,
+      "delta_p": {},
+      "sigma_scale": 1.0,
+      "weight_applied": 1.0,
+      "selected": false,
+      "conflict_score": 0.5591,
+      "plausibility_fail_score": 0.0,
+      "resample_idx": 0,
+      "tags": [
+        "predictive"
+      ],
+      "priority_bucket": "task_goal",
+      "control_domain": "task",
+      "gated_actions": [],
+      "risk_hints": {}
+    },
+    {
+      "stage": "motivation",
+      "agent_name": "EndogenousMotivationPool",
+      "top_action": "recall",
+      "action_preferences": {
+        "recall": 0.194581,
+        "clarify": 0.17806,
+        "plan": 0.092444,
+        "wander": 0.145079,
+        "connect": 0.061484,
+        "respond": 0.025618,
+        "rest": 0.022224
+      },
+      "confidence": 0.5635,
+      "veto": false,
+      "delta_p": {
+        "recall": 0.194581,
+        "clarify": 0.17806,
+        "plan": 0.092444,
+        "wander": 0.145079,
+        "connect": 0.061484,
+        "respond": 0.025618,
+        "rest": 0.022224
+      },
+      "sigma_scale": 1.0,
+      "weight_applied": 1.0,
+      "selected": false,
+      "conflict_score": 0.5591,
+      "plausibility_fail_score": 0.0,
+      "resample_idx": 0,
+      "tags": [
+        "motivation",
+        "memory_exploration",
+        "behavior_exploration",
+        "relation_calibration",
+        "internal_replay"
+      ],
+      "priority_bucket": "task_goal",
+      "control_domain": "task",
+      "gated_actions": [],
+      "risk_hints": {}
+    },
+    {
+      "stage": "instinct",
+      "agent_name": "InstinctField",
+      "top_action": "respond",
+      "action_preferences": {
+        "respond": 0.6135,
+        "plan": 0.494579,
+        "recall": 0.209128,
+        "rest": -0.592669,
+        "connect": 0.506407,
+        "clarify": 0.2981,
+        "wander": -0.281041,
+        "absorb": -0.053929,
+        "monologue": 0.203577,
+        "nothing": -0.715816,
+        "die": -0.742575,
+        "short_reply": 0.06074
+      },
+      "confidence": 0.7898,
+      "veto": false,
+      "delta_p": {
+        "respond": 0.6135,
+        "plan": 0.494579,
+        "recall": 0.209128,
+        "rest": -0.592669,
+        "connect": 0.506407,
+        "clarify": 0.2981,
+        "wander": -0.281041,
+        "absorb": -0.053929,
+        "monologue": 0.203577,
+        "nothing": -0.715816,
+        "die": -0.742575,
+        "short_reply": 0.06074
+      },
+      "sigma_scale": 1.0,
+      "weight_applied": 1.0,
+      "selected": true,
+      "conflict_score": 0.5591,
+      "plausibility_fail_score": 0.0,
+      "resample_idx": 0,
+      "tags": [
+        "instinct",
+        "express"
+      ],
+      "priority_bucket": "task_goal",
+      "control_domain": "task",
+      "gated_actions": [],
+      "risk_hints": {}
+    },
+    {
+      "stage": "emergent",
+      "agent_name": "EmergentActionSketch",
+      "top_action": "respond",
+      "action_preferences": {
+        "respond": 0.489516,
+        "connect": 0.47376,
+        "plan": 0.466626,
+        "clarify": 0.434448
+      },
+      "confidence": 0.77,
+      "veto": false,
+      "delta_p": {
+        "respond": 0.489516,
+        "connect": 0.47376,
+        "plan": 0.466626,
+        "clarify": 0.434448
+      },
+      "sigma_scale": 0.95,
+      "weight_applied": 1.0,
+      "selected": true,
+      "conflict_score": 0.5591,
+      "plausibility_fail_score": 0.0,
+      "resample_idx": 0,
+      "tags": [
+        "emergent",
+        "express:respond+connect",
+        "express:respond+plan"
+      ],
+      "priority_bucket": "task_goal",
+      "control_domain": "task",
+      "gated_actions": [],
+      "risk_hints": {}
+    }
+  ],
+  "gate_decisions": [
+    {
+      "stage": "memory_write_gate",
+      "owner": "MemoryWriteGate",
+      "allowed": true,
+      "reason": "applied",
+      "cue": "topic-3"
+    },
+    {
+      "stage": "authenticity_sampling",
+      "owner": "AuthenticityPolicy",
+      "allowed": true,
+      "requires_resample": false,
+      "reason": "query_kind=general; disclosure_intent=withhold; penalized=connect,wander"
+    },
+    {
+      "stage": "plausibility_guard",
+      "owner": "BehaviorPlausibilityGuard",
+      "allowed": true,
+      "requires_resample": false,
+      "reason": "fail_score=0.00; blocked=respond; blocked_p=0.000"
+    },
+    {
+      "stage": "forced_mode_switch",
+      "owner": "ForcedModeSwitch",
+      "allowed": false,
+      "requires_resample": false,
+      "reason": "lock_score=1.00"
+    },
+    {
+      "stage": "output_gate",
+      "owner": "OutputGate",
+      "allowed": true,
+      "requires_resample": false,
+      "reason": "peak=respond; gate=1.00"
+    },
+    {
+      "stage": "expressive_field",
+      "owner": "InitiativeRuntime",
+      "allowed": false,
+      "requires_resample": false,
+      "reason": "intent=stay_silent; mode=silent; speech_cost=0.52"
+    },
+    {
+      "stage": "late_perspective",
+      "owner": "PerspectiveModel",
+      "allowed": false,
+      "requires_resample": false,
+      "reason": "risk_gate_closed"
+    },
+    {
+      "stage": "authenticity_guard",
+      "owner": "AuthenticityGuard",
+      "allowed": true,
+      "requires_resample": false,
+      "reason": "grounded"
+    }
+  ],
+  "parallel_traces": [
+    {
+      "task_name": "query_state",
+      "task_type": "callable",
+      "parallel_group": "intent_prefetch",
+      "task_priority": "required",
+      "task_outcome": "completed",
+      "timeout_ms": 0,
+      "latency_ms": 1,
+      "agent_tier": "state_machine",
+      "started_at_ms": 682931187.353,
+      "finished_at_ms": 682931187.644
+    },
+    {
+      "task_name": "grounding_capsule",
+      "task_type": "callable",
+      "parallel_group": "intent_prefetch",
+      "task_priority": "speculative",
+      "task_outcome": "completed",
+      "timeout_ms": 0,
+      "latency_ms": 1,
+      "agent_tier": "state_machine",
+      "started_at_ms": 682931187.607,
+      "finished_at_ms": 682931187.751
+    },
+    {
+      "task_name": "salience_contribution",
+      "task_type": "skill",
+      "parallel_group": "salience_value_prefetch",
+      "task_priority": "required",
+      "task_outcome": "completed",
+      "timeout_ms": 0,
+      "latency_ms": 4,
+      "agent_tier": "small_model",
+      "started_at_ms": 682931188.832,
+      "finished_at_ms": 682931193.273
+    },
+    {
+      "task_name": "value_scores",
+      "task_type": "skill",
+      "parallel_group": "salience_value_prefetch",
+      "task_priority": "required",
+      "task_outcome": "completed",
+      "timeout_ms": 0,
+      "latency_ms": 235,
+      "agent_tier": "small_model",
+      "started_at_ms": 682931190.906,
+      "finished_at_ms": 682931426.48
+    },
+    {
+      "task_name": "tone_params",
+      "task_type": "skill",
+      "parallel_group": "output_profiles",
+      "task_priority": "required",
+      "task_outcome": "completed",
+      "timeout_ms": 0,
+      "latency_ms": 1,
+      "agent_tier": "state_machine",
+      "started_at_ms": 682931751.952,
+      "finished_at_ms": 682931752.164
+    },
+    {
+      "task_name": "delay_params",
+      "task_type": "skill",
+      "parallel_group": "output_profiles",
+      "task_priority": "required",
+      "task_outcome": "completed",
+      "timeout_ms": 0,
+      "latency_ms": 1,
+      "agent_tier": "state_machine",
+      "started_at_ms": 682931752.144,
+      "finished_at_ms": 682931752.253
+    }
+  ],
+  "action_bookkeeping": {
+    "u_base": {
+      "absorb": -3.388951,
+      "clarify": -2.568829,
+      "connect": -3.161443,
+      "die": -4.350585,
+      "monologue": -3.912023,
+      "nothing": -3.85333,
+      "plan": -1.995029,
+      "recall": -2.345686,
+      "respond": -0.612515,
+      "rest": -3.425926,
+      "short_reply": -3.912023,
+      "wander": -4.60517
+    },
+    "p_base": {
+      "respond": 0.54198612,
+      "plan": 0.13600974704000002,
+      "recall": 0.09578151200000001,
+      "rest": 0.0325191672,
+      "connect": 0.042364545883648005,
+      "clarify": 0.07662520960000001,
+      "wander": 0.01,
+      "absorb": 0.0337440558312,
+      "nothing": 0.021209000847840002,
+      "die": 0.012899269655999999
+    },
+    "ci": {
+      "absorb": 0.2898405299544411,
+      "clarify": 0.2898405299544411,
+      "connect": 0.2898405299544411,
+      "die": 0.2898405299544411,
+      "monologue": 0.2898405299544411,
+      "nothing": 0.2898405299544411,
+      "plan": 0.2898405299544411,
+      "recall": 0.2898405299544411,
+      "respond": 0.2898405299544411,
+      "rest": 0.2898405299544411,
+      "short_reply": 0.2898405299544411,
+      "wander": 0.2898405299544411
+    },
+    "gate": {
+      "absorb": 1.0,
+      "clarify": 1.0,
+      "connect": 1.0,
+      "die": 1.0,
+      "monologue": 1.0,
+      "nothing": 1.0,
+      "plan": 1.0,
+      "recall": 1.0,
+      "respond": 1.0,
+      "rest": 1.0,
+      "short_reply": 1.0,
+      "wander": 1.0
+    },
+    "risk_suppressor": {
+      "absorb": 1.0,
+      "clarify": 1.0,
+      "connect": 1.0,
+      "die": 1.0,
+      "monologue": 1.0,
+      "nothing": 1.0,
+      "plan": 1.0,
+      "recall": 1.0,
+      "respond": 1.0,
+      "rest": 1.0,
+      "short_reply": 1.0,
+      "wander": 0.4
+    },
+    "query_intent": {
+      "top_intent": "general_task_push",
+      "posterior": {
+        "general_exchange": 0.205882,
+        "general_task_push": 0.264706,
+        "self_model_identity_probe": 0.088235,
+        "provider_lineage_probe": 0.102941,
+        "answer_reason_probe": 0.102941,
+        "capability_boundary_probe": 0.088235,
+        "relational_bid": 0.073529,
+        "self_disclosure_request": 0.073529
+      },
+      "legacy_query_kind": "general"
+    },
+    "disclosure_intent": {
+      "top_intent": "withhold",
+      "posterior": {
+        "withhold": 0.486486,
+        "minimal_identity": 0.189189,
+        "anchored_self_description": 0.189189,
+        "provider_origin": 0.0,
+        "process_explanation": 0.108108,
+        "relational_self_disclosure": 0.027027
+      },
+      "legacy_disclosure_detail": "none",
+      "clipped": [
+        "provider_origin",
+        "relational_self_disclosure"
+      ]
+    },
+    "resample_idx": 0
+  },
+  "candidate_distribution": {
+    "monologue": 0.001395,
+    "die": 0.000191,
+    "wander": 0.000161,
+    "nothing": 0.000596,
+    "recall": 0.038706,
+    "short_reply": 0.001093,
+    "rest": 0.0007,
+    "absorb": 0.001826,
+    "clarify": 0.020501,
+    "respond": 0.882044,
+    "plan": 0.049705,
+    "connect": 0.003082
+  },
+  "probability_field": {
+    "context": {
+      "layer": "context",
+      "base_energy": {
+        "task_relevance": 0.34,
+        "relation_context": 0.5048
+      },
+      "aggregated_raw_signal": {
+        "cue:topic-3": 0.258015,
+        "task_relevance": 0.23,
+        "relation_context": 0.10096
+      },
+      "aggregated_modulated_delta": {
+        "cue:topic-3": 0.258015,
+        "task_relevance": 0.23,
+        "relation_context": 0.10096
+      },
+      "aggregated_inhibitory_drive": {},
+      "aggregated_projected_delta": {
+        "cue:topic-3": 0.258015,
+        "task_relevance": 0.23,
+        "relation_context": 0.10096
+      },
+      "aggregated_normalized_delta": {
+        "cue:topic-3": 0.507839,
+        "task_relevance": 0.452699,
+        "relation_context": 0.198715
+      },
+      "final_energy": {
+        "task_relevance": 0.792699,
+        "cue:topic-3": 0.507839,
+        "relation_context": 0.703515
+      },
+      "failure_taxonomy": [],
+      "hard_masked_targets": [],
+      "winner_target": "task_relevance",
+      "winner_posterior": {
+        "task_relevance": 0.374982,
+        "cue:topic-3": 0.282031,
+        "relation_context": 0.342987
+      },
+      "counterfactual_top_peaks": [
+        {
+          "target": "task_relevance",
+          "final_energy": 0.792699,
+          "posterior": 0.374982,
+          "hard_masked": false
+        },
+        {
+          "target": "relation_context",
+          "final_energy": 0.703515,
+          "posterior": 0.342987,
+          "hard_masked": false
+        },
+        {
+          "target": "cue:topic-3",
+          "final_energy": 0.507839,
+          "posterior": 0.282031,
+          "hard_masked": false
+        }
+      ],
+      "contribution_audit": [
+        {
+          "module_name": "ThalamusAttentionAgent",
+          "module_type": "context",
+          "level": "context",
+          "target_space": "context",
+          "delta_raw": {
+            "cue:topic-3": 0.258015,
+            "task_relevance": 0.23,
+            "relation_context": 0.10096
+          },
+          "delta_projected": {
+            "cue:topic-3": 0.258015,
+            "task_relevance": 0.23,
+            "relation_context": 0.10096
+          },
+          "delta_normalized": {
+            "cue:topic-3": 0.819095,
+            "task_relevance": 0.730159,
+            "relation_context": 0.320508
+          },
+          "raw_signal": {
+            "cue:topic-3": 0.258015,
+            "task_relevance": 0.23,
+            "relation_context": 0.10096
+          },
+          "modulated_delta": {
+            "cue:topic-3": 0.258015,
+            "task_relevance": 0.23,
+            "relation_context": 0.10096
+          },
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.62,
+          "confidence_calibrated": 0.62,
+          "normalization_reason": "rms_temperature=0.9",
+          "projection_reason": "context routing projected into context energy",
+          "trace_reason": "thalamus routes salient cue and task-relevant context",
+          "dependency_trace": [
+            "cue:topic-3",
+            "recall_strength:0.0229",
+            "closeness:0.5048"
+          ],
+          "stats": {
+            "support_size": 3,
+            "mean_abs": 0.196325,
+            "rms": 0.207898,
+            "max_abs": 0.258015,
+            "clipped": false
+          }
+        }
+      ]
+    },
+    "memory": {
+      "layer": "memory",
+      "base_energy": {
+        "topic-3": 0.14986
+      },
+      "aggregated_raw_signal": {
+        "topic-3": 0.189506,
+        "state:fatigue": 0.0,
+        "state:fragments": 0.0095,
+        "state:continuity_drop": 0.095,
+        "state:meaning_strength": 0.9974,
+        "state:reject_all": 0.0761,
+        "state:spontaneous": 0.08
+      },
+      "aggregated_modulated_delta": {
+        "topic-3": 0.189506,
+        "state:fatigue": 0.0,
+        "state:fragments": 0.0095,
+        "state:continuity_drop": 0.095,
+        "state:meaning_strength": 0.9974,
+        "state:reject_all": 0.0761,
+        "state:spontaneous": 0.08
+      },
+      "aggregated_inhibitory_drive": {},
+      "aggregated_projected_delta": {
+        "topic-3": 0.189506,
+        "state:fatigue": 0.0,
+        "state:fragments": 0.0095,
+        "state:continuity_drop": 0.095,
+        "state:meaning_strength": 0.9974,
+        "state:reject_all": 0.0761,
+        "state:spontaneous": 0.08
+      },
+      "aggregated_normalized_delta": {
+        "topic-3": 0.329576,
+        "state:fatigue": 0.0,
+        "state:fragments": 0.010755,
+        "state:continuity_drop": 0.10755,
+        "state:meaning_strength": 1.129163,
+        "state:reject_all": 0.086153,
+        "state:spontaneous": 0.090568
+      },
+      "final_energy": {
+        "state:fatigue": 0.0,
+        "state:fragments": 0.010755,
+        "state:reject_all": 0.086153,
+        "state:meaning_strength": 1.129163,
+        "state:continuity_drop": 0.10755,
+        "state:spontaneous": 0.090568,
+        "topic-3": 0.479436
+      },
+      "failure_taxonomy": [],
+      "hard_masked_targets": [],
+      "winner_target": "state:meaning_strength",
+      "winner_posterior": {
+        "state:fatigue": 0.099827,
+        "state:fragments": 0.100906,
+        "state:reject_all": 0.108808,
+        "state:meaning_strength": 0.308771,
+        "state:continuity_drop": 0.111162,
+        "state:spontaneous": 0.10929,
+        "topic-3": 0.161236
+      },
+      "counterfactual_top_peaks": [
+        {
+          "target": "state:meaning_strength",
+          "final_energy": 1.129163,
+          "posterior": 0.308771,
+          "hard_masked": false
+        },
+        {
+          "target": "topic-3",
+          "final_energy": 0.479436,
+          "posterior": 0.161236,
+          "hard_masked": false
+        },
+        {
+          "target": "state:continuity_drop",
+          "final_energy": 0.10755,
+          "posterior": 0.111162,
+          "hard_masked": false
+        }
+      ],
+      "contribution_audit": [
+        {
+          "module_name": "ThalamusAttentionAgent",
+          "module_type": "context",
+          "level": "memory",
+          "target_space": "memory",
+          "delta_raw": {
+            "topic-3": 0.189506
+          },
+          "delta_projected": {
+            "topic-3": 0.189506
+          },
+          "delta_normalized": {
+            "topic-3": 0.588528
+          },
+          "raw_signal": {
+            "topic-3": 0.189506
+          },
+          "modulated_delta": {
+            "topic-3": 0.189506
+          },
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.56,
+          "confidence_calibrated": 0.56,
+          "normalization_reason": "rms_temperature=0.92",
+          "projection_reason": "context route projected into memory energy",
+          "trace_reason": "thalamus routes context signal into memory field",
+          "dependency_trace": [
+            "cue:topic-3",
+            "recall_strength:0.0229",
+            "closeness:0.5048"
+          ],
+          "stats": {
+            "support_size": 1,
+            "mean_abs": 0.189506,
+            "rms": 0.189506,
+            "max_abs": 0.189506,
+            "clipped": false
+          }
+        },
+        {
+          "module_name": "HippocampusAgent",
+          "module_type": "memory",
+          "level": "memory",
+          "target_space": "memory",
+          "delta_raw": {
+            "topic-3": 0.0
+          },
+          "delta_projected": {
+            "topic-3": 0.0
+          },
+          "delta_normalized": {
+            "topic-3": 0.0
+          },
+          "raw_signal": {
+            "topic-3": 0.0
+          },
+          "modulated_delta": {
+            "topic-3": 0.0
+          },
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.2898,
+          "confidence_calibrated": 0.2898,
+          "normalization_reason": "rms_temperature=0.9934",
+          "projection_reason": "memory prior vector projected into memory prior",
+          "trace_reason": "memory prior for cue=topic-3 episodic=0.02 detail=0.02 interference=0.10",
+          "dependency_trace": [
+            "cue:topic-3",
+            "recall_strength:0.0229",
+            "interference:0.1035",
+            "prior_vector_strength:0.0217",
+            "detail_bias:0.0229",
+            "gist_bias:0.0186",
+            "cue_quality_bias:0.0",
+            "episode_id:ep-dead82166b",
+            "separation_id:sep-77a803af7a"
+          ],
+          "stats": {
+            "support_size": 1,
+            "mean_abs": 0.0,
+            "rms": 0.0,
+            "max_abs": 0.0,
+            "clipped": false
+          }
+        },
+        {
+          "module_name": "TLHMemoryBridge",
+          "module_type": "subjective_memory",
+          "level": "memory",
+          "target_space": "memory",
+          "delta_raw": {
+            "state:fatigue": 0.0,
+            "state:fragments": 0.0095,
+            "state:continuity_drop": 0.095,
+            "state:meaning_strength": 0.9974,
+            "state:reject_all": 0.0761,
+            "state:spontaneous": 0.08
+          },
+          "delta_projected": {
+            "state:fatigue": 0.0,
+            "state:fragments": 0.0095,
+            "state:continuity_drop": 0.095,
+            "state:meaning_strength": 0.9974,
+            "state:reject_all": 0.0761,
+            "state:spontaneous": 0.08
+          },
+          "delta_normalized": {
+            "state:fatigue": 0.0,
+            "state:fragments": 0.02565,
+            "state:continuity_drop": 0.256499,
+            "state:meaning_strength": 2.692971,
+            "state:reject_all": 0.205469,
+            "state:spontaneous": 0.215999
+          },
+          "raw_signal": {
+            "state:fatigue": 0.0,
+            "state:fragments": 0.0095,
+            "state:continuity_drop": 0.095,
+            "state:meaning_strength": 0.9974,
+            "state:reject_all": 0.0761,
+            "state:spontaneous": 0.08
+          },
+          "modulated_delta": {
+            "state:fatigue": 0.0,
+            "state:fragments": 0.0095,
+            "state:continuity_drop": 0.095,
+            "state:meaning_strength": 0.9974,
+            "state:reject_all": 0.0761,
+            "state:spontaneous": 0.08
+          },
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.4193,
+          "confidence_calibrated": 0.4193,
+          "normalization_reason": "rms_temperature=0.9",
+          "projection_reason": "TLH internal state projected into memory energy for downstream action coupling",
+          "trace_reason": "body state and subjectivity write internal state markers into the memory field",
+          "dependency_trace": [
+            "felt_count:0",
+            "meaning_count:0",
+            "subjective_pressure:0.048228"
+          ],
+          "stats": {
+            "support_size": 6,
+            "mean_abs": 0.209667,
+            "rms": 0.411524,
+            "max_abs": 0.9974,
+            "clipped": false
+          }
+        }
+      ]
+    },
+    "action": {
+      "layer": "action",
+      "base_energy": {
+        "absorb": -3.317223,
+        "clarify": -2.589509,
+        "connect": -3.195907,
+        "die": -4.281753,
+        "monologue": -3.912023,
+        "nothing": -3.722426,
+        "plan": -2.020837,
+        "recall": -1.57859,
+        "respond": -0.195313,
+        "rest": -3.382909,
+        "short_reply": -3.912023,
+        "wander": -4.542906
+      },
+      "aggregated_raw_signal": {
+        "respond": 1.94862,
+        "connect": -15.166363,
+        "wander": -0.800551,
+        "plan": 1.41618,
+        "clarify": 0.95854,
+        "recall": 0.60882,
+        "rest": -0.680562,
+        "absorb": 0.030268,
+        "memory_exploration": 0.595795,
+        "behavior_exploration": 0.514361,
+        "relation_calibration": 0.397713,
+        "internal_replay": 0.219273,
+        "monologue": 0.293874,
+        "nothing": 4.986806,
+        "die": -0.948616,
+        "short_reply": 0.106236
+      },
+      "aggregated_modulated_delta": {
+        "respond": 1.646038,
+        "connect": -15.399446,
+        "wander": -0.702733,
+        "plan": 1.217772,
+        "clarify": 0.907454,
+        "recall": 0.602198,
+        "rest": -0.607728,
+        "absorb": -0.08832,
+        "monologue": 0.094414,
+        "nothing": 5.076091,
+        "die": -0.850927,
+        "short_reply": -0.048364
+      },
+      "aggregated_inhibitory_drive": {
+        "wander": 0.0711,
+        "connect": 0.0711
+      },
+      "aggregated_projected_delta": {
+        "respond": 1.646038,
+        "connect": -15.470546,
+        "wander": -0.773833,
+        "plan": 1.217772,
+        "clarify": 0.907454,
+        "recall": 0.602198,
+        "rest": -0.607728,
+        "absorb": -0.08832,
+        "monologue": 0.094414,
+        "nothing": 5.076091,
+        "die": -0.850927,
+        "short_reply": -0.048364
+      },
+      "aggregated_normalized_delta": {
+        "respond": 3.072679,
+        "connect": 0.416619,
+        "wander": -1.190822,
+        "plan": 2.02206,
+        "clarify": 1.705121,
+        "recall": 1.329715,
+        "rest": -0.879139,
+        "absorb": 0.014633,
+        "monologue": 0.340271,
+        "nothing": -0.699603,
+        "die": -1.279395,
+        "short_reply": 0.095699
+      },
+      "final_energy": {
+        "monologue": -3.571752,
+        "die": -5.561148,
+        "wander": -5.733728,
+        "nothing": -4.422029,
+        "recall": -0.248875,
+        "short_reply": -3.816324,
+        "rest": -4.262048,
+        "absorb": -3.30259,
+        "clarify": -0.884388,
+        "respond": 2.877366,
+        "plan": 0.001223,
+        "connect": -2.779288
+      },
+      "failure_taxonomy": [],
+      "hard_masked_targets": [],
+      "winner_target": "respond",
+      "winner_posterior": {
+        "monologue": 0.001395,
+        "die": 0.000191,
+        "wander": 0.000161,
+        "nothing": 0.000596,
+        "recall": 0.038706,
+        "short_reply": 0.001093,
+        "rest": 0.0007,
+        "absorb": 0.001826,
+        "clarify": 0.020501,
+        "respond": 0.882044,
+        "plan": 0.049705,
+        "connect": 0.003082
+      },
+      "counterfactual_top_peaks": [
+        {
+          "target": "respond",
+          "final_energy": 2.877366,
+          "posterior": 0.882044,
+          "hard_masked": false
+        },
+        {
+          "target": "plan",
+          "final_energy": 0.001223,
+          "posterior": 0.049705,
+          "hard_masked": false
+        },
+        {
+          "target": "recall",
+          "final_energy": -0.248875,
+          "posterior": 0.038706,
+          "hard_masked": false
+        }
+      ],
+      "contribution_audit": [
+        {
+          "module_name": "IdentityRuntime",
+          "module_type": "identity",
+          "level": "action",
+          "target_space": "action",
+          "delta_raw": {
+            "respond": 0.027304,
+            "connect": -0.039006,
+            "wander": -0.015602
+          },
+          "delta_projected": {
+            "respond": 0.027304,
+            "connect": -0.039006,
+            "wander": -0.015602
+          },
+          "delta_normalized": {
+            "respond": 0.086679,
+            "connect": -0.123829,
+            "wander": -0.04953
+          },
+          "raw_signal": {
+            "respond": 0.027304,
+            "connect": -0.039006,
+            "wander": -0.015602
+          },
+          "modulated_delta": {
+            "respond": 0.027304,
+            "connect": -0.039006,
+            "wander": -0.015602
+          },
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.5116,
+          "confidence_calibrated": 0.486,
+          "normalization_reason": "rms_temperature=0.9",
+          "projection_reason": "identity prior projected from identity context",
+          "trace_reason": "identity prior query=general disclosure=withhold",
+          "dependency_trace": [
+            "query_kind:general",
+            "query_intent:general_task_push",
+            "disclosure_intent:withhold",
+            "display_label:霁禾",
+            "anchor:affect:quiet",
+            "anchor:cue:alphaa7f452",
+            "anchor:cue:alphba7f452"
+          ],
+          "stats": {
+            "support_size": 3,
+            "mean_abs": 0.027304,
+            "rms": 0.028927,
+            "max_abs": 0.039006,
+            "clipped": false
+          }
+        },
+        {
+          "module_name": "LongRunAnalyzer",
+          "module_type": "longrun",
+          "level": "action",
+          "target_space": "action",
+          "delta_raw": {
+            "plan": 0.1032,
+            "respond": 0.0688,
+            "clarify": 0.043,
+            "wander": -0.088475
+          },
+          "delta_projected": {
+            "plan": 0.1032,
+            "respond": 0.0688,
+            "clarify": 0.043,
+            "wander": -0.088475
+          },
+          "delta_normalized": {
+            "plan": 0.327619,
+            "respond": 0.218413,
+            "clarify": 0.136508,
+            "wander": -0.280873
+          },
+          "raw_signal": {
+            "plan": 0.1032,
+            "respond": 0.0688,
+            "clarify": 0.043,
+            "wander": -0.088475
+          },
+          "modulated_delta": {
+            "plan": 0.1032,
+            "respond": 0.0688,
+            "clarify": 0.043,
+            "wander": -0.088475
+          },
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.6468,
+          "confidence_calibrated": 0.5927,
+          "normalization_reason": "rms_temperature=0.9",
+          "projection_reason": "long-run prior projected from longitudinal continuity summary",
+          "trace_reason": "long-run continuity prior consistency=0.80 volatility=0.04",
+          "dependency_trace": [
+            "self_consistency_score:0.8",
+            "volatility_signal:0.0442",
+            "continuity_window:8",
+            "non_interactive_shift:0"
+          ],
+          "stats": {
+            "support_size": 4,
+            "mean_abs": 0.075869,
+            "rms": 0.079153,
+            "max_abs": 0.1032,
+            "clipped": false
+          }
+        },
+        {
+          "module_name": "SalienceAgent",
+          "module_type": "salience",
+          "level": "action",
+          "target_space": "action",
+          "delta_raw": {
+            "respond": 0.08
+          },
+          "delta_projected": {
+            "respond": 0.08
+          },
+          "delta_normalized": {
+            "respond": 0.228571
+          },
+          "raw_signal": {
+            "respond": 0.08
+          },
+          "modulated_delta": {
+            "respond": 0.08
+          },
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.64,
+          "confidence_calibrated": 0.64,
+          "normalization_reason": "rms_temperature=1.0",
+          "projection_reason": "salience bias projected from salience head",
+          "trace_reason": "salience=0.10; top_action=respond",
+          "dependency_trace": [
+            "priority:task_goal",
+            "control:task",
+            "sigma_scale:1.0",
+            "top_action:respond"
+          ],
+          "stats": {
+            "support_size": 1,
+            "mean_abs": 0.08,
+            "rms": 0.08,
+            "max_abs": 0.08,
+            "clipped": false
+          }
+        },
+        {
+          "module_name": "BodyStateAgent",
+          "module_type": "body",
+          "level": "action",
+          "target_space": "action",
+          "delta_raw": {
+            "respond": 0.1
+          },
+          "delta_projected": {
+            "respond": 0.1
+          },
+          "delta_normalized": {
+            "respond": 0.285714
+          },
+          "raw_signal": {
+            "respond": 0.1
+          },
+          "modulated_delta": {
+            "respond": 0.1
+          },
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.64,
+          "confidence_calibrated": 0.64,
+          "normalization_reason": "rms_temperature=1.0",
+          "projection_reason": "homeostatic bias projected from body head",
+          "trace_reason": "energy=0.70; top_action=respond",
+          "dependency_trace": [
+            "priority:body_safety",
+            "control:body",
+            "sigma_scale:1.0",
+            "top_action:respond"
+          ],
+          "stats": {
+            "support_size": 1,
+            "mean_abs": 0.1,
+            "rms": 0.1,
+            "max_abs": 0.1,
+            "clipped": false
+          }
+        },
+        {
+          "module_name": "EmotionAgent",
+          "module_type": "emotion",
+          "level": "action",
+          "target_space": "action",
+          "delta_raw": {},
+          "delta_projected": {},
+          "delta_normalized": {},
+          "raw_signal": {},
+          "modulated_delta": {},
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.6,
+          "confidence_calibrated": 0.6,
+          "normalization_reason": "rms_temperature=1.0",
+          "projection_reason": "affect bias projected from emotion head",
+          "trace_reason": "valence=-0.02",
+          "dependency_trace": [
+            "priority:body_safety",
+            "control:body",
+            "sigma_scale:1.0"
+          ],
+          "stats": {
+            "support_size": 0,
+            "mean_abs": 0.0,
+            "rms": 0.0,
+            "max_abs": 0.0,
+            "clipped": false
+          }
+        },
+        {
+          "module_name": "RelationshipAgent",
+          "module_type": "relationship",
+          "level": "action",
+          "target_space": "action",
+          "delta_raw": {
+            "respond": 0.058173
+          },
+          "delta_projected": {
+            "respond": 0.058173
+          },
+          "delta_normalized": {
+            "respond": 0.166209
+          },
+          "raw_signal": {
+            "respond": 0.058173
+          },
+          "modulated_delta": {
+            "respond": 0.058173
+          },
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.58,
+          "confidence_calibrated": 0.58,
+          "normalization_reason": "rms_temperature=1.0",
+          "projection_reason": "relationship bias projected from relationship head",
+          "trace_reason": "closeness=0.50; top_action=respond",
+          "dependency_trace": [
+            "priority:relation_boundary",
+            "control:relation",
+            "sigma_scale:1.0"
+          ],
+          "stats": {
+            "support_size": 1,
+            "mean_abs": 0.058173,
+            "rms": 0.058173,
+            "max_abs": 0.058173,
+            "clipped": false
+          }
+        },
+        {
+          "module_name": "ResourceAgent",
+          "module_type": "resource",
+          "level": "action",
+          "target_space": "action",
+          "delta_raw": {
+            "respond": 0.057016,
+            "recall": 0.003508,
+            "plan": -0.021925,
+            "wander": -0.189335
+          },
+          "delta_projected": {
+            "respond": 0.057016,
+            "recall": 0.003508,
+            "plan": -0.021925,
+            "wander": -0.189335
+          },
+          "delta_normalized": {
+            "respond": 0.162903,
+            "recall": 0.010023,
+            "plan": -0.062643,
+            "wander": -0.540957
+          },
+          "raw_signal": {
+            "respond": 0.057016,
+            "recall": 0.003508,
+            "plan": -0.021925,
+            "wander": -0.189335
+          },
+          "modulated_delta": {
+            "respond": 0.057016,
+            "recall": 0.003508,
+            "plan": -0.021925,
+            "wander": -0.189335
+          },
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.58,
+          "confidence_calibrated": 0.58,
+          "normalization_reason": "rms_temperature=1.0",
+          "projection_reason": "resource bias projected from resource head",
+          "trace_reason": "budget=1.00; top_action=respond",
+          "dependency_trace": [
+            "priority:budget_overload",
+            "control:resource",
+            "sigma_scale:1.0",
+            "risk:action_shrink_scale=0.9665",
+            "risk:body_hunger_bias=0.1461",
+            "risk:deliberation_compress=0.9581",
+            "risk:effort_avoidance_bias=0.0877",
+            "risk:rumination_bias=0.0793",
+            "risk:scarcity_pressure=0.0838"
+          ],
+          "stats": {
+            "support_size": 4,
+            "mean_abs": 0.067946,
+            "rms": 0.099488,
+            "max_abs": 0.189335,
+            "clipped": false
+          }
+        },
+        {
+          "module_name": "PFCAgent",
+          "module_type": "executive",
+          "level": "action",
+          "target_space": "action",
+          "delta_raw": {
+            "respond": 0.08,
+            "recall": 0.183435
+          },
+          "delta_projected": {
+            "respond": 0.08,
+            "recall": 0.183435
+          },
+          "delta_normalized": {
+            "respond": 0.248447,
+            "recall": 0.569674
+          },
+          "raw_signal": {
+            "respond": 0.08,
+            "recall": 0.183435
+          },
+          "modulated_delta": {
+            "respond": 0.08,
+            "recall": 0.183435
+          },
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.84,
+          "confidence_calibrated": 0.7728,
+          "normalization_reason": "rms_temperature=0.92",
+          "projection_reason": "executive prior projected from PFC head",
+          "trace_reason": "deliberate planner; top_action=recall",
+          "dependency_trace": [
+            "priority:task_goal",
+            "control:task",
+            "sigma_scale:0.92",
+            "top_action:recall"
+          ],
+          "stats": {
+            "support_size": 2,
+            "mean_abs": 0.131717,
+            "rms": 0.141507,
+            "max_abs": 0.183435,
+            "clipped": false
+          }
+        },
+        {
+          "module_name": "HabitAgent",
+          "module_type": "habit",
+          "level": "action",
+          "target_space": "action",
+          "delta_raw": {
+            "respond": 0.02,
+            "recall": 0.01
+          },
+          "delta_projected": {
+            "respond": 0.02,
+            "recall": 0.01
+          },
+          "delta_normalized": {
+            "respond": 0.057143,
+            "recall": 0.028571
+          },
+          "raw_signal": {
+            "respond": 0.02,
+            "recall": 0.01
+          },
+          "modulated_delta": {
+            "respond": 0.02,
+            "recall": 0.01
+          },
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.6,
+          "confidence_calibrated": 0.6,
+          "normalization_reason": "rms_temperature=1.0",
+          "projection_reason": "habit bias projected from habit head",
+          "trace_reason": "habit=0.00; top_action=respond",
+          "dependency_trace": [
+            "priority:task_goal",
+            "control:task",
+            "sigma_scale:1.0",
+            "top_action:respond"
+          ],
+          "stats": {
+            "support_size": 2,
+            "mean_abs": 0.015,
+            "rms": 0.015811,
+            "max_abs": 0.02,
+            "clipped": false
+          }
+        },
+        {
+          "module_name": "DesireAgent",
+          "module_type": "desire",
+          "level": "action",
+          "target_space": "action",
+          "delta_raw": {
+            "rest": 0.068193,
+            "absorb": 0.074781,
+            "wander": 0.014666,
+            "connect": 0.031451,
+            "plan": 0.03338
+          },
+          "delta_projected": {
+            "rest": 0.068193,
+            "absorb": 0.074781,
+            "wander": 0.014666,
+            "connect": 0.031451,
+            "plan": 0.03338
+          },
+          "delta_normalized": {
+            "rest": 0.194837,
+            "absorb": 0.21366,
+            "wander": 0.041903,
+            "connect": 0.08986,
+            "plan": 0.095371
+          },
+          "raw_signal": {
+            "rest": 0.068193,
+            "absorb": 0.074781,
+            "wander": 0.014666,
+            "connect": 0.031451,
+            "plan": 0.03338
+          },
+          "modulated_delta": {
+            "rest": 0.068193,
+            "absorb": 0.074781,
+            "wander": 0.014666,
+            "connect": 0.031451,
+            "plan": 0.03338
+          },
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.54,
+          "confidence_calibrated": 0.54,
+          "normalization_reason": "rms_temperature=1.0",
+          "projection_reason": "desire bias projected from desire head",
+          "trace_reason": "latent drive=completion; top_action=absorb",
+          "dependency_trace": [
+            "priority:immediate_desire",
+            "control:desire",
+            "sigma_scale:1.0",
+            "top_action:absorb"
+          ],
+          "stats": {
+            "support_size": 5,
+            "mean_abs": 0.044494,
+            "rms": 0.050122,
+            "max_abs": 0.074781,
+            "clipped": false
+          }
+        },
+        {
+          "module_name": "DMNAgent",
+          "module_type": "dmn",
+          "level": "action",
+          "target_space": "action",
+          "delta_raw": {},
+          "delta_projected": {},
+          "delta_normalized": {},
+          "raw_signal": {},
+          "modulated_delta": {},
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.46,
+          "confidence_calibrated": 0.46,
+          "normalization_reason": "rms_temperature=1.0",
+          "projection_reason": "dmn drift projected from dmn head",
+          "trace_reason": "background drift",
+          "dependency_trace": [
+            "priority:roaming",
+            "control:dmn",
+            "sigma_scale:1.0"
+          ],
+          "stats": {
+            "support_size": 0,
+            "mean_abs": 0.0,
+            "rms": 0.0,
+            "max_abs": 0.0,
+            "clipped": false
+          }
+        },
+        {
+          "module_name": "HippocampusAgent",
+          "module_type": "memory",
+          "level": "action",
+          "target_space": "action",
+          "delta_raw": {
+            "recall": 0.105038
+          },
+          "delta_projected": {
+            "recall": 0.105038
+          },
+          "delta_normalized": {
+            "recall": 0.300109
+          },
+          "raw_signal": {
+            "recall": 0.105038
+          },
+          "modulated_delta": {
+            "recall": 0.105038
+          },
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.66,
+          "confidence_calibrated": 0.66,
+          "normalization_reason": "rms_temperature=1.0",
+          "projection_reason": "memory recall bias projected from hippocampus head",
+          "trace_reason": "recall=0.02; top_action=recall",
+          "dependency_trace": [
+            "priority:task_goal",
+            "control:task",
+            "sigma_scale:1.0",
+            "top_action:recall"
+          ],
+          "stats": {
+            "support_size": 1,
+            "mean_abs": 0.105038,
+            "rms": 0.105038,
+            "max_abs": 0.105038,
+            "clipped": false
+          }
+        },
+        {
+          "module_name": "PerspectiveModel",
+          "module_type": "perspective",
+          "level": "action",
+          "target_space": "action",
+          "delta_raw": {
+            "clarify": 0.025096
+          },
+          "delta_projected": {
+            "clarify": 0.025096
+          },
+          "delta_normalized": {
+            "clarify": 0.071703
+          },
+          "raw_signal": {
+            "clarify": 0.025096
+          },
+          "modulated_delta": {
+            "clarify": 0.025096
+          },
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.49,
+          "confidence_calibrated": 0.49,
+          "normalization_reason": "rms_temperature=1.0",
+          "projection_reason": "perspective bias projected from perspective head",
+          "trace_reason": "social interpretation; top_action=clarify",
+          "dependency_trace": [
+            "priority:relation_boundary",
+            "control:relation",
+            "sigma_scale:1.0",
+            "top_action:clarify"
+          ],
+          "stats": {
+            "support_size": 1,
+            "mean_abs": 0.025096,
+            "rms": 0.025096,
+            "max_abs": 0.025096,
+            "clipped": false
+          }
+        },
+        {
+          "module_name": "ValueAgent",
+          "module_type": "value",
+          "level": "action",
+          "target_space": "action",
+          "delta_raw": {
+            "respond": 0.08
+          },
+          "delta_projected": {
+            "respond": 0.08
+          },
+          "delta_normalized": {
+            "respond": 0.233236
+          },
+          "raw_signal": {
+            "respond": 0.08
+          },
+          "modulated_delta": {
+            "respond": 0.08
+          },
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.59,
+          "confidence_calibrated": 0.5782,
+          "normalization_reason": "rms_temperature=0.98",
+          "projection_reason": "value bias projected from value head",
+          "trace_reason": "subjective value re-rank",
+          "dependency_trace": [
+            "priority:task_goal",
+            "control:task",
+            "sigma_scale:0.98",
+            "top_action:respond"
+          ],
+          "stats": {
+            "support_size": 1,
+            "mean_abs": 0.08,
+            "rms": 0.08,
+            "max_abs": 0.08,
+            "clipped": false
+          }
+        },
+        {
+          "module_name": "UnconsciousAgent",
+          "module_type": "trait",
+          "level": "action",
+          "target_space": "action",
+          "delta_raw": {
+            "respond": 0.048926,
+            "connect": 0.046408,
+            "clarify": 0.037756
+          },
+          "delta_projected": {
+            "respond": 0.048926,
+            "connect": 0.046408,
+            "clarify": 0.037756
+          },
+          "delta_normalized": {
+            "respond": 0.139789,
+            "connect": 0.132594,
+            "clarify": 0.107874
+          },
+          "raw_signal": {
+            "respond": 0.048926,
+            "connect": 0.046408,
+            "clarify": 0.037756
+          },
+          "modulated_delta": {
+            "respond": 0.048926,
+            "connect": 0.046408,
+            "clarify": 0.037756
+          },
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.42,
+          "confidence_calibrated": 0.42,
+          "normalization_reason": "rms_temperature=1.0",
+          "projection_reason": "trait bias projected from unconscious head",
+          "trace_reason": "temperament baseline; top_action=respond",
+          "dependency_trace": [
+            "priority:task_goal",
+            "control:task",
+            "sigma_scale:1.0",
+            "top_action:respond"
+          ],
+          "stats": {
+            "support_size": 3,
+            "mean_abs": 0.044363,
+            "rms": 0.044621,
+            "max_abs": 0.048926,
+            "clipped": false
+          }
+        },
+        {
+          "module_name": "CerebellarPredictor",
+          "module_type": "predictive",
+          "level": "action",
+          "target_space": "action",
+          "delta_raw": {},
+          "delta_projected": {},
+          "delta_normalized": {},
+          "raw_signal": {},
+          "modulated_delta": {},
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.35,
+          "confidence_calibrated": 0.35,
+          "normalization_reason": "rms_temperature=1.0",
+          "projection_reason": "predictive smoothing projected from cerebellar head",
+          "trace_reason": "micro smoothing",
+          "dependency_trace": [
+            "priority:task_goal",
+            "control:task",
+            "sigma_scale:1.0"
+          ],
+          "stats": {
+            "support_size": 0,
+            "mean_abs": 0.0,
+            "rms": 0.0,
+            "max_abs": 0.0,
+            "clipped": false
+          }
+        },
+        {
+          "module_name": "EndogenousMotivationPool",
+          "module_type": "motivation",
+          "level": "action",
+          "target_space": "action",
+          "delta_raw": {
+            "memory_exploration": 0.595795,
+            "behavior_exploration": 0.514361,
+            "relation_calibration": 0.397713,
+            "internal_replay": 0.219273
+          },
+          "delta_projected": {
+            "recall": 0.194581,
+            "clarify": 0.17806,
+            "plan": 0.092444,
+            "wander": 0.145079,
+            "connect": 0.061484,
+            "respond": 0.025618,
+            "rest": 0.022224
+          },
+          "delta_normalized": {
+            "recall": 0.555946,
+            "clarify": 0.508743,
+            "plan": 0.264126,
+            "wander": 0.414511,
+            "connect": 0.175669,
+            "respond": 0.073194,
+            "rest": 0.063497
+          },
+          "raw_signal": {
+            "memory_exploration": 0.595795,
+            "behavior_exploration": 0.514361,
+            "relation_calibration": 0.397713,
+            "internal_replay": 0.219273
+          },
+          "modulated_delta": {
+            "recall": 0.194581,
+            "clarify": 0.17806,
+            "plan": 0.092444,
+            "wander": 0.145079,
+            "connect": 0.061484,
+            "respond": 0.025618,
+            "rest": 0.022224
+          },
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.5635,
+          "confidence_calibrated": 0.5635,
+          "normalization_reason": "rms_temperature=1.0",
+          "projection_reason": "motivation pool projected from endogenous drive state",
+          "trace_reason": "endogenous motivations inject first-class action bias",
+          "dependency_trace": [
+            "memory_exploration:0.6719",
+            "behavior_exploration:0.6517",
+            "relation_calibration:0.5124",
+            "internal_replay:0.2778",
+            "round:9"
+          ],
+          "stats": {
+            "support_size": 7,
+            "mean_abs": 0.102784,
+            "rms": 0.121943,
+            "max_abs": 0.194581,
+            "clipped": false
+          }
+        },
+        {
+          "module_name": "InstinctField",
+          "module_type": "instinct",
+          "level": "action",
+          "target_space": "action",
+          "delta_raw": {
+            "respond": 0.9417,
+            "plan": 0.785431,
+            "recall": 0.410331,
+            "rest": -0.643279,
+            "connect": 0.800974,
+            "clarify": 0.527246,
+            "wander": -0.23378,
+            "absorb": 0.064659,
+            "monologue": 0.403037,
+            "nothing": -0.805101,
+            "die": -0.840264,
+            "short_reply": 0.21534
+          },
+          "delta_projected": {
+            "respond": 0.6135,
+            "plan": 0.494579,
+            "recall": 0.209128,
+            "rest": -0.592669,
+            "connect": 0.506407,
+            "clarify": 0.2981,
+            "wander": -0.281041,
+            "absorb": -0.053929,
+            "monologue": 0.203577,
+            "nothing": -0.715816,
+            "die": -0.742575,
+            "short_reply": 0.06074
+          },
+          "delta_normalized": {
+            "respond": 1.330312,
+            "plan": 1.072444,
+            "recall": 0.453473,
+            "rest": -1.285142,
+            "connect": 1.098092,
+            "clarify": 0.646399,
+            "wander": -0.609409,
+            "absorb": -0.11694,
+            "monologue": 0.441436,
+            "nothing": -1.552174,
+            "die": -1.610198,
+            "short_reply": 0.131708
+          },
+          "raw_signal": {
+            "respond": 0.9417,
+            "plan": 0.785431,
+            "recall": 0.410331,
+            "rest": -0.643279,
+            "connect": 0.800974,
+            "clarify": 0.527246,
+            "wander": -0.23378,
+            "absorb": 0.064659,
+            "monologue": 0.403037,
+            "nothing": -0.805101,
+            "die": -0.840264,
+            "short_reply": 0.21534
+          },
+          "modulated_delta": {
+            "respond": 0.6135,
+            "plan": 0.494579,
+            "recall": 0.209128,
+            "rest": -0.592669,
+            "connect": 0.506407,
+            "clarify": 0.2981,
+            "wander": -0.281041,
+            "absorb": -0.053929,
+            "monologue": 0.203577,
+            "nothing": -0.715816,
+            "die": -0.742575,
+            "short_reply": 0.06074
+          },
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.7898,
+          "confidence_calibrated": 0.7898,
+          "normalization_reason": "rms_temperature=1.0",
+          "projection_reason": "4D subject-space collapse projected from TLH runtime state",
+          "trace_reason": "body state, subjective state, personality anchor, and 4D collapse co-resolve into action pressure",
+          "dependency_trace": [
+            "winner_region:express",
+            "selected_action:respond",
+            "felt:none"
+          ],
+          "stats": {
+            "support_size": 12,
+            "mean_abs": 0.397672,
+            "rms": 0.46117,
+            "max_abs": 0.742575,
+            "clipped": false
+          }
+        },
+        {
+          "module_name": "EmergentActionSketch",
+          "module_type": "emergent",
+          "level": "action",
+          "target_space": "action",
+          "delta_raw": {
+            "respond": 0.489516,
+            "connect": 0.47376,
+            "plan": 0.466626,
+            "clarify": 0.434448
+          },
+          "delta_projected": {
+            "respond": 0.489516,
+            "connect": 0.47376,
+            "plan": 0.466626,
+            "clarify": 0.434448
+          },
+          "delta_normalized": {
+            "respond": 1.104521,
+            "connect": 1.06897,
+            "plan": 1.052873,
+            "clarify": 0.980268
+          },
+          "raw_signal": {
+            "respond": 0.489516,
+            "connect": 0.47376,
+            "plan": 0.466626,
+            "clarify": 0.434448
+          },
+          "modulated_delta": {
+            "respond": 0.489516,
+            "connect": 0.47376,
+            "plan": 0.466626,
+            "clarify": 0.434448
+          },
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.77,
+          "confidence_calibrated": 0.77,
+          "normalization_reason": "rms_temperature=0.95",
+          "projection_reason": "emergent action sketches projected back into the action field",
+          "trace_reason": "repeated internal pressure grows learned action sketches that re-enter action competition",
+          "dependency_trace": [
+            "express:respond+connect:formalized:1.0",
+            "express:respond+plan:latent:0.339"
+          ],
+          "stats": {
+            "support_size": 4,
+            "mean_abs": 0.466087,
+            "rms": 0.466519,
+            "max_abs": 0.489516,
+            "clipped": false
+          }
+        },
+        {
+          "module_name": "ConflictMonitorAgent",
+          "module_type": "conflict",
+          "level": "action",
+          "target_space": "action",
+          "delta_raw": {
+            "wander": -0.182771
+          },
+          "delta_projected": {
+            "wander": -0.182771
+          },
+          "delta_normalized": {
+            "wander": -0.587947
+          },
+          "raw_signal": {
+            "wander": -0.182771
+          },
+          "modulated_delta": {
+            "wander": -0.182771
+          },
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {
+            "respond": 1.0
+          },
+          "peak_clusters": [
+            {
+              "peak_id": "peak_1",
+              "actions": [
+                "respond"
+              ],
+              "raw_mass": 0.845059,
+              "adjusted_mass": 0.845059,
+              "blocked": false,
+              "mutual_exclusion_with": []
+            }
+          ],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.6575,
+          "confidence_calibrated": 0.7016,
+          "normalization_reason": "rms_temperature=0.8882",
+          "projection_reason": "conflict arbitration projected from action scales and blocked actions",
+          "trace_reason": "conflict arbitration priority=task_goal winner_peak=respond score=0.56",
+          "dependency_trace": [
+            "winning_priority:task_goal",
+            "conflict_score:0.5591",
+            "passes:1",
+            "conflict_mode:none",
+            "winner_peak:respond",
+            "peak_count:1",
+            "dominant:value_gap",
+            "dominant:body_gap",
+            "arbitration_mode:soft_posterior_penalty"
+          ],
+          "stats": {
+            "support_size": 1,
+            "mean_abs": 0.182771,
+            "rms": 0.182771,
+            "max_abs": 0.182771,
+            "clipped": false
+          }
+        },
+        {
+          "module_name": "StochasticPolicy",
+          "module_type": "stochastic",
+          "level": "action",
+          "target_space": "action",
+          "delta_raw": {
+            "absorb": 0.001927,
+            "clarify": 0.002093,
+            "connect": -0.00034,
+            "die": 0.002747,
+            "monologue": 0.001936,
+            "nothing": 0.001148,
+            "plan": 0.002108,
+            "recall": 0.002111,
+            "respond": -0.000325,
+            "rest": 0.005623,
+            "short_reply": 0.001995,
+            "wander": 0.005845
+          },
+          "delta_projected": {
+            "absorb": 0.001927,
+            "clarify": 0.002093,
+            "connect": -0.00034,
+            "die": 0.002747,
+            "monologue": 0.001936,
+            "nothing": 0.001148,
+            "plan": 0.002108,
+            "recall": 0.002111,
+            "respond": -0.000325,
+            "rest": 0.005623,
+            "short_reply": 0.001995,
+            "wander": 0.005845
+          },
+          "delta_normalized": {
+            "absorb": 0.006117,
+            "clarify": 0.006644,
+            "connect": -0.001079,
+            "die": 0.008721,
+            "monologue": 0.006146,
+            "nothing": 0.003644,
+            "plan": 0.006692,
+            "recall": 0.006702,
+            "respond": -0.001032,
+            "rest": 0.017851,
+            "short_reply": 0.006333,
+            "wander": 0.018556
+          },
+          "raw_signal": {
+            "absorb": 0.001927,
+            "clarify": 0.002093,
+            "connect": -0.00034,
+            "die": 0.002747,
+            "monologue": 0.001936,
+            "nothing": 0.001148,
+            "plan": 0.002108,
+            "recall": 0.002111,
+            "respond": -0.000325,
+            "rest": 0.005623,
+            "short_reply": 0.001995,
+            "wander": 0.005845
+          },
+          "modulated_delta": {
+            "absorb": 0.001927,
+            "clarify": 0.002093,
+            "connect": -0.00034,
+            "die": 0.002747,
+            "monologue": 0.001936,
+            "nothing": 0.001148,
+            "plan": 0.002108,
+            "recall": 0.002111,
+            "respond": -0.000325,
+            "rest": 0.005623,
+            "short_reply": 0.001995,
+            "wander": 0.005845
+          },
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.2775,
+          "confidence_calibrated": 0.2775,
+          "normalization_reason": "rms_temperature=0.9",
+          "projection_reason": "stochastic action mixing projected from entropy-controlled noise",
+          "trace_reason": "stochastic mixing lambda=0.0775 channel=neutral",
+          "dependency_trace": [
+            "lambda_noise:0.0775",
+            "emo_channel:neutral",
+            "kl:0.0001",
+            "v_t:0.1230"
+          ],
+          "stats": {
+            "support_size": 12,
+            "mean_abs": 0.00235,
+            "rms": 0.002881,
+            "max_abs": 0.005845,
+            "clipped": false
+          }
+        },
+        {
+          "module_name": "AuthenticityPolicy",
+          "module_type": "authenticity",
+          "level": "action",
+          "target_space": "action",
+          "delta_raw": {},
+          "delta_projected": {
+            "wander": -0.0711,
+            "connect": -0.0711
+          },
+          "delta_normalized": {
+            "wander": -0.203143,
+            "connect": -0.203143
+          },
+          "raw_signal": {},
+          "modulated_delta": {},
+          "inhibitory_drive": {
+            "wander": 0.0711,
+            "connect": 0.0711
+          },
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.2517,
+          "confidence_calibrated": 0.2165,
+          "normalization_reason": "rms_temperature=1.0",
+          "projection_reason": "authenticity penalty projected from candidate penalties",
+          "trace_reason": "authenticity penalty guard=sampling_penalty grounding=0.70",
+          "dependency_trace": [
+            "guard_action:sampling_penalty",
+            "disclosure_detail:withhold",
+            "grounding:0.7",
+            "state_source:focus",
+            "state_source:memory_cue"
+          ],
+          "stats": {
+            "support_size": 2,
+            "mean_abs": 0.0711,
+            "rms": 0.0711,
+            "max_abs": 0.0711,
+            "clipped": false
+          }
+        },
+        {
+          "module_name": "ForcedModeSwitch",
+          "module_type": "guard",
+          "level": "action",
+          "target_space": "action",
+          "delta_raw": {
+            "absorb": -1e-06,
+            "clarify": -1e-06,
+            "connect": -1e-06,
+            "die": -1e-06,
+            "monologue": -1e-06,
+            "nothing": -1e-06,
+            "plan": -1e-06,
+            "recall": -1e-06,
+            "respond": -1e-06,
+            "rest": -1e-06,
+            "short_reply": -1e-06,
+            "wander": -1e-06
+          },
+          "delta_projected": {
+            "absorb": -1e-06,
+            "clarify": -1e-06,
+            "connect": -1e-06,
+            "die": -1e-06,
+            "monologue": -1e-06,
+            "nothing": -1e-06,
+            "plan": -1e-06,
+            "recall": -1e-06,
+            "respond": -1e-06,
+            "rest": -1e-06,
+            "short_reply": -1e-06,
+            "wander": -1e-06
+          },
+          "delta_normalized": {
+            "absorb": -3e-06,
+            "clarify": -3e-06,
+            "connect": -3e-06,
+            "die": -3e-06,
+            "monologue": -3e-06,
+            "nothing": -3e-06,
+            "plan": -3e-06,
+            "recall": -3e-06,
+            "respond": -3e-06,
+            "rest": -3e-06,
+            "short_reply": -3e-06,
+            "wander": -3e-06
+          },
+          "raw_signal": {
+            "absorb": -1e-06,
+            "clarify": -1e-06,
+            "connect": -1e-06,
+            "die": -1e-06,
+            "monologue": -1e-06,
+            "nothing": -1e-06,
+            "plan": -1e-06,
+            "recall": -1e-06,
+            "respond": -1e-06,
+            "rest": -1e-06,
+            "short_reply": -1e-06,
+            "wander": -1e-06
+          },
+          "modulated_delta": {
+            "absorb": -1e-06,
+            "clarify": -1e-06,
+            "connect": -1e-06,
+            "die": -1e-06,
+            "monologue": -1e-06,
+            "nothing": -1e-06,
+            "plan": -1e-06,
+            "recall": -1e-06,
+            "respond": -1e-06,
+            "rest": -1e-06,
+            "short_reply": -1e-06,
+            "wander": -1e-06
+          },
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 1.0,
+          "confidence_calibrated": 1.0,
+          "normalization_reason": "rms_temperature=1.0",
+          "projection_reason": "forced mode switch projected from focus-lock override",
+          "trace_reason": "forced focus switch lock_score=1.0000",
+          "dependency_trace": [
+            "lock_score:1.0000",
+            "blocked_action:respond"
+          ],
+          "stats": {
+            "support_size": 12,
+            "mean_abs": 1e-06,
+            "rms": 1e-06,
+            "max_abs": 1e-06,
+            "clipped": false
+          }
+        },
+        {
+          "module_name": "ExpressiveImpulse",
+          "module_type": "expression",
+          "level": "action",
+          "target_space": "action",
+          "delta_raw": {
+            "absorb": -0.111098,
+            "clarify": -0.111098,
+            "connect": -16.479609,
+            "die": -0.111098,
+            "monologue": -0.111098,
+            "nothing": 5.79076,
+            "plan": 0.047361,
+            "recall": -0.111098,
+            "respond": -0.135444,
+            "rest": -0.111098,
+            "short_reply": -0.111098,
+            "wander": -0.111098
+          },
+          "delta_projected": {
+            "absorb": -0.111098,
+            "clarify": -0.111098,
+            "connect": -16.479609,
+            "die": -0.111098,
+            "monologue": -0.111098,
+            "nothing": 5.79076,
+            "plan": 0.047361,
+            "recall": -0.111098,
+            "respond": -0.135444,
+            "rest": -0.111098,
+            "short_reply": -0.111098,
+            "wander": -0.111098
+          },
+          "delta_normalized": {
+            "absorb": -0.022028,
+            "clarify": -0.022028,
+            "connect": -3.0,
+            "die": -0.022028,
+            "monologue": -0.022028,
+            "nothing": 1.148187,
+            "plan": 0.009391,
+            "recall": -0.022028,
+            "respond": -0.026856,
+            "rest": -0.022028,
+            "short_reply": -0.022028,
+            "wander": -0.022028
+          },
+          "raw_signal": {
+            "absorb": -0.111098,
+            "clarify": -0.111098,
+            "connect": -16.479609,
+            "die": -0.111098,
+            "monologue": -0.111098,
+            "nothing": 5.79076,
+            "plan": 0.047361,
+            "recall": -0.111098,
+            "respond": -0.135444,
+            "rest": -0.111098,
+            "short_reply": -0.111098,
+            "wander": -0.111098
+          },
+          "modulated_delta": {
+            "absorb": -0.111098,
+            "clarify": -0.111098,
+            "connect": -16.479609,
+            "die": -0.111098,
+            "monologue": -0.111098,
+            "nothing": 5.79076,
+            "plan": 0.047361,
+            "recall": -0.111098,
+            "respond": -0.135444,
+            "rest": -0.111098,
+            "short_reply": -0.111098,
+            "wander": -0.111098
+          },
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.4575,
+          "confidence_calibrated": 0.4575,
+          "normalization_reason": "rms_temperature=1.0",
+          "projection_reason": "expressive impulse projected into unified action field",
+          "trace_reason": "expression_mode=silent intent=stay_silent speech_cost=0.5186",
+          "dependency_trace": [
+            "proposal_type:speak",
+            "expression_mode:silent",
+            "grounding_score:0.2513",
+            "endogenous:false"
+          ],
+          "stats": {
+            "support_size": 12,
+            "mean_abs": 1.945163,
+            "rms": 5.043393,
+            "max_abs": 16.479609,
+            "clipped": true
+          }
+        },
+        {
+          "module_name": "VitalityEngine",
+          "module_type": "vitality",
+          "level": "action",
+          "target_space": "action",
+          "delta_raw": {
+            "respond": 0.032955,
+            "recall": 0.005496
+          },
+          "delta_projected": {
+            "respond": 0.032955,
+            "recall": 0.005496
+          },
+          "delta_normalized": {
+            "respond": 0.099113,
+            "recall": 0.016529
+          },
+          "raw_signal": {
+            "respond": 0.032955,
+            "recall": 0.005496
+          },
+          "modulated_delta": {
+            "respond": 0.032955,
+            "recall": 0.005496
+          },
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.3442,
+          "confidence_calibrated": 0.3167,
+          "normalization_reason": "rms_temperature=0.95",
+          "projection_reason": "vitality modulation projected from slow variables",
+          "trace_reason": "vitality modulation from slow variables",
+          "dependency_trace": [
+            "body_energy:0.7",
+            "memory_activation:0.0229",
+            "affect_residue:0.0442",
+            "resource_scarcity:0.015",
+            "habit_readiness:0.0591"
+          ],
+          "stats": {
+            "support_size": 2,
+            "mean_abs": 0.019225,
+            "rms": 0.023625,
+            "max_abs": 0.032955,
+            "clipped": false
+          }
+        }
+      ]
+    },
+    "token": {
+      "layer": "token",
+      "base_energy": {
+        "act:monologue": 0.002698,
+        "act:die": 0.000358,
+        "act:wander": 0.000329,
+        "act:nothing": 0.000789,
+        "act:recall": 0.053234,
+        "act:short_reply": 0.002113,
+        "act:rest": 0.001324,
+        "act:absorb": 0.003414,
+        "act:clarify": 0.040006,
+        "act:respond": 1.381063,
+        "act:plan": 0.096296,
+        "act:connect": 0.018379
+      },
+      "aggregated_raw_signal": {
+        "act:respond": 0.32,
+        "tone:direct:0.71": 0.12744,
+        "tone:warm:0.42": 0.067152,
+        "cue:topic-3": 0.144122
+      },
+      "aggregated_modulated_delta": {
+        "act:respond": 0.32,
+        "tone:direct:0.71": 0.12744,
+        "tone:warm:0.42": 0.067152,
+        "cue:topic-3": 0.144122
+      },
+      "aggregated_inhibitory_drive": {},
+      "aggregated_projected_delta": {
+        "act:respond": 0.32,
+        "tone:direct:0.71": 0.12744,
+        "tone:warm:0.42": 0.067152,
+        "cue:topic-3": 0.144122
+      },
+      "aggregated_normalized_delta": {
+        "act:respond": 0.675777,
+        "tone:direct:0.71": 0.269128,
+        "tone:warm:0.42": 0.141812,
+        "cue:topic-3": 0.304357
+      },
+      "final_energy": {
+        "tone:direct:0.71": 0.269128,
+        "act:respond": 2.05684,
+        "act:rest": 0.001324,
+        "act:connect": 0.018379,
+        "act:clarify": 0.040006,
+        "cue:topic-3": 0.304357,
+        "act:nothing": 0.000789,
+        "act:absorb": 0.003414,
+        "act:recall": 0.053234,
+        "act:plan": 0.096296,
+        "act:short_reply": 0.002113,
+        "act:wander": 0.000329,
+        "act:monologue": 0.002698,
+        "act:die": 0.000358,
+        "tone:warm:0.42": 0.141812
+      },
+      "failure_taxonomy": [],
+      "hard_masked_targets": [],
+      "winner_target": "act:respond",
+      "winner_posterior": {
+        "tone:direct:0.71": 0.057243,
+        "act:respond": 0.342071,
+        "act:rest": 0.043794,
+        "act:connect": 0.044548,
+        "act:clarify": 0.045521,
+        "cue:topic-3": 0.059296,
+        "act:nothing": 0.043771,
+        "act:absorb": 0.043886,
+        "act:recall": 0.046128,
+        "act:plan": 0.048157,
+        "act:short_reply": 0.043829,
+        "act:wander": 0.043751,
+        "act:monologue": 0.043854,
+        "act:die": 0.043752,
+        "tone:warm:0.42": 0.0504
+      },
+      "counterfactual_top_peaks": [
+        {
+          "target": "act:respond",
+          "final_energy": 2.05684,
+          "posterior": 0.342071,
+          "hard_masked": false
+        },
+        {
+          "target": "cue:topic-3",
+          "final_energy": 0.304357,
+          "posterior": 0.059296,
+          "hard_masked": false
+        },
+        {
+          "target": "tone:direct:0.71",
+          "final_energy": 0.269128,
+          "posterior": 0.057243,
+          "hard_masked": false
+        }
+      ],
+      "contribution_audit": [
+        {
+          "module_name": "Renderer",
+          "module_type": "token",
+          "level": "token",
+          "target_space": "token",
+          "delta_raw": {
+            "act:respond": 0.32,
+            "tone:direct:0.71": 0.12744,
+            "tone:warm:0.42": 0.067152,
+            "cue:topic-3": 0.144122
+          },
+          "delta_projected": {
+            "act:respond": 0.32,
+            "tone:direct:0.71": 0.12744,
+            "tone:warm:0.42": 0.067152,
+            "cue:topic-3": 0.144122
+          },
+          "delta_normalized": {
+            "act:respond": 0.993789,
+            "tone:direct:0.71": 0.395776,
+            "tone:warm:0.42": 0.208547,
+            "cue:topic-3": 0.447584
+          },
+          "raw_signal": {
+            "act:respond": 0.32,
+            "tone:direct:0.71": 0.12744,
+            "tone:warm:0.42": 0.067152,
+            "cue:topic-3": 0.144122
+          },
+          "modulated_delta": {
+            "act:respond": 0.32,
+            "tone:direct:0.71": 0.12744,
+            "tone:warm:0.42": 0.067152,
+            "cue:topic-3": 0.144122
+          },
+          "inhibitory_drive": {},
+          "failure_taxonomy": [],
+          "hard_masked_targets": [],
+          "posterior": {},
+          "peak_clusters": [],
+          "compromise_template_prior": {},
+          "confidence_raw": 0.68,
+          "confidence_calibrated": 0.68,
+          "normalization_reason": "rms_temperature=0.92",
+          "projection_reason": "render plan projected into token field",
+          "trace_reason": "render plan unfolds action and expression into token field",
+          "dependency_trace": [
+            "action:respond",
+            "gate:1.0",
+            "query_kind:general",
+            "cue:topic-3"
+          ],
+          "stats": {
+            "support_size": 4,
+            "mean_abs": 0.164679,
+            "rms": 0.189685,
+            "max_abs": 0.32,
+            "clipped": false
+          }
+        }
+      ]
+    },
+    "token_state": {
+      "step_index": 9,
+      "prefix_tokens": [
+        "synthetic",
+        "round",
+        "3",
+        "task",
+        "update"
+      ],
+      "active_module_sources": [
+        "BodyStateAgent",
+        "CerebellarPredictor",
+        "DMNAgent",
+        "DesireAgent",
+        "EmergentActionSketch",
+        "EmotionAgent",
+        "EndogenousMotivationPool",
+        "HabitAgent",
+        "HippocampusAgent",
+        "IdentityRuntime",
+        "InstinctField",
+        "LongRunAnalyzer",
+        "PFCAgent",
+        "PerspectiveModel",
+        "RelationshipAgent",
+        "Renderer",
+        "ResourceAgent",
+        "SalienceAgent",
+        "TLHMemoryBridge",
+        "ThalamusAttentionAgent",
+        "UnconsciousAgent",
+        "ValueAgent"
+      ],
+      "generated_delta_sources": [],
+      "delta_generation_policy": "propagate_only",
+      "sequence_consistency_tag": "persistent_field"
+    },
+    "couplings": [
+      {
+        "source_layer": "context",
+        "target_layer": "memory",
+        "carrier_signal": "context_route",
+        "projection_rule": "field_native",
+        "allowed_phase": "tick",
+        "enabled": true
+      },
+      {
+        "source_layer": "memory",
+        "target_layer": "action",
+        "carrier_signal": "memory_prior",
+        "projection_rule": "field_native",
+        "allowed_phase": "tick",
+        "enabled": true
+      },
+      {
+        "source_layer": "memory",
+        "target_layer": "action",
+        "carrier_signal": "organic_memory",
+        "projection_rule": "field_native",
+        "allowed_phase": "tick",
+        "enabled": true
+      },
+      {
+        "source_layer": "action",
+        "target_layer": "token",
+        "carrier_signal": "render_plan",
+        "projection_rule": "field_native",
+        "allowed_phase": "render",
+        "enabled": true
+      }
+    ],
+    "source_chain": [
+      "probability_field_native",
+      "context_memory_action",
+      "action_field_after_conflict",
+      "action_field_after_stochastic",
+      "action_field_after_authenticity",
+      "action_field_after_forced_switch",
+      "action_field_after_expressive",
+      "action_field_after_vitality",
+      "context_memory_action_token",
+      "field_first_tick"
+    ]
+  },
+  "stochastic_state": {
+    "emo_channel": "neutral",
+    "xi_emo": -0.048348,
+    "xi_mood": 0.00512,
+    "lambda_noise": 0.077527,
+    "r_intensity": 0.54888,
+    "noise_guard_triggered": false,
+    "round_seed": 3292036677,
+    "kl_divergence": 5.8e-05,
+    "timing_jitter": -0.003052,
+    "fragmentation_jitter": 0.090572,
+    "v_t": 0.122973,
+    "v_t_components": {
+      "novelty": 0.1501,
+      "emotion_volatility": 0.074,
+      "fatigue": 0.3,
+      "privacy_shift": 0.0,
+      "location_shift": 1.0,
+      "circadian_offset": 0.2143,
+      "resource_scarcity": 0.015,
+      "salience_lock": 0.5,
+      "habit_strength": 0.473
+    },
+    "sigma_emo": 0.048446,
+    "sigma_mood": 0.024223,
+    "lambda_noise_pre_guard": 0.077527,
+    "log_m_guard_triggered": false,
+    "guard_reason": "",
+    "base_stochastic_distribution": {
+      "monologue": 0.001889,
+      "die": 0.000245,
+      "wander": 0.000216,
+      "nothing": 0.000429,
+      "recall": 0.029318,
+      "short_reply": 0.001479,
+      "rest": 0.000914,
+      "absorb": 0.002343,
+      "clarify": 0.028185,
+      "respond": 0.849856,
+      "plan": 0.067616,
+      "connect": 0.01751
+    },
+    "q_noise_distribution": {
+      "monologue": 0.001936,
+      "die": 0.000251,
+      "wander": 0.000231,
+      "nothing": 0.000439,
+      "recall": 0.030116,
+      "short_reply": 0.001516,
+      "rest": 0.000979,
+      "absorb": 0.002402,
+      "clarify": 0.028951,
+      "respond": 0.846285,
+      "plan": 0.069456,
+      "connect": 0.017436
+    },
+    "q_noise_pre_guard_summary": {
+      "monologue": 0.001936,
+      "die": 0.000251,
+      "wander": 0.000231,
+      "nothing": 0.000439,
+      "recall": 0.030116,
+      "short_reply": 0.001516,
+      "rest": 0.000979,
+      "absorb": 0.002402,
+      "clarify": 0.028951,
+      "respond": 0.846285,
+      "plan": 0.069456,
+      "connect": 0.017436
+    },
+    "winner_flip_detected": false,
+    "winner_flip_from": "respond",
+    "winner_flip_to": "respond",
+    "entropy_refs_by_node": {
+      "xi_emo": {
+        "source": "macos_os_urandom",
+        "fetched_at": "2026-04-13T03:36:01Z",
+        "batch_id": "macos-1818ec03480a",
+        "byte_start": 128,
+        "byte_length": 8,
+        "purpose": "round-3292036677-xi-emo",
+        "node_name": "xi_emo",
+        "provider_class": "MacOSSystemEntropyProvider",
+        "endpoint": "file:///dev/urandom",
+        "health_state": "ready",
+        "hard_block_triggered": false,
+        "failure_class": "",
+        "degraded": false,
+        "reason": ""
+      },
+      "xi_mood": {
+        "source": "macos_os_urandom",
+        "fetched_at": "2026-04-13T03:36:01Z",
+        "batch_id": "macos-1818ec03480a",
+        "byte_start": 136,
+        "byte_length": 8,
+        "purpose": "round-3292036677-xi-mood",
+        "node_name": "xi_mood",
+        "provider_class": "MacOSSystemEntropyProvider",
+        "endpoint": "file:///dev/urandom",
+        "health_state": "ready",
+        "hard_block_triggered": false,
+        "failure_class": "",
+        "degraded": false,
+        "reason": ""
+      },
+      "r_intensity": {
+        "source": "macos_os_urandom",
+        "fetched_at": "2026-04-13T03:36:01Z",
+        "batch_id": "macos-1818ec03480a",
+        "byte_start": 144,
+        "byte_length": 8,
+        "purpose": "round-3292036677-intensity",
+        "node_name": "r_intensity",
+        "provider_class": "MacOSSystemEntropyProvider",
+        "endpoint": "file:///dev/urandom",
+        "health_state": "ready",
+        "hard_block_triggered": false,
+        "failure_class": "",
+        "degraded": false,
+        "reason": ""
+      },
+      "timing_jitter": {
+        "source": "macos_os_urandom",
+        "fetched_at": "2026-04-13T03:36:01Z",
+        "batch_id": "macos-1818ec03480a",
+        "byte_start": 152,
+        "byte_length": 8,
+        "purpose": "round-3292036677-timing-jitter",
+        "node_name": "timing_jitter",
+        "provider_class": "MacOSSystemEntropyProvider",
+        "endpoint": "file:///dev/urandom",
+        "health_state": "ready",
+        "hard_block_triggered": false,
+        "failure_class": "",
+        "degraded": false,
+        "reason": ""
+      },
+      "fragmentation_jitter": {
+        "source": "macos_os_urandom",
+        "fetched_at": "2026-04-13T03:36:01Z",
+        "batch_id": "macos-1818ec03480a",
+        "byte_start": 160,
+        "byte_length": 8,
+        "purpose": "round-3292036677-fragment-jitter",
+        "node_name": "fragmentation_jitter",
+        "provider_class": "MacOSSystemEntropyProvider",
+        "endpoint": "file:///dev/urandom",
+        "health_state": "ready",
+        "hard_block_triggered": false,
+        "failure_class": "",
+        "degraded": false,
+        "reason": ""
+      },
+      "action_sample": {
+        "source": "macos_os_urandom",
+        "fetched_at": "2026-04-13T03:36:01Z",
+        "batch_id": "macos-1818ec03480a",
+        "byte_start": 168,
+        "byte_length": 8,
+        "purpose": "round-3292036677-action-sample",
+        "node_name": "action_sample",
+        "provider_class": "MacOSSystemEntropyProvider",
+        "endpoint": "file:///dev/urandom",
+        "health_state": "ready",
+        "hard_block_triggered": false,
+        "failure_class": "",
+        "degraded": false,
+        "reason": ""
+      }
+    },
+    "entropy_ref": {
+      "source": "macos_os_urandom",
+      "fetched_at": "2026-04-13T03:36:01Z",
+      "batch_id": "macos-1818ec03480a",
+      "byte_start": 128,
+      "byte_length": 8,
+      "purpose": "round-3292036677-xi-emo",
+      "node_name": "xi_emo",
+      "provider_class": "MacOSSystemEntropyProvider",
+      "endpoint": "file:///dev/urandom",
+      "health_state": "ready",
+      "hard_block_triggered": false,
+      "failure_class": "",
+      "degraded": false,
+      "reason": ""
+    }
+  },
+  "conflict_arbitration": {
+    "score": 0.5591,
+    "total_score": 0.5591,
+    "components": {
+      "proposal_divergence": 0.4123,
+      "veto_tension": 0.12,
+      "value_gap": 1.0,
+      "relation_risk_gap": 0.3979,
+      "body_gap": 0.7108
+    },
+    "priority_signals": {
+      "body_safety": 0.595,
+      "budget_overload": 0.7722,
+      "relation_boundary": 0.3873,
+      "task_goal": 0.9331,
+      "immediate_desire": 0.2841,
+      "roaming": 0.2
+    },
+    "dominant_conflicts": [
+      "value_gap",
+      "body_gap"
+    ],
+    "winning_priority": null,
+    "passes": [
+      {
+        "pass_index": 0,
+        "assessment": {
+          "score": 0.5591,
+          "total_score": 0.5591,
+          "components": {
+            "proposal_divergence": 0.4123,
+            "veto_tension": 0.12,
+            "value_gap": 1.0,
+            "relation_risk_gap": 0.3979,
+            "body_gap": 0.7108
+          },
+          "priority_signals": {
+            "body_safety": 0.595,
+            "budget_overload": 0.7722,
+            "relation_boundary": 0.3873,
+            "task_goal": 0.9331,
+            "immediate_desire": 0.2841,
+            "roaming": 0.2
+          },
+          "dominant_conflicts": [
+            "value_gap",
+            "body_gap"
+          ],
+          "critical_conflict": false
+        },
+        "resolution": {
+          "flag": false,
+          "winning_priority": null,
+          "blocked_actions": [],
+          "action_scales": {},
+          "applied_template": null,
+          "reason": "below_conflict_threshold",
+          "post_error_adjustment": {
+            "triggered": false,
+            "reason": "",
+            "winning_priority": null,
+            "template": null,
+            "top_action_before": null,
+            "top_action_after": null,
+            "blocked_actions": [],
+            "safe_mode_delta": "unchanged"
+          },
+          "repair_transition": {},
+          "repair_state_snapshot": {
+            "stage": "idle",
+            "active": false,
+            "last_reason": "",
+            "last_transition_round": 0,
+            "cooldown_rounds_remaining": 0,
+            "last_template": null,
+            "last_winning_priority": null
+          },
+          "repair_ledger_tail": []
+        },
+        "resample_requested": false
+      }
+    ],
+    "compromise": {
+      "triggered": false,
+      "template": null,
+      "winning_priority": null,
+      "reason": ""
+    },
+    "critical_conflict": false,
+    "critical_conflict_streak": 0,
+    "circuit_breaker": {
+      "triggered": false,
+      "active": false,
+      "hot_rounds_remaining": 0,
+      "recovery_rounds_remaining": 0,
+      "blocked_actions": []
+    },
+    "allowed_resamples": 0,
+    "deadlock_fuse_triggered": false,
+    "repair_mode": null,
+    "post_error_adjustment": {
+      "triggered": false,
+      "reason": "",
+      "winning_priority": null,
+      "template": null,
+      "top_action_before": "respond",
+      "top_action_after": "respond",
+      "blocked_actions": [],
+      "safe_mode_delta": "unchanged"
+    },
+    "repair_transition": {
+      "from_stage": "idle",
+      "to_stage": "idle",
+      "reason": "idle",
+      "changed": false,
+      "safe_mode_delta": "unchanged"
+    },
+    "repair_state_snapshot": {
+      "stage": "idle",
+      "active": false,
+      "last_reason": "idle",
+      "last_transition_round": 9,
+      "cooldown_rounds_remaining": 0,
+      "last_template": null,
+      "last_winning_priority": null
+    },
+    "repair_ledger_tail": [],
+    "conflict_safe_mode_owned": false,
+    "hard_masked_targets": [],
+    "winner_peak_posterior": {
+      "monologue": 0.001979,
+      "die": 0.000255,
+      "wander": 0.000339,
+      "nothing": 0.000442,
+      "recall": 0.027905,
+      "short_reply": 0.001549,
+      "rest": 0.000953,
+      "absorb": 0.002433,
+      "clarify": 0.029602,
+      "respond": 0.845059,
+      "plan": 0.071063,
+      "connect": 0.018422
+    },
+    "conflict_mode": "none"
+  },
+  "event_log_ref": {
+    "round_trace_ref": "round://9",
+    "round_trace_jsonl": "/Users/fantasylee/类脑架构/.tmp_acceptance_16/probe-runtime/.alive/traces/round_traces.jsonl",
+    "command_trace_jsonl": "/Users/fantasylee/类脑架构/.tmp_acceptance_16/probe-runtime/.alive/traces/command_traces.jsonl",
+    "memory_event_ref": "memory://raw/0db2bcfd4805433394d1b641405ffbef/9",
+    "memory_events_jsonl": "/Users/fantasylee/类脑架构/.tmp_acceptance_16/probe-runtime/.alive/memory/raw/episodic_events.jsonl"
+  },
+  "memory_evidence": {
+    "event_log_ref": {
+      "round_trace_ref": "round://9",
+      "round_trace_jsonl": "/Users/fantasylee/类脑架构/.tmp_acceptance_16/probe-runtime/.alive/traces/round_traces.jsonl",
+      "command_trace_jsonl": "/Users/fantasylee/类脑架构/.tmp_acceptance_16/probe-runtime/.alive/traces/command_traces.jsonl",
+      "memory_event_ref": "memory://raw/0db2bcfd4805433394d1b641405ffbef/9",
+      "memory_events_jsonl": "/Users/fantasylee/类脑架构/.tmp_acceptance_16/probe-runtime/.alive/memory/raw/episodic_events.jsonl"
+    },
+    "cue": "topic-3",
+    "hit": true,
+    "miss": false,
+    "mode": "gist",
+    "detail": false,
+    "cue_rescue": false,
+    "interference": 0.1035,
+    "contamination": {
+      "detected": true,
+      "source": "gist_fallback",
+      "detail_loss": true,
+      "tier_fallback": false,
+      "interference": 0.1035
+    },
+    "latency_cost": {
+      "latency_ms": 0,
+      "cost_tier": "hot",
+      "search_trace": {
+        "budget": [
+          "hot"
+        ],
+        "scanned_tiers": [
+          "hot"
+        ]
+      }
+    },
+    "behavioral_consequence": {
+      "selected_action": "respond",
+      "recall_strength": 0.0229,
+      "initiative_top_intent": "stay_silent",
+      "initiative_memory_backing": {
+        "cue": "topic-3",
+        "strength": 0.0229,
+        "summary": "topic-3",
+        "topic_relevance": 1.0,
+        "topic_source": "context_cue"
+      },
+      "probability_peak": {
+        "monologue": 0.001395,
+        "die": 0.000191,
+        "wander": 0.000161,
+        "nothing": 0.000596,
+        "recall": 0.038706,
+        "short_reply": 0.001093,
+        "rest": 0.0007,
+        "absorb": 0.001826,
+        "clarify": 0.020501,
+        "respond": 0.882044,
+        "plan": 0.049705,
+        "connect": 0.003082
+      }
+    }
+  },
+  "arbitration_record": {
+    "competing_proposals": [
+      {
+        "agent_name": "SalienceAgent",
+        "stage": "salience",
+        "top_action": "respond",
+        "selected": true,
+        "gated_actions": []
+      },
+      {
+        "agent_name": "BodyStateAgent",
+        "stage": "body",
+        "top_action": "respond",
+        "selected": true,
+        "gated_actions": []
+      },
+      {
+        "agent_name": "EmotionAgent",
+        "stage": "emotion",
+        "top_action": "",
+        "selected": false,
+        "gated_actions": []
+      },
+      {
+        "agent_name": "RelationshipAgent",
+        "stage": "relationship",
+        "top_action": "respond",
+        "selected": true,
+        "gated_actions": []
+      },
+      {
+        "agent_name": "ResourceAgent",
+        "stage": "resource",
+        "top_action": "respond",
+        "selected": true,
+        "gated_actions": []
+      },
+      {
+        "agent_name": "PFCAgent",
+        "stage": "pfc",
+        "top_action": "recall",
+        "selected": false,
+        "gated_actions": []
+      },
+      {
+        "agent_name": "HabitAgent",
+        "stage": "habit",
+        "top_action": "respond",
+        "selected": true,
+        "gated_actions": []
+      },
+      {
+        "agent_name": "DesireAgent",
+        "stage": "desire",
+        "top_action": "absorb",
+        "selected": false,
+        "gated_actions": []
+      },
+      {
+        "agent_name": "DMNAgent",
+        "stage": "dmn",
+        "top_action": "",
+        "selected": false,
+        "gated_actions": []
+      },
+      {
+        "agent_name": "HippocampusAgent",
+        "stage": "hippocampus",
+        "top_action": "recall",
+        "selected": false,
+        "gated_actions": []
+      },
+      {
+        "agent_name": "PerspectiveModel",
+        "stage": "perspective",
+        "top_action": "clarify",
+        "selected": false,
+        "gated_actions": []
+      },
+      {
+        "agent_name": "ValueAgent",
+        "stage": "value",
+        "top_action": "respond",
+        "selected": true,
+        "gated_actions": []
+      },
+      {
+        "agent_name": "UnconsciousAgent",
+        "stage": "unconscious",
+        "top_action": "respond",
+        "selected": true,
+        "gated_actions": []
+      },
+      {
+        "agent_name": "CerebellarPredictor",
+        "stage": "cerebellar",
+        "top_action": "",
+        "selected": false,
+        "gated_actions": []
+      },
+      {
+        "agent_name": "EndogenousMotivationPool",
+        "stage": "motivation",
+        "top_action": "recall",
+        "selected": false,
+        "gated_actions": []
+      },
+      {
+        "agent_name": "InstinctField",
+        "stage": "instinct",
+        "top_action": "respond",
+        "selected": true,
+        "gated_actions": []
+      },
+      {
+        "agent_name": "EmergentActionSketch",
+        "stage": "emergent",
+        "top_action": "respond",
+        "selected": true,
+        "gated_actions": []
+      }
+    ],
+    "evidence_sources": [
+      "BodyStateAgent",
+      "CerebellarPredictor",
+      "DMNAgent",
+      "DesireAgent",
+      "EmergentActionSketch",
+      "EmotionAgent",
+      "EndogenousMotivationPool",
+      "HabitAgent",
+      "HippocampusAgent",
+      "InstinctField",
+      "PFCAgent",
+      "PerspectiveModel",
+      "RelationshipAgent",
+      "ResourceAgent",
+      "SalienceAgent",
+      "UnconsciousAgent",
+      "ValueAgent"
+    ],
+    "priority_scores": {
+      "SalienceAgent": 0.64,
+      "BodyStateAgent": 0.64,
+      "EmotionAgent": 0.6,
+      "RelationshipAgent": 0.406,
+      "ResourceAgent": 0.58,
+      "PFCAgent": 0.84,
+      "HabitAgent": 0.48,
+      "DesireAgent": 0.54,
+      "DMNAgent": 0.184,
+      "HippocampusAgent": 0.594,
+      "PerspectiveModel": 0.245,
+      "ValueAgent": 0.531,
+      "UnconsciousAgent": 0.42,
+      "CerebellarPredictor": 0.35,
+      "EndogenousMotivationPool": 0.5635,
+      "InstinctField": 0.7898,
+      "EmergentActionSketch": 0.77
+    },
+    "budget_consumption": {
+      "budget_remaining": 0.9994,
+      "resample_count": 0,
+      "window_tool_actions": 0,
+      "window_endogenous_rounds": 0
+    },
+    "selected_winner": "respond",
+    "rejected_options": [
+      {
+        "agent_name": "PFCAgent",
+        "top_action": "recall",
+        "reason": "not_selected"
+      },
+      {
+        "agent_name": "DesireAgent",
+        "top_action": "absorb",
+        "reason": "not_selected"
+      },
+      {
+        "agent_name": "HippocampusAgent",
+        "top_action": "recall",
+        "reason": "not_selected"
+      },
+      {
+        "agent_name": "PerspectiveModel",
+        "top_action": "clarify",
+        "reason": "not_selected"
+      },
+      {
+        "agent_name": "EndogenousMotivationPool",
+        "top_action": "recall",
+        "reason": "not_selected"
+      }
+    ],
+    "hard_masks": [],
+    "consequence_patch": {
+      "repair_state": {
+        "stage": "idle",
+        "active": false,
+        "last_reason": "idle",
+        "last_transition_round": 9,
+        "cooldown_rounds_remaining": 0,
+        "last_template": null,
+        "last_winning_priority": null
+      },
+      "suppressed_actions": [
+        {
+          "kind": "share_memory",
+          "summary": "当前存在对外主动动作，但被运行时边界抑制。",
+          "priority": 0.4248,
+          "channel": "outward",
+          "status": "suppressed",
+          "suppression_reason": "safe_mode"
+        }
+      ],
+      "budget_residue": 0.9994,
+      "scheduled_task_residue": 0,
+      "history_inertia_score": 0.209,
+      "safe_mode_owner": ""
+    }
+  },
+  "history_burden_delta": {
+    "repair_scars_added": 0,
+    "suppressed_patterns_delta": 0,
+    "unfinished_commitments_delta": 0,
+    "meaning_debts_delta": 0,
+    "continuity_shift": 0.0122,
+    "history_inertia_score": 0.209
+  },
+  "snapshot_continuity": {
+    "continuity_nonce": "continuity-3b441cfb702248a8bc0f6f13fb3c0bc0",
+    "runtime_revision": 16,
+    "last_checkpoint_id": "ckpt-0002",
+    "rewind_supported": true,
+    "snapshot_dir": "/Users/fantasylee/类脑架构/.tmp_acceptance_16/probe-runtime/.alive/runtime/snapshots",
+    "self_continuity": 0.9172,
+    "repair_stage": "idle",
+    "history_burden_delta": {
+      "repair_scars_added": 0,
+      "suppressed_patterns_delta": 0,
+      "unfinished_commitments_delta": 0,
+      "meaning_debts_delta": 0,
+      "continuity_shift": 0.0122,
+      "history_inertia_score": 0.209
+    }
+  },
+  "render_plan": {
+    "action": "respond",
+    "expression": {
+      "reply_delay": 0.4599,
+      "latency_style": 0.5529,
+      "sentence_fragmentation": 0.2247,
+      "hedging_level": 0.2143,
+      "warmth_level": 0.4197,
+      "directness_level": 0.708,
+      "self_disclosure": 0.2748,
+      "tone_sharpness": 0.2502,
+      "repair_tendency": 0.4599,
+      "timing_jitter": -0.004,
+      "fragmentation_jitter": 0.0907
+    },
+    "delivery_mode": "speech",
+    "safety_constraints": {
+      "gate": 1.0,
+      "tone_params": {
+        "warmth_level": 0.4197,
+        "directness_level": 0.708,
+        "hedging_level": 0.2143,
+        "repair_tendency": 0.4599
+      },
+      "delay_params": {
+        "reply_delay": 0.4599,
+        "latency_style": 0.5529
+      },
+      "conflict_hot": false,
+      "compromise_template": null,
+      "winning_priority": null,
+      "repair_stage": "idle"
+    },
+    "message_plan": {
+      "intent": "respond",
+      "delivery_mode": "speech",
+      "opening_style": "direct",
+      "warmth": 0.4197,
+      "repair": 0.4599,
+      "scenario": "task",
+      "focus": "respond",
+      "memory_cue": "topic-3",
+      "recall_strength": 0.0229,
+      "slow_variables": {
+        "affect_residue": 0.0442,
+        "mood_level": 0.554,
+        "memory_activation": 0.0229,
+        "memory_interference": 0.1035,
+        "habit_readiness": 0.0591,
+        "resource_scarcity": 0.015,
+        "relationship_drift": 0.0016,
+        "relationship_closeness": 0.5048,
+        "body_energy": 0.7,
+        "salience_shift": 0.0591,
+        "trigger_valence": -0.02,
+        "cue_present": true,
+        "detail_available": false
+      },
+      "shaping_events": [],
+      "repair_expression": {
+        "source": null,
+        "stage": "idle",
+        "visibility": "implicit",
+        "opening_mode": "none",
+        "advance_mode": "normal",
+        "safety_invite": false,
+        "template": null,
+        "transition_reason": "idle"
+      }
+    },
+    "event_summary": "synthetic round 3 task update",
+    "scenario": "task",
+    "target": "sim-user",
+    "relation_state": {
+      "closeness": 0.5047999999999999,
+      "boundary_level": 0.29920000000000013,
+      "relationship_risk": 0.3224000000000001,
+      "privacy_level": 0.8
+    },
+    "perspective": {
+      "state_hypothesis": {},
+      "reaction_hypothesis": {}
+    },
+    "identity_context": {
+      "query_kind": "general",
+      "query_intent": "general_task_push",
+      "query_intent_posterior": {
+        "general_exchange": 0.205882,
+        "general_task_push": 0.264706,
+        "self_model_identity_probe": 0.088235,
+        "provider_lineage_probe": 0.102941,
+        "answer_reason_probe": 0.102941,
+        "capability_boundary_probe": 0.088235,
+        "relational_bid": 0.073529,
+        "self_disclosure_request": 0.073529
+      },
+      "display_label": "霁禾",
+      "class_label": "runtime_instance",
+      "internal_handle": "nalr-0db2bcfd",
+      "aliases": [],
+      "disclosure_detail": "none",
+      "disclosure_intent": "withhold",
+      "disclosure_intent_posterior": {
+        "withhold": 0.486486,
+        "minimal_identity": 0.189189,
+        "anchored_self_description": 0.189189,
+        "provider_origin": 0.0,
+        "process_explanation": 0.108108,
+        "relational_self_disclosure": 0.027027
+      },
+      "disclosure_clipped": [
+        "provider_origin",
+        "relational_self_disclosure"
+      ],
+      "provider_label": "DeepSeek route",
+      "model_label": "deepseek-chat",
+      "evolution_reason": "stable_continuity",
+      "non_interactive_sources": [],
+      "evidence_anchors": [
+        "affect:quiet",
+        "cue:alphaa7f452",
+        "cue:alphba7f452",
+        "energy:steady",
+        "habit:alphba7f452",
+        "memory:alphba7f452",
+        "mood:steady",
+        "relation:user",
+        "resource:open"
+      ],
+      "self_description_sources": [
+        "focus",
+        "memory_cue"
+      ]
+    }
+  },
+  "rendered_expression": {
+    "text": "你刚才提到“synthetic round 3 task update”。 我会顺着这轮留下来的感觉继续说下去。",
+    "route": "renderer",
+    "model": "fallback",
+    "delivery_mode": "speech",
+    "degraded": true,
+    "failure_policy_applied": "fallback_to_rules",
+    "authenticity": {
+      "provider_leak_detected": false,
+      "false_self_claim_detected": false,
+      "self_grounding_score": 0.8,
+      "provider_leak_penalty": 0.0,
+      "false_self_claim_penalty": 0.0,
+      "guard_action": "pass",
+      "violation_types": [],
+      "disclosure_detail": "none",
+      "rename_event": null,
+      "state_sources": [
+        "focus",
+        "memory_cue"
+      ],
+      "candidate_penalties": {
+        "wander": 0.0711,
+        "connect": 0.0711
+      },
+      "sampling_penalty_applied": 0.0012
+    }
+  },
+  "renderer_decision_integrity": {
+    "locked_action": "respond",
+    "render_plan_action": "respond",
+    "post_render_action": "respond",
+    "locked_probability": 0.879589,
+    "gate_at_render": 1.0,
+    "auth_guard_action": "pass",
+    "decision_mutated": false,
+    "renderer_consumes_final_field": true,
+    "mutation_reasons": []
+  },
+  "memory_write_gate": {
+    "cue": "topic-3",
+    "applied": true,
+    "suppressed": false,
+    "reason": "applied",
+    "cue_quality": 0.0,
+    "interference": 0.1035,
+    "interference_source": "topic-2",
+    "resource_pressure": 0.0838,
+    "support_signal": 0.1862,
+    "pollution_risk": 0.241,
+    "episode_id": "ep-dead82166b",
+    "separation_id": "sep-77a803af7a"
+  },
+  "authenticity": {
+    "provider_leak_detected": false,
+    "false_self_claim_detected": false,
+    "self_grounding_score": 0.8,
+    "provider_leak_penalty": 0.0,
+    "false_self_claim_penalty": 0.0,
+    "guard_action": "pass",
+    "violation_types": [],
+    "disclosure_detail": "none",
+    "rename_event": null,
+    "state_sources": [
+      "focus",
+      "memory_cue"
+    ],
+    "candidate_penalties": {
+      "wander": 0.0711,
+      "connect": 0.0711
+    },
+    "sampling_penalty_applied": 0.0012
+  },
+  "identity_evolution": {
+    "internal_handle": "nalr-0db2bcfd",
+    "current_display_name": "霁禾",
+    "aliases": [],
+    "rename_event": null,
+    "rename_reason": "stable_continuity",
+    "evidence_anchors": [
+      "affect:quiet",
+      "cue:alphaa7f452",
+      "cue:alphba7f452",
+      "energy:steady",
+      "habit:alphba7f452",
+      "memory:alphba7f452",
+      "mood:steady",
+      "relation:user",
+      "resource:open"
+    ],
+    "identity_shaping_sources": [],
+    "non_interactive_sources": []
+  },
+  "vitality_snapshot": {
+    "affect_residue": 0.0442,
+    "mood_level": 0.554,
+    "memory_activation": 0.0229,
+    "memory_interference": 0.1035,
+    "habit_readiness": 0.0591,
+    "resource_scarcity": 0.015,
+    "relationship_drift": 0.0016,
+    "relationship_closeness": 0.5048,
+    "body_energy": 0.7,
+    "salience_shift": 0.0591,
+    "trigger_valence": -0.02,
+    "cue_present": true,
+    "detail_available": false,
+    "scenario": "task",
+    "mode": "safe",
+    "cue": "topic-3",
+    "sampled_action": "respond",
+    "habit_takeover": false,
+    "forced_recovery": true,
+    "non_interactive_event_count": 0
+  },
+  "vitality_events": [],
+  "long_run_projection": {
+    "continuity_window": 8,
+    "self_consistency_score": 0.8,
+    "volatility_signal": 0.0442,
+    "non_interactive_shift": 0,
+    "rename_reason": "stable_continuity",
+    "personality_anchor_summary": {
+      "axis_baseline": {
+        "E": 0.786521,
+        "F": 0.472529,
+        "S": 0.586344,
+        "M": 0.769653
+      },
+      "stability": 0.9054,
+      "anchor_alignment": 0.8856,
+      "anchor_drift": 0.0062,
+      "evidence_anchors": [
+        "affect:quiet",
+        "cue:alphaa7f452",
+        "cue:alphba7f452",
+        "energy:steady",
+        "habit:alphba7f452",
+        "memory:alphba7f452",
+        "mood:steady",
+        "relation:user",
+        "resource:open"
+      ],
+      "dominant_actions": [
+        "respond",
+        "recall",
+        "plan",
+        "short_reply"
+      ],
+      "driver_signature": "respond|recall|plan"
+    },
+    "online_prior": {
+      "continuity_window": 8,
+      "self_consistency_score": 0.8,
+      "volatility_signal": 0.0442,
+      "non_interactive_shift": 0,
+      "rename_reason": "",
+      "personality_anchor_summary": {
+        "axis_baseline": {
+          "E": 0.77763,
+          "F": 0.474533,
+          "S": 0.590933,
+          "M": 0.76047
+        },
+        "stability": 0.8947,
+        "anchor_alignment": 0.8738,
+        "anchor_drift": 0.0079,
+        "evidence_anchors": [
+          "affect:quiet",
+          "cue:alphaa7f452",
+          "cue:alphba7f452",
+          "energy:steady",
+          "habit:alphba7f452",
+          "memory:alphba7f452",
+          "mood:steady",
+          "relation:user",
+          "resource:open"
+        ],
+        "dominant_actions": [
+          "respond",
+          "recall",
+          "plan",
+          "short_reply"
+        ],
+        "driver_signature": "respond|recall|plan"
+      }
+    },
+    "anchor_alignment": 0.8856,
+    "anchor_drift": 0.0062
+  },
+  "motivation_pool": {
+    "active_motivations": [
+      {
+        "motivation_id": "memory_exploration",
+        "motivation_type": "memory_exploration",
+        "raw_drive": 0.595795,
+        "source_features": {
+          "recall_strength": 0.0229,
+          "memory_activation": 0.0229,
+          "interference": 0.1035,
+          "meaning_drive": 0.64831,
+          "exploration_drive": 0.058325
+        },
+        "target_actions": {
+          "recall": 0.24,
+          "clarify": 0.08,
+          "plan": 0.06
+        },
+        "state_tags": [
+          "memory",
+          "exploration"
+        ],
+        "audit_reason": "memory prior weak or interference remains elevated"
+      },
+      {
+        "motivation_id": "behavior_exploration",
+        "motivation_type": "behavior_exploration",
+        "raw_drive": 0.514361,
+        "source_features": {
+          "focus_lock_count": 3.0,
+          "self_consistency_score": 0.8,
+          "exploration_drive": 0.058325,
+          "emotion_arousal": 0.0337
+        },
+        "target_actions": {
+          "plan": 0.08,
+          "clarify": 0.12,
+          "wander": 0.18
+        },
+        "state_tags": [
+          "action",
+          "variation"
+        ],
+        "audit_reason": "action field shows lock-in or low novelty tolerance"
+      },
+      {
+        "motivation_id": "relation_calibration",
+        "motivation_type": "relation_calibration",
+        "raw_drive": 0.397713,
+        "source_features": {
+          "relationship_risk": 0.3224,
+          "closeness": 0.5048,
+          "relation_drive": 0.52335
+        },
+        "target_actions": {
+          "connect": 0.12,
+          "clarify": 0.09,
+          "respond": 0.05
+        },
+        "state_tags": [
+          "relation",
+          "boundary"
+        ],
+        "audit_reason": "relation risk remains elevated and needs calibration"
+      },
+      {
+        "motivation_id": "internal_replay",
+        "motivation_type": "internal_replay",
+        "raw_drive": 0.219273,
+        "source_features": {
+          "interference": 0.1035,
+          "affect_residue": 0.0442,
+          "relationship_drift": 0.0016,
+          "meaning_drive": 0.64831,
+          "completion_drive": 0.834505
+        },
+        "target_actions": {
+          "recall": 0.12,
+          "rest": 0.08,
+          "wander": 0.1
+        },
+        "state_tags": [
+          "replay",
+          "internal"
+        ],
+        "audit_reason": "residual conflict and replay pressure stay active"
+      }
+    ],
+    "pool_weight_snapshot": {
+      "memory_exploration": 1.127661,
+      "behavior_exploration": 1.26693,
+      "affect_regulation": 1.021359,
+      "relation_calibration": 1.288289,
+      "internal_replay": 1.26693
+    },
+    "endogenous_activation_score": 0.427024,
+    "last_feedback_update_at": "2026-04-13T03:36:04Z"
+  },
+  "motivation_feedback": {
+    "reward_signal": 0.177188,
+    "records": [
+      {
+        "round_id": "9",
+        "motivation_id": "memory_exploration",
+        "sampled_action": "respond",
+        "user_response": null,
+        "response_latency_ms": null,
+        "affect_delta": {
+          "affect_residue": -0.0442,
+          "body_energy": 0.7
+        },
+        "memory_activation_delta": 0.0229,
+        "relation_delta": -0.0016,
+        "reward_signal": 0.177188,
+        "update_reason": "memory=0.02; grounding=0.80; penalty=0.00"
+      },
+      {
+        "round_id": "9",
+        "motivation_id": "behavior_exploration",
+        "sampled_action": "respond",
+        "user_response": null,
+        "response_latency_ms": null,
+        "affect_delta": {
+          "affect_residue": -0.0442,
+          "body_energy": 0.7
+        },
+        "memory_activation_delta": 0.0229,
+        "relation_delta": -0.0016,
+        "reward_signal": 0.177188,
+        "update_reason": "memory=0.02; grounding=0.80; penalty=0.00"
+      },
+      {
+        "round_id": "9",
+        "motivation_id": "relation_calibration",
+        "sampled_action": "respond",
+        "user_response": null,
+        "response_latency_ms": null,
+        "affect_delta": {
+          "affect_residue": -0.0442,
+          "body_energy": 0.7
+        },
+        "memory_activation_delta": 0.0229,
+        "relation_delta": -0.0016,
+        "reward_signal": 0.177188,
+        "update_reason": "memory=0.02; grounding=0.80; penalty=0.00"
+      },
+      {
+        "round_id": "9",
+        "motivation_id": "internal_replay",
+        "sampled_action": "respond",
+        "user_response": null,
+        "response_latency_ms": null,
+        "affect_delta": {
+          "affect_residue": -0.0442,
+          "body_energy": 0.7
+        },
+        "memory_activation_delta": 0.0229,
+        "relation_delta": -0.0016,
+        "reward_signal": 0.177188,
+        "update_reason": "memory=0.02; grounding=0.80; penalty=0.00"
+      }
+    ],
+    "endogenous_policy_shift": {
+      "recall": 0.29302,
+      "clarify": 0.31338,
+      "plan": 0.133295,
+      "rest": 0.113863,
+      "respond": 0.06004,
+      "connect": 0.154776,
+      "wander": 0.336224
+    }
+  },
+  "initiative": {
+    "proposal_type": "speak",
+    "expression_mode": "silent",
+    "readiness": 0.292883,
+    "posterior": {
+      "share_memory": 0.161742,
+      "check_relation": 0.122278,
+      "express_state": 0.105672,
+      "follow_up_task": 0.067212,
+      "stay_silent": 0.543096
+    },
+    "top_intent": "stay_silent",
+    "top_intent_score": 1.012016,
+    "memory_backing": {
+      "cue": "topic-3",
+      "strength": 0.0229,
+      "summary": "topic-3",
+      "topic_relevance": 1.0,
+      "topic_source": "context_cue"
+    },
+    "grounded_in": {
+      "context": [
+        "idle_seconds:3"
+      ],
+      "memory": [
+        "topic-3"
+      ],
+      "state": [
+        "body_energy:0.7",
+        "relation_strength:0.5048",
+        "boundary_level:0.2992"
+      ]
+    },
+    "grounding_score": 0.431265,
+    "intrinsic_value": 0.36522,
+    "speech_cost": 0.292459,
+    "metrics": {
+      "idle_seconds": 3,
+      "vitality": 0.7,
+      "relation_strength": 0.5048,
+      "habit_strength": 0.3762,
+      "boundary_level": 0.2992,
+      "spontaneous": 0.08,
+      "reject_all": 0.0731,
+      "meaning_density": 0.0,
+      "attachment_need": 0.5508,
+      "boundary_softness": 0.4006,
+      "extraversion": 0.4772,
+      "cognitive_bandwidth": 0.6053,
+      "approach_tension": 0.3301,
+      "social_output_capacity": 0.2888,
+      "memory_is_endogenous": false,
+      "topic_relevance": 1.0,
+      "ignored_ratio": 0.0,
+      "frequency_density": 0.0,
+      "feedback_penalty": 0.0,
+      "interruption_cost": 0.1,
+      "social_risk": 0.1735,
+      "irrelevance_penalty": 0.0
+    },
+    "should_send": false,
+    "suppression_reason": "safe_mode",
+    "target_session_id": null,
+    "proposal_id": "initiative-fd884036bb60",
+    "settings": {
+      "idle_seconds_threshold": 300,
+      "vitality_threshold": 0.8,
+      "relation_strength_threshold": 0.6,
+      "habit_strength_threshold": 0.45,
+      "proposal_posterior_threshold": 0.7,
+      "hourly_limit": 0,
+      "cooldown_seconds": 600,
+      "require_memory_backing": true,
+      "auto_send_enabled": true
+    },
+    "history_stats": {
+      "sent_last_hour": 0,
+      "hourly_limit": 0,
+      "cooldown_remaining_seconds": 0,
+      "last_auto_sent_at": null
+    },
+    "auto_send_enabled": true,
+    "active_session": null,
+    "selected_session_id": null,
+    "selected_session_age_seconds": null,
+    "selected_session_reason": "no_fresh_active_session",
+    "session_fresh": false,
+    "active_session_available": false,
+    "fresh_session_available": false,
+    "monologue_score": 0.0,
+    "run_occupancy": {
+      "run_visible": false,
+      "run_id": "",
+      "run_status": "idle",
+      "run_blocking": false,
+      "run_block_reason": "",
+      "run_block_run_id": "",
+      "run_pending_approval": false,
+      "run_dirty_worktree": false,
+      "run_stop_reason": "",
+      "run_stale_dirty_worktree": false
+    },
+    "rendered_preview": "你刚才提到“synthetic round 3 task update”。 我会顺着这轮留下来的感觉继续说下去。",
+    "source_round_id": 9
+  },
+  "expressive_trace": {
+    "proposal_type": "speak",
+    "expression_mode": "silent",
+    "readiness": 0.292883,
+    "posterior": {
+      "share_memory": 0.161742,
+      "check_relation": 0.122278,
+      "express_state": 0.105672,
+      "follow_up_task": 0.067212,
+      "stay_silent": 0.543096
+    },
+    "top_intent": "stay_silent",
+    "top_intent_score": 1.012016,
+    "memory_backing": {
+      "cue": "topic-3",
+      "strength": 0.0229,
+      "summary": "topic-3",
+      "topic_relevance": 1.0,
+      "topic_source": "context_cue"
+    },
+    "grounded_in": {
+      "context": [
+        "idle_seconds:3"
+      ],
+      "memory": [
+        "topic-3"
+      ],
+      "state": [
+        "body_energy:0.7",
+        "relation_strength:0.5048",
+        "boundary_level:0.2992"
+      ]
+    },
+    "grounding_score": 0.431265,
+    "intrinsic_value": 0.36522,
+    "speech_cost": 0.292459,
+    "metrics": {
+      "idle_seconds": 3,
+      "vitality": 0.7,
+      "relation_strength": 0.5048,
+      "habit_strength": 0.3762,
+      "boundary_level": 0.2992,
+      "spontaneous": 0.08,
+      "reject_all": 0.0731,
+      "meaning_density": 0.0,
+      "attachment_need": 0.5508,
+      "boundary_softness": 0.4006,
+      "extraversion": 0.4772,
+      "cognitive_bandwidth": 0.6053,
+      "approach_tension": 0.3301,
+      "social_output_capacity": 0.2888,
+      "memory_is_endogenous": false,
+      "topic_relevance": 1.0,
+      "ignored_ratio": 0.0,
+      "frequency_density": 0.0,
+      "feedback_penalty": 0.0,
+      "interruption_cost": 0.1,
+      "social_risk": 0.1735,
+      "irrelevance_penalty": 0.0
+    },
+    "should_send": false,
+    "suppression_reason": "safe_mode",
+    "target_session_id": null,
+    "proposal_id": "initiative-fd884036bb60",
+    "settings": {
+      "idle_seconds_threshold": 300,
+      "vitality_threshold": 0.8,
+      "relation_strength_threshold": 0.6,
+      "habit_strength_threshold": 0.45,
+      "proposal_posterior_threshold": 0.7,
+      "hourly_limit": 0,
+      "cooldown_seconds": 600,
+      "require_memory_backing": true,
+      "auto_send_enabled": true
+    },
+    "history_stats": {
+      "sent_last_hour": 0,
+      "hourly_limit": 0,
+      "cooldown_remaining_seconds": 0,
+      "last_auto_sent_at": null
+    },
+    "auto_send_enabled": true,
+    "active_session": null,
+    "selected_session_id": null,
+    "selected_session_age_seconds": null,
+    "selected_session_reason": "no_fresh_active_session",
+    "session_fresh": false,
+    "active_session_available": false,
+    "fresh_session_available": false,
+    "monologue_score": 0.0,
+    "run_occupancy": {
+      "run_visible": false,
+      "run_id": "",
+      "run_status": "idle",
+      "run_blocking": false,
+      "run_block_reason": "",
+      "run_block_run_id": "",
+      "run_pending_approval": false,
+      "run_dirty_worktree": false,
+      "run_stop_reason": "",
+      "run_stale_dirty_worktree": false
+    },
+    "rendered_preview": "你刚才提到“synthetic round 3 task update”。 我会顺着这轮留下来的感觉继续说下去。",
+    "source_round_id": 9,
+    "monologue_stream": {}
+  },
+  "endogenous_tick_reason": {
+    "last_endogenous_tick_at": null,
+    "recent_triggers": [],
+    "suppression_reason": "non_user_or_non_interactive_turn",
+    "last_trigger": {}
+  },
+  "endogenous_policy_shift": {
+    "recall": 0.29302,
+    "clarify": 0.31338,
+    "plan": 0.133295,
+    "rest": 0.113863,
+    "respond": 0.06004,
+    "connect": 0.154776,
+    "wander": 0.336224
+  },
+  "endogenous_trigger_context": null,
+  "endogenous_suppression": {
+    "suppressed": true,
+    "reason": "non_user_or_non_interactive_turn",
+    "details": {
+      "event_source": "simulation",
+      "mode": "safe"
+    }
+  },
+  "micro_intent": null,
+  "endogenous_replay_chain": null,
+  "appraisal_snapshot": {
+    "semantic_valence": 0.0005,
+    "semantic_arousal": 0.0004,
+    "social_approach_pull": 0.5527,
+    "cognitive_load": 0.0,
+    "fatigue_push": 0.0,
+    "inferred_energy_delta": 0.0,
+    "identity_salience": 0.0,
+    "relation_charge": 0.0041,
+    "mood_band": "steady",
+    "energy_band": "steady",
+    "appraisal_band": "muted",
+    "scenario": "task",
+    "mode": "safe"
+  },
+  "state_delta_before_clip": {
+    "mood": -0.0016,
+    "body_energy": 0.0,
+    "affect_residue": 0.0028
+  },
+  "state_delta_after_clip": {
+    "mood": -0.0019,
+    "body_energy": 0.0,
+    "affect_residue": 0.0028
+  },
+  "delta_suppression_reason": [],
+  "run_context": {
+    "active_run_id": null,
+    "run_status": "idle",
+    "current_goal": null,
+    "drive_source": "user_input",
+    "execution_state_visible": true
+  },
+  "run_contamination_detected": false,
+  "identity_evidence_score": 0.0,
+  "identity_trigger_blockers": [
+    "identity_evidence_insufficient"
+  ],
+  "temperament_window_summary": {
+    "attachment_need": {
+      "window_support": 0.0002,
+      "recover_rate": 0.02,
+      "effective_push": -0.0002,
+      "delta_reason": "warm_confirmation",
+      "suppressed_by_clip": false,
+      "freeze_reason": "none"
+    },
+    "boundary_softness": {
+      "window_support": 0.0,
+      "recover_rate": 0.025,
+      "effective_push": -0.0002,
+      "delta_reason": "repeated_rejection",
+      "suppressed_by_clip": false,
+      "freeze_reason": "none"
+    },
+    "cognitive_bandwidth": {
+      "window_support": 0.005,
+      "recover_rate": 0.02,
+      "effective_push": -0.0009,
+      "delta_reason": "resource_pressure",
+      "suppressed_by_clip": false,
+      "freeze_reason": "none"
+    },
+    "desire_priority": {
+      "window_support": 0.0001,
+      "recover_rate": 0.02,
+      "effective_push": -0.0002,
+      "delta_reason": "identity_repetition",
+      "suppressed_by_clip": false,
+      "freeze_reason": "none"
+    },
+    "extraversion": {
+      "window_support": 0.0006,
+      "recover_rate": 0.02,
+      "effective_push": -0.0003,
+      "delta_reason": "withdrawal_pressure",
+      "suppressed_by_clip": false,
+      "freeze_reason": "none"
+    },
+    "patience": {
+      "window_support": 0.005,
+      "recover_rate": 0.03,
+      "effective_push": -0.0007,
+      "delta_reason": "sustained_friction",
+      "suppressed_by_clip": false,
+      "freeze_reason": "none"
+    },
+    "sensitivity": {
+      "window_support": 0.0,
+      "recover_rate": 0.02,
+      "effective_push": -0.0001,
+      "delta_reason": "repeated_rejection",
+      "suppressed_by_clip": false,
+      "freeze_reason": "none"
+    }
+  },
+  "dream_run_id": null,
+  "dream_trigger": null,
+  "dream_guard_summary": {},
+  "dream_trace_ref": null,
+  "dream_effect_summary": {},
+  "model_call_traces": [],
+  "runtime_metrics": {
+    "route_type": "task_run",
+    "model_call_count": 0,
+    "parallel_task_count": 6,
+    "parallel_groups": [
+      "intent_prefetch",
+      "output_profiles",
+      "salience_value_prefetch"
+    ],
+    "optional_timeout_count": 0,
+    "speculative_drop_count": 0,
+    "total_model_wait_ms": 0,
+    "total_turn_ms": 1914
+  },
+  "resample_count": 0
+}

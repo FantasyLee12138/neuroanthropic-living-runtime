@@ -444,6 +444,41 @@ def test_personality_anchor_uses_subject_vector_ema_update_without_new_storage(t
     assert updated.axis_baseline["M"] < 0.45
 
 
+def test_personality_anchor_uses_recent_round_window_without_full_history_scan(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="请留下一轮最近动作，供人格锚点读取。",
+            target="user",
+            cue="anchor-window",
+        ),
+        scenario="task",
+        mode="interactive",
+    )
+    state = controller.load_runtime_state()
+    state.round_count = 4
+    state.personality_anchor.axis_baseline = {"E": 0.5, "F": 0.5, "S": 0.5, "M": 0.5}
+    state.instinct_field.collapse_trace = {
+        "subject_vector": {"E": 0.2, "F": 0.8, "S": 0.7, "M": 0.3},
+        "match_scores": {"plan": 0.91, "respond": 0.42},
+    }
+
+    monkeypatch.setattr(
+        controller.trace_store,
+        "list_rounds",
+        lambda: (_ for _ in ()).throw(AssertionError("_update_personality_anchor should not scan full history")),
+    )
+
+    updated = controller._update_personality_anchor(
+        state,
+        identity_evidence={"anchors": ["felt:focused"], "signature": "recent-round-window"},
+    )
+
+    assert updated.axis_baseline["F"] > 0.55
+    assert updated.action_bias["plan"] > 0.0
+
+
 def test_emergent_action_contribution_projects_sketch_vector_back_into_neighbor_actions(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     state = controller.load_runtime_state()

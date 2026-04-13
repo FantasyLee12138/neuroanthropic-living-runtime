@@ -1,0 +1,132 @@
+[
+  {
+    "pattern": "alphaa7f452",
+    "strength": 0.0651,
+    "count": 1,
+    "recoverable": true,
+    "status": "active",
+    "suppressed_by": null,
+    "suppressed_at_round": null,
+    "context_slot": "user::user",
+    "last_context_recurrence": 0.1,
+    "last_updated_round": 1,
+    "breakthrough_rounds": [
+      1
+    ]
+  },
+  {
+    "pattern": "alphba7f452",
+    "strength": 0.3762,
+    "count": 5,
+    "recoverable": true,
+    "status": "active",
+    "suppressed_by": null,
+    "suppressed_at_round": null,
+    "context_slot": "user::user",
+    "last_context_recurrence": 1.0,
+    "last_updated_round": 5,
+    "breakthrough_rounds": [
+      1,
+      2
+    ]
+  },
+  {
+    "pattern": "topic-0",
+    "strength": 0.1288,
+    "count": 2,
+    "recoverable": true,
+    "status": "active",
+    "suppressed_by": null,
+    "suppressed_at_round": null,
+    "context_slot": "simulation::sim-user",
+    "last_context_recurrence": 0.3175,
+    "last_updated_round": 13,
+    "breakthrough_rounds": [
+      6
+    ]
+  },
+  {
+    "pattern": "topic-1",
+    "strength": 0.0594,
+    "count": 1,
+    "recoverable": true,
+    "status": "active",
+    "suppressed_by": null,
+    "suppressed_at_round": null,
+    "context_slot": "simulation::sim-user",
+    "last_context_recurrence": 0.2347,
+    "last_updated_round": 7,
+    "breakthrough_rounds": []
+  },
+  {
+    "pattern": "topic-2",
+    "strength": 0.0648,
+    "count": 1,
+    "recoverable": true,
+    "status": "active",
+    "suppressed_by": null,
+    "suppressed_at_round": null,
+    "context_slot": "simulation::sim-user",
+    "last_context_recurrence": 0.2257,
+    "last_updated_round": 8,
+    "breakthrough_rounds": [
+      8
+    ]
+  },
+  {
+    "pattern": "topic-3",
+    "strength": 0.0591,
+    "count": 1,
+    "recoverable": true,
+    "status": "active",
+    "suppressed_by": null,
+    "suppressed_at_round": null,
+    "context_slot": "simulation::sim-user",
+    "last_context_recurrence": 0.2229,
+    "last_updated_round": 9,
+    "breakthrough_rounds": []
+  },
+  {
+    "pattern": "topic-4",
+    "strength": 0.0648,
+    "count": 1,
+    "recoverable": true,
+    "status": "active",
+    "suppressed_by": null,
+    "suppressed_at_round": null,
+    "context_slot": "simulation::sim-user",
+    "last_context_recurrence": 0.2244,
+    "last_updated_round": 10,
+    "breakthrough_rounds": [
+      10
+    ]
+  },
+  {
+    "pattern": "topic-5",
+    "strength": 0.0591,
+    "count": 1,
+    "recoverable": true,
+    "status": "active",
+    "suppressed_by": null,
+    "suppressed_at_round": null,
+    "context_slot": "simulation::sim-user",
+    "last_context_recurrence": 0.2225,
+    "last_updated_round": 11,
+    "breakthrough_rounds": []
+  },
+  {
+    "pattern": "topic-6",
+    "strength": 0.0648,
+    "count": 1,
+    "recoverable": true,
+    "status": "active",
+    "suppressed_by": null,
+    "suppressed_at_round": null,
+    "context_slot": "simulation::sim-user",
+    "last_context_recurrence": 0.2243,
+    "last_updated_round": 12,
+    "breakthrough_rounds": [
+      12
+    ]
+  }
+]

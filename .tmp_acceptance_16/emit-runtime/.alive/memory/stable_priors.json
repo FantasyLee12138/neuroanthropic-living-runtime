@@ -1,0 +1,38 @@
+[
+  {
+    "cue": "alphab2b331",
+    "weight": 0.0161
+  },
+  {
+    "cue": "alphbb2b331",
+    "weight": 0.4523
+  },
+  {
+    "cue": "topic-0",
+    "weight": 0.0294
+  },
+  {
+    "cue": "topic-1",
+    "weight": 0.0047
+  },
+  {
+    "cue": "topic-2",
+    "weight": 0.0037
+  },
+  {
+    "cue": "topic-3",
+    "weight": 0.0033
+  },
+  {
+    "cue": "topic-4",
+    "weight": 0.0036
+  },
+  {
+    "cue": "topic-5",
+    "weight": 0.0033
+  },
+  {
+    "cue": "topic-6",
+    "weight": 0.0035
+  }
+]

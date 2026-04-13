@@ -1,63 +1,57 @@
-# NALR 1.5 Front Door
+# NALR
 
-NALR 的当前公开主线是 `1.5`。这个版本的目标不是继续堆概念，而是把 TLH runtime、observer/workbench、terminal、启动器、服务端常驻和验收体系收敛成一个可运行、可打开、可长期在线的整体。
+NALR 当前主线是 `1.6` / `Chat Kernel V2`。默认聊天不再走旧的 `full_tick` 全量多 agent 仪式，而是改成稀疏默认、异常加深的路由内核：`chat_micro`、`chat_fast`、`chat_standard`、`chat_deep`。
 
-## 1.5 航标
+根目录只保留三份活文档：[`README.md`](/Users/fantasylee/类脑架构/README.md)、[`架构宣言.md`](/Users/fantasylee/类脑架构/架构宣言.md)、[`PLAN1.6.md`](/Users/fantasylee/类脑架构/PLAN1.6.md)。其余历史根文档已经归档到 [`archive/backup-docs/root`](</Users/fantasylee/类脑架构/archive/backup-docs/root>)。
 
-- **主线版本**：`1.5`
-- **运行理念**：继续坚持 TLH 的单一概率真相面、trace-first、safe mode、approval、memory write gate，不因为交付形态而退化成普通 agent 壳。
-- **交付定义**：
-  - 本地可双击打开的客户端入口
-  - 可 24h 运行的单实例服务端
-  - 一套有文档、有矩阵、有证据的 acceptance program
+## Overview
 
-## 使用入口
+`1.6` 的目标是把聊天内核、memory tier、observer、terminal、workbench 和 trace 合同收口到同一套 V2 语义，而不是继续维护 agent-first 的旧壳。
 
-- `./Open_NALR_Workbench.command`
-  当前 1.5 的本地客户端入口。双击后拉起本地 observer/runtime 服务并打开 workbench。
-- `./alive-observer start`
-  当前 1.5 的本地或远端服务启动入口。
-- `./NALR`
-  终端控制台入口。
-- `./alive`
-  开发、观测、维护和回放入口。
+当前公开语义已经切到：
 
-## 1.5 文档地图
+- route-first: `chat_micro | chat_fast | chat_standard | chat_deep`
+- module-first: `module_model_bindings`、`activation_set`、`memory_tiers_read`
+- packet-first: 普通回合以 `CognitivePacket` 为单次主模型产物
+- memory-first: `hot / warm / cold`
+- background consolidation: 长摘要、compaction、topic clustering 不阻塞首 token
 
-- [`README.md`](/Users/fantasylee/类脑架构/README.md)
-  当前页面，只负责导航和交付入口。
-- [`Think_Like_Human(TLH)_v1.5.md`](/Users/fantasylee/类脑架构/Think_Like_Human(TLH)_v1.5.md)
-  当前 TLH manifesto。
-- [`架构宣言.md`](/Users/fantasylee/类脑架构/架构宣言.md)
-  当前 1.5 架构 doctrine。
-- [`PLANS.md`](/Users/fantasylee/类脑架构/PLANS.md)
-  当前 1.5 ledger 与验证入口。
-- [`BEREAL_v0.6_MASTER_SPEC.md`](/Users/fantasylee/类脑架构/BEREAL_v0.6_MASTER_SPEC.md)
-  冻结的 substrate 文档。
+## What Shipped
 
-## 验收与发布
+- 默认普通聊天已经切到 `chat_fast` + 单次 packet 主路径。
+- `chat_standard` / `chat_deep` 已按显著性、记忆、工具、冲突和 deepen reason 升级。
+- observer `/models/status`、dashboard、terminal summary、workbench 概览已切到 module / route / activation 视图。
+- memory 公共语义已从 `archive` 收束到 `cold`，并保留迁移兼容。
+- 根目录历史文档已归档，README / 计划 / 架构宣言已同步到当前进度。
 
-- [`docs/releases/1.5-acceptance-plan.md`](/Users/fantasylee/类脑架构/docs/releases/1.5-acceptance-plan.md)
-  1.5 的正式验收总计划。
-- [`docs/releases/1.5-acceptance-matrix.md`](/Users/fantasylee/类脑架构/docs/releases/1.5-acceptance-matrix.md)
-  功能矩阵、状态和验证入口。
-- [`docs/deployment/1.5-local-client.md`](/Users/fantasylee/类脑架构/docs/deployment/1.5-local-client.md)
-  本地客户端交付说明。
-- [`docs/deployment/1.5-self-hosted.md`](/Users/fantasylee/类脑架构/docs/deployment/1.5-self-hosted.md)
-  单实例自托管部署说明。
-- [`scripts/acceptance_15.py`](/Users/fantasylee/类脑架构/scripts/acceptance_15.py)
-  可执行的 1.5 acceptance runner，可打印命令计划或直接执行分组验收。
-- [`scripts/local_client_packager.py`](/Users/fantasylee/类脑架构/scripts/local_client_packager.py)
-  当前 bundle-contained 本地客户端的 `.app` materializer，会把 launcher、observer 资源、config 与可复用 runtime 一起打进 bundle。
+## Entry Points
 
-## 当前交付物
+- [`Open_NALR_Workbench.command`](/Users/fantasylee/类脑架构/Open_NALR_Workbench.command): 本地 Workbench 入口
+- [`alive-observer`](/Users/fantasylee/类脑架构/alive-observer): observer / runtime 服务入口
+- [`NALR`](/Users/fantasylee/类脑架构/NALR): 终端控制台入口
+- [`alive`](/Users/fantasylee/类脑架构/alive): 开发、观测、维护、回放入口
 
-- [`Open_NALR_Workbench.command`](/Users/fantasylee/类脑架构/Open_NALR_Workbench.command)
-- [`alive-observer`](/Users/fantasylee/类脑架构/alive-observer)
-- [`NALR_Alive_Console_Product_Design.md`](/Users/fantasylee/类脑架构/NALR_Alive_Console_Product_Design.md)
-- [`NALR_Alive_Console_Product_Design.pdf`](/Users/fantasylee/类脑架构/NALR_Alive_Console_Product_Design.pdf)
-- [`alive trace why latest.json`](/Users/fantasylee/类脑架构/alive%20trace%20why%20latest.json)
+## Verification
 
-## 历史与归档
+这轮迁移里已直接回放过的关键验证包括：
 
-- 历史版本和旧规格见 [`archive/backup-docs/INDEX.md`](/Users/fantasylee/类脑架构/archive/backup-docs/INDEX.md)。
+- `PYTHONPATH=. pytest tests/integration/test_cil_cli.py -q -k 'monologue or snapshot_restore'`
+- `PYTHONPATH=. pytest tests/unit/test_memory_store.py -q`
+- `PYTHONPATH=. pytest tests/unit/test_diagnostics_runtime.py tests/integration/test_cil_cli.py tests/integration/test_dream_bridge_stdio.py tests/unit/test_runtime_controller_facades.py tests/unit/test_async_io_runtime.py -q -k 'not dashboard'`
+- `PYTHONPATH=. pytest tests/integration/test_observer_api.py -q -k 'observer_exposes_model_status or workbench_overview_snapshot_surfaces_persona_mood_from_runtime_state or observer_settings_can_override_newborn_unlocks_and_local_model'`
+- `node --test apps/workbench/src/view-models.test.js`
+- `npm --prefix apps/terminal test -- --run src/panelSummary.test.ts src/state/sessionStore.test.ts`
+
+## Docs
+
+- [`PLAN1.6.md`](/Users/fantasylee/类脑架构/PLAN1.6.md): 当前交付、剩余工作、引用
+- [`架构宣言.md`](/Users/fantasylee/类脑架构/架构宣言.md): 当前架构立场
+- [`docs/releases/1.6-acceptance-plan.md`](/Users/fantasylee/类脑架构/docs/releases/1.6-acceptance-plan.md): 验收计划
+- [`docs/releases/1.6-acceptance-matrix.md`](/Users/fantasylee/类脑架构/docs/releases/1.6-acceptance-matrix.md): 验收矩阵
+- [`docs/releases/1.6-release-notes.md`](/Users/fantasylee/类脑架构/docs/releases/1.6-release-notes.md): release notes
+- [`archive/backup-docs/INDEX.md`](/Users/fantasylee/类脑架构/archive/backup-docs/INDEX.md): 历史文档索引
+
+## Current Gaps
+
+- 真实 24h soak 和更长程 long-run 证据还没补齐。
+- 单实例服务硬化、更多治理策略和更深的恢复对齐仍在后续批次。

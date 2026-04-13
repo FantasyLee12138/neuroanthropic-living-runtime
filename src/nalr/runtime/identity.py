@@ -19,7 +19,7 @@ def _clip(value: float, low: float = 0.0, high: float = 1.0) -> float:
 
 
 class IdentityRuntime:
-    def __init__(self, identity_cfg: dict[str, Any], provider_descriptor: Callable[[], tuple[str, str]]) -> None:
+    def __init__(self, identity_cfg: dict[str, Any], provider_descriptor: Callable[..., tuple[str, str]]) -> None:
         self.identity_cfg = identity_cfg
         self.provider_descriptor = provider_descriptor
         self.intent_runtime = IntentRuntime()
@@ -195,7 +195,7 @@ class IdentityRuntime:
     ) -> IdentityContext:
         query_kind = query_state.legacy_query_kind
         disclosure_detail = self.disclosure_detail(disclosure_state=disclosure_state, scenario=scenario, state=state)
-        provider_label, model_label = self.provider_descriptor()
+        provider_label, model_label = self.provider_descriptor(query_kind=query_kind)
         evolution_reason = ""
         if rename_event is not None:
             evolution_reason = str(rename_event.get("source", "rename"))

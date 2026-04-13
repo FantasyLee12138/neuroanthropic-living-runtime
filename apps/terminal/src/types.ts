@@ -29,7 +29,7 @@ export type InboundBridgeEvent =
   | { type: "user_turn"; session_id: string; text: string }
   | { type: "control_command"; session_id: string; command: BridgeControlCommand; value?: string }
   | { type: "approve"; session_id: string; call_id: string; approved: boolean }
-  | { type: "close_session"; session_id: string; detach?: boolean; transcript_mode?: "full" | "compact" };
+  | { type: "close_session"; session_id: string; detach?: boolean; purge?: boolean; cleanup_old?: boolean; transcript_mode?: "full" | "compact" };
 
 export type OutboundBridgeEvent =
   | { type: "session_started"; session: Record<string, unknown> }
@@ -95,7 +95,7 @@ export type OutboundBridgeEvent =
     }
   | { type: "assistant_final"; session_id?: string; run_id?: string; message: string; payload?: Record<string, unknown>; round_id?: number; trace_ref?: string }
   | { type: "error"; session_id?: string; message: string }
-  | { type: "session_ended"; session: Record<string, unknown> };
+  | { type: "session_ended"; session: Record<string, unknown>; cleaned_session_ids?: string[] };
 
 export type UiLineKind = "user" | "assistant" | "system" | "error";
 
@@ -232,10 +232,18 @@ export interface CurrentRoundState {
   sampledAction: string | null;
   traceRef: string | null;
   routeType?: string | null;
+  routeBudgetMs?: number | null;
   causeType: string | null;
   causeLabel?: string | null;
   mode?: string | null;
   modeLabel?: string | null;
+  activationSet?: string[];
+  activationReason?: string[];
+  memoryTiersRead?: string[];
+  packetSummary?: Record<string, unknown>;
+  backgroundJobs?: Array<Record<string, unknown>>;
+  deepenReason?: string | null;
+  modelCallCount?: number | null;
   totalTurnMs?: number | null;
   modelWaitMs?: number | null;
   localComputeMs?: number | null;

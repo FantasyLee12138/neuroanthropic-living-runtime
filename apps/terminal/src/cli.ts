@@ -4,7 +4,7 @@ import React from "react";
 import { render } from "ink";
 
 import { App } from "./app.js";
-import { PythonBridgeClient, createSessionId, resolveRepoRoot } from "./bridge/client.js";
+import { PythonBridgeClient, createSessionId, registerBridgeProcessCleanup, resolveRepoRoot } from "./bridge/client.js";
 import { createOneShotPrinter } from "./oneShotPrinter.js";
 import { setTerminalTitle } from "./terminalWindow.js";
 
@@ -41,6 +41,7 @@ async function runOneShot(prompt: string): Promise<number> {
   const launchCwd = process.env.NALR_LAUNCH_CWD ?? process.cwd();
   const repoRoot = resolveRepoRoot(launchCwd);
   const bridge = new PythonBridgeClient({ repoRoot, cwd: launchCwd });
+  const unregisterProcessCleanup = registerBridgeProcessCleanup(bridge);
   const sessionId = createSessionId();
   const printEvent = createOneShotPrinter({ write: (text) => process.stdout.write(text) });
   const dispose = bridge.onEvent((event) => {
@@ -54,9 +55,10 @@ async function runOneShot(prompt: string): Promise<number> {
     );
     bridge.send({ type: "user_turn", session_id: sessionId, text: prompt });
     await finalEvent;
-    await bridge.closeSession(sessionId);
+    await bridge.closeSession(sessionId, { purge: true, cleanupOld: true });
     return 0;
   } finally {
+    unregisterProcessCleanup();
     dispose();
     bridge.dispose();
   }
@@ -66,6 +68,7 @@ async function runOneShotControlCommand(command: "dream", value?: string): Promi
   const launchCwd = process.env.NALR_LAUNCH_CWD ?? process.cwd();
   const repoRoot = resolveRepoRoot(launchCwd);
   const bridge = new PythonBridgeClient({ repoRoot, cwd: launchCwd });
+  const unregisterProcessCleanup = registerBridgeProcessCleanup(bridge);
   const sessionId = createSessionId();
   const printEvent = createOneShotPrinter({ write: (text) => process.stdout.write(text) });
   const dispose = bridge.onEvent((event) => {
@@ -79,9 +82,10 @@ async function runOneShotControlCommand(command: "dream", value?: string): Promi
     );
     bridge.send({ type: "control_command", session_id: sessionId, command, value });
     await finalEvent;
-    await bridge.closeSession(sessionId);
+    await bridge.closeSession(sessionId, { purge: true, cleanupOld: true });
     return 0;
   } finally {
+    unregisterProcessCleanup();
     dispose();
     bridge.dispose();
   }
@@ -91,9 +95,15 @@ async function runInteractive(): Promise<void> {
   const launchCwd = process.env.NALR_LAUNCH_CWD ?? process.cwd();
   const repoRoot = resolveRepoRoot(launchCwd);
   const bridge = new PythonBridgeClient({ repoRoot, cwd: launchCwd });
+  const unregisterProcessCleanup = registerBridgeProcessCleanup(bridge);
   setTerminalTitle("NALR");
-  const instance = render(React.createElement(App, { bridge, cwd: launchCwd, repoRoot }));
-  await instance.waitUntilExit();
+  try {
+    const instance = render(React.createElement(App, { bridge, cwd: launchCwd, repoRoot }));
+    await instance.waitUntilExit();
+  } finally {
+    unregisterProcessCleanup();
+    bridge.dispose();
+  }
 }
 
 async function main(): Promise<void> {

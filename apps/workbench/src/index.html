@@ -1,0 +1,782 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NALR 工作台</title>
+    <link rel="stylesheet" href="/dashboard-static/styles.css" />
+  </head>
+  <body>
+    <div class="shell-noise" aria-hidden="true"></div>
+    <div class="shell-grid" aria-hidden="true"></div>
+    <div class="shell-aurora shell-aurora-a" aria-hidden="true"></div>
+    <div class="shell-aurora shell-aurora-b" aria-hidden="true"></div>
+    <div id="workbench-root" data-shell="workbench">
+      <div class="shell-orbit shell-orbit-a" aria-hidden="true"></div>
+      <div class="shell-orbit shell-orbit-b" aria-hidden="true"></div>
+      <div class="shell-ring shell-ring-a" aria-hidden="true"></div>
+      <div class="shell-ring shell-ring-b" aria-hidden="true"></div>
+      <header class="topbar">
+        <div class="brand-block">
+          <div class="eyebrow" data-i18n="brand.eyebrow">运行前台</div>
+          <h1 data-i18n="brand.title">NALR 运行工作台</h1>
+          <p data-i18n="brand.subtitle">把主体、意义、主动性和轮次证据收束到同一个可读前台，先判断状态，再决定往哪里深入。</p>
+          <div class="brand-spectrum" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+        </div>
+
+        <div class="topbar-side">
+          <div class="utility-row">
+            <div id="language-switch" class="language-shell" aria-label="语言切换">
+              <span class="language-label" data-i18n="language.label">语言</span>
+              <div class="language-actions">
+                <button type="button" class="language-button is-active" data-lang="zh-CN">中</button>
+                <button type="button" class="language-button" data-lang="en">EN</button>
+              </div>
+            </div>
+            <div class="clock-pill" id="system-clock">--:--:--</div>
+          </div>
+          <div class="status-mini" id="top-status-mini" data-i18n="status.connecting">正在连接运行体…</div>
+          <div class="topbar-note">
+            <span class="label">阅读顺序</span>
+            <strong>先看运行总览，再进入轮次分析；内在空间和设置只在需要时展开。</strong>
+          </div>
+        </div>
+      </header>
+
+      <section class="command-deck">
+        <nav class="main-nav" aria-label="工作台导航">
+          <button id="nav-overview" class="nav-button active" data-page-target="overview-page" data-i18n="nav.overview">运行总览</button>
+          <button id="nav-analysis" class="nav-button" data-page-target="analysis-page" data-i18n="nav.analysis">工作分析流</button>
+          <button id="nav-inner-space" class="nav-button" data-page-target="inner-space-page" data-i18n="nav.innerSpace">内在空间</button>
+          <button id="nav-chat" class="nav-button" data-page-target="chat-page" data-i18n="nav.chat">对话</button>
+          <button id="nav-settings" class="nav-button" data-page-target="settings-page" data-i18n="nav.settings">设置</button>
+        </nav>
+
+        <section class="health-strip" id="health-strip">
+          <article class="health-chip">
+            <span class="label" data-i18n="health.service">服务健康</span>
+            <strong id="health-service">等待启动数据</strong>
+          </article>
+          <article class="health-chip">
+            <span class="label" data-i18n="health.autonomy">自治脉搏</span>
+            <strong id="health-autonomy">等待启动数据</strong>
+          </article>
+          <article class="health-chip">
+            <span class="label" data-i18n="health.session">会话</span>
+            <strong id="health-session">等待启动数据</strong>
+          </article>
+          <article class="health-chip">
+            <span class="label" data-i18n="health.round">当前轮次</span>
+            <strong id="health-round">等待启动数据</strong>
+          </article>
+          <article class="health-chip">
+            <span class="label" data-i18n="health.model">模型摘要</span>
+            <strong id="health-model">等待启动数据</strong>
+          </article>
+        </section>
+      </section>
+
+      <main class="page-stack runtime-stage" aria-label="运行体页面">
+        <section class="runtime-stage-head" aria-label="运行体阅读引导">
+          <div class="eyebrow">运行界面</div>
+          <p class="runtime-stage-copy">把同一运行体拆成五个稳定阅读面：总览、分析、对话、内在空间与设置。默认先总览，再进入轮次精读。</p>
+        </section>
+        <section id="overview-page" class="page active">
+          <div class="page-frame page-frame-overview">
+            <header class="page-frame-head">
+              <div class="eyebrow">总览首页</div>
+              <p class="page-frame-copy">首页只回答三个问题：它现在稳不稳定、为什么继续、接下来最该看哪一层。</p>
+            </header>
+            <section class="hero-surface hero-surface-overview" id="overview-hero">
+              <div class="hero-copy">
+                <div class="eyebrow" data-i18n="overview.hero.eyebrow">运行前台</div>
+                <h2 data-i18n="overview.hero.title">先看运行体是否稳定</h2>
+                <p id="overview-summary">优先判断主体、意义和主动性有没有收口，再决定是否进入轮次分析或设置页调整边界。</p>
+                <div id="overview-focus-cues" class="hero-cue-list">
+                  <div class="empty-state">等待运行摘要。</div>
+                </div>
+              </div>
+              <aside class="hero-aside hero-control-panel">
+                <div class="hero-actions">
+                  <button id="runtime-start" class="action-button primary" data-i18n="runtime.start">开始运行</button>
+                  <button id="runtime-pause" class="action-button" data-i18n="runtime.pause">暂停自治</button>
+                  <button id="runtime-resume" class="action-button" data-i18n="runtime.resume">恢复任务</button>
+                  <button id="runtime-wake" class="action-button" data-i18n="runtime.wake">回到交互</button>
+                </div>
+                <div class="hero-control-copy">
+                  <p>控制操作只保留开始、暂停、恢复和回到交互四个高频动作，危险项全部留到设置页。</p>
+                  <div class="hero-control-ledger">
+                    <div class="stack-item compact-stack">
+                      <span>推荐路径</span>
+                      <strong>总览确认稳定后，再进入分析阅读流。</strong>
+                    </div>
+                    <div class="stack-item compact-stack">
+                      <span>精读对象</span>
+                      <strong>优先选当前轮次，再核对右侧证据抽屉。</strong>
+                    </div>
+                  </div>
+                </div>
+              </aside>
+            </section>
+
+            <section class="overview-grid">
+            <article class="card card-feature">
+              <div class="section-head">
+                <div>
+                  <h3>主体与意义</h3>
+                  <p class="section-copy">先看它是谁、现在为什么继续，以及哪些承诺还在前台。</p>
+                </div>
+                <span class="pill" id="autonomy-badge">待同步</span>
+              </div>
+              <div id="autonomy-summary" class="stack-list"></div>
+            </article>
+
+            <article class="card card-feature">
+              <div class="section-head">
+                <div>
+                  <h3>主动闭环</h3>
+                  <p class="section-copy">把主动事项、预算、被抑制原因和最近执行动作放在一起读。</p>
+                </div>
+                <span class="pill" id="model-badge">待同步</span>
+              </div>
+              <div id="model-summary" class="stack-list"></div>
+            </article>
+
+            <article class="card">
+              <div class="section-head">
+                <div>
+                  <h3>模型与运行边界</h3>
+                  <p class="section-copy">用最少信息回答当前绑定、学习模式和写入边界是否安全。</p>
+                </div>
+                <span class="pill subtle" data-i18n="common.readonly">只读</span>
+              </div>
+              <div class="meta-grid">
+                <div>
+                  <span class="label">学习模式</span>
+                  <strong id="learning-mode">--</strong>
+                </div>
+                <div>
+                  <span class="label">模型绑定</span>
+                  <strong id="learning-trace">--</strong>
+                </div>
+                <div>
+                  <span class="label">允许域名</span>
+                  <strong id="learning-domains">--</strong>
+                </div>
+                <div>
+                  <span class="label">可写根目录</span>
+                  <strong id="learning-roots">--</strong>
+                </div>
+              </div>
+            </article>
+
+            <article class="card card-tall">
+              <div class="section-head">
+                <div>
+                  <h3>人格状态与最近轮次</h3>
+                  <p class="section-copy">先读当前人格状态，再决定是否下钻到某一轮的完整证据链。</p>
+                </div>
+                <button id="overview-jump-analysis" class="text-button">进入分析阅读流</button>
+              </div>
+              <div class="rounds-toolbar overview-round-toolbar">
+                <label class="compact-select">
+                  <span>快速定位轮次</span>
+                  <select id="overview-round-select"></select>
+                </label>
+                <button id="overview-round-expand" class="text-button">查看全部</button>
+              </div>
+              <p id="overview-persona-summary" class="reading-lead">等待当前人格状态加载。</p>
+              <div id="overview-rounds" class="stack-list"></div>
+            </article>
+            </section>
+          </div>
+        </section>
+
+        <section id="analysis-page" class="page">
+          <div class="page-frame page-frame-analysis">
+            <header class="page-frame-head">
+              <div class="eyebrow">分析阅读流</div>
+              <p class="page-frame-copy">左侧筛轮次，中间顺着主阅读流理解因果链，右侧只放证据和原始数据。</p>
+            </header>
+            <section class="analysis-shell">
+            <aside class="analysis-rail card card-rail">
+              <details class="rail-panel rail-panel-filters" open>
+                <summary class="section-head">
+                  <div>
+                    <h3>筛选与轮次</h3>
+                    <p class="section-copy">先缩小轮次范围，再从当前轮次进入主阅读流。</p>
+                  </div>
+                  <span class="pill subtle">轮次精读</span>
+                </summary>
+                <div class="filter-grid compact-filter-grid">
+                  <label>
+                    <span>轮次</span>
+                    <input id="filter-round" type="text" placeholder="426" data-i18n-placeholder="analysis.filters.round.placeholder" />
+                  </label>
+                  <label>
+                    <span>动作</span>
+                    <select id="filter-action">
+                      <option value="" data-i18n="analysis.filters.action.all">全部动作</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span data-i18n="analysis.filters.cause">来源</span>
+                    <select id="filter-cause">
+                      <option value="" data-i18n="analysis.filters.cause.all">全部来源</option>
+                      <option value="user" data-i18n="analysis.filters.cause.user">用户触发</option>
+                      <option value="endogenous" data-i18n="analysis.filters.cause.endogenous">内源触发</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>路径</span>
+                    <select id="filter-route">
+                      <option value="" data-i18n="analysis.filters.route.all">全部路径</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>主动性</span>
+                    <select id="filter-initiative">
+                      <option value="" data-i18n="analysis.filters.initiative.all">全部</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span data-i18n="analysis.filters.activity">工具/审批</span>
+                    <select id="filter-activity">
+                      <option value="" data-i18n="analysis.filters.activity.all">全部</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="rounds-toolbar analysis-round-toolbar">
+                  <label class="compact-select">
+                    <span>当前轮次</span>
+                    <select id="analysis-round-select"></select>
+                  </label>
+                  <button id="analysis-round-toggle" class="text-button">展开全部</button>
+                </div>
+                <div id="analysis-round-list" class="round-list compact-round-list"></div>
+              </details>
+              <article class="rail-note">
+                <div class="section-head section-head-compact">
+                  <div>
+                    <h3>阅读顺序</h3>
+                    <p class="section-copy">主阅读流只保留实时摘要、为什么这样做、完整脑流、为什么不是和时间线。</p>
+                  </div>
+                </div>
+                <div class="secondary-list">
+                  <div class="list-row compact-row">
+                    <span>先看实时摘要</span>
+                    <strong>确认当前动作、主动性和冲突强度</strong>
+                  </div>
+                  <div class="list-row compact-row">
+                    <span>再读决策与未采纳</span>
+                    <strong>理解为什么选它、为什么没有走其他路</strong>
+                  </div>
+                  <div class="list-row compact-row">
+                    <span>最后核对右侧证据</span>
+                    <strong>把概率、贡献、门控和原始数据对齐</strong>
+                  </div>
+                </div>
+              </article>
+            </aside>
+
+            <section class="analysis-cortex" id="analysis-cortex">
+              <div class="analysis-toolbar" aria-label="分析阅读操作">
+                <div class="analysis-toolbar-copy">
+                  <div class="eyebrow">轮次阅读</div>
+                  <strong>围绕当前轮次一路读完，不再来回切多个入口。</strong>
+                  <p>刷新当前视图、回到当前轮次，或快速跳到最新轮次。</p>
+                </div>
+                <div class="analysis-toolbar-actions">
+                  <span class="pill subtle" id="analysis-view-state">等待轮次</span>
+                  <button id="analysis-view-refresh" type="button" class="action-button analysis-toolbar-button">刷新</button>
+                  <button id="analysis-view-current" type="button" class="action-button analysis-toolbar-button">当前</button>
+                  <button id="analysis-view-latest" type="button" class="action-button analysis-toolbar-button">最新</button>
+                </div>
+              </div>
+
+              <div class="analysis-reading-layout">
+                <div class="analysis-main-flow">
+                  <article class="card cortex-live-card">
+                    <div class="section-head">
+                      <div>
+                        <h3>实时摘要</h3>
+                        <p class="section-copy">先用一块主阅读区确认当前动作、主动性、冲突和阶段状态。</p>
+                      </div>
+                      <span class="pill" id="selected-round-badge">未选择轮次</span>
+                    </div>
+                    <div class="cortex-live-grid">
+                      <div id="analysis-live-copy" class="cortex-live-copy">
+                        <div class="empty-state">等待轮次数据。</div>
+                      </div>
+                      <div id="analysis-trend-stats" class="cortex-live-stats">
+                        <div class="empty-state">参数统计会在这里出现。</div>
+                      </div>
+                    </div>
+                  </article>
+
+                  <article class="card reading-panel">
+                    <div class="section-head">
+                      <div>
+                        <h3>为什么这样做</h3>
+                        <p class="section-copy">先读本轮结论、驱动与关键证据卡。</p>
+                      </div>
+                    </div>
+                    <div id="analysis-why" class="reading-flow"></div>
+                  </article>
+
+                  <article class="card cortex-trend-card" id="analysis-trend-panel">
+                    <div class="section-head">
+                      <div>
+                        <h3>参数时序曲线</h3>
+                        <p class="section-copy">把基础驱动力、最终胜出概率和习惯牵引强度挂到同一时间轴上，并保留回放。</p>
+                      </div>
+                      <span class="pill subtle">三条指标同轴阅读</span>
+                    </div>
+                    <div id="analysis-trend-legend" class="trend-legend"></div>
+                    <div id="analysis-trend-replay-controls" class="trend-replay-toolbar">
+                      <div class="empty-state">等待回放帧。</div>
+                    </div>
+                    <div id="analysis-trend-svg" class="trend-chart-shell">
+                      <div class="empty-state">等待时序数据。</div>
+                    </div>
+                    <div id="analysis-trend-frame-strip" class="trend-frame-strip" role="list" aria-label="趋势回放帧条">
+                      <div class="empty-state">等待回放帧。</div>
+                    </div>
+                  </article>
+
+                  <article class="card cortex-brainflow-card">
+                    <div class="section-head">
+                      <div>
+                        <h3>完整脑流</h3>
+                        <p class="section-copy">顺着记忆调取、候选生成、注意采样、守卫校验、冲突修复到输出收口一路读完。</p>
+                      </div>
+                      <span class="pill subtle">脑流阶段</span>
+                    </div>
+                    <div id="analysis-brainflow" class="brainflow-shell">
+                      <div class="empty-state">等待脑流数据。</div>
+                    </div>
+                    <div id="analysis-brainflow-output" class="brainflow-output">
+                      <div class="empty-state">输出话术会在这里展开。</div>
+                    </div>
+                  </article>
+
+                  <article class="card reading-panel">
+                    <div class="section-head">
+                      <div>
+                        <h3>为什么不是</h3>
+                        <p class="section-copy">保留被压制和未采纳的路径，避免只见最后赢家。</p>
+                      </div>
+                    </div>
+                    <div id="analysis-why-not" class="reading-flow"></div>
+                  </article>
+
+                  <article class="card reading-panel">
+                    <div class="section-head">
+                      <div>
+                        <h3>时间线与冲突修复</h3>
+                        <p class="section-copy">用时间顺序串起阶段变化、冲突点和修复动作。</p>
+                      </div>
+                    </div>
+                    <div id="analysis-timeline" class="timeline-list"></div>
+                  </article>
+                </div>
+
+                <aside class="analysis-side-rail" id="analysis-evidence-drawers">
+                  <article class="card support-panel">
+                    <div class="section-head">
+                      <div>
+                        <h3>概率层</h3>
+                        <p class="section-copy">只在这里核对概率层与后验分布，不打断主阅读流。</p>
+                      </div>
+                      <span class="pill subtle">证据</span>
+                    </div>
+                    <div id="analysis-probability" class="stack-list"></div>
+                  </article>
+
+                  <article class="card support-panel">
+                    <div class="section-head">
+                      <div>
+                        <h3>贡献叠加</h3>
+                        <p class="section-copy">拆开看每个模块如何推动最终动作。</p>
+                      </div>
+                    </div>
+                    <div id="analysis-contributions" class="stack-list"></div>
+                  </article>
+
+                  <article class="card support-panel">
+                    <div class="section-head">
+                      <div>
+                        <h3>模型路由</h3>
+                        <p class="section-copy">核对绑定、路由和实际调用痕迹。</p>
+                      </div>
+                    </div>
+                    <div id="analysis-model-route" class="stack-list"></div>
+                  </article>
+
+                  <article class="card support-panel">
+                    <div class="section-head">
+                      <div>
+                        <h3>来源链接与门控</h3>
+                        <p class="section-copy">把接口路径、门控、工具和审批线索集中收口。</p>
+                      </div>
+                    </div>
+                    <div id="analysis-links" class="stack-list analysis-links-shell"></div>
+                  </article>
+
+                  <article class="card raw-card support-panel">
+                    <div class="section-head">
+                      <div>
+                        <h3>原始数据</h3>
+                        <p class="section-copy">原始响应只留在侧栏底部，供核对和排查时使用。</p>
+                      </div>
+                    </div>
+                    <pre id="analysis-raw-json">等待轮次数据。</pre>
+                  </article>
+                </aside>
+              </div>
+            </section>
+            </section>
+          </div>
+        </section>
+
+        <section id="chat-page" class="page">
+          <div class="page-frame page-frame-chat">
+            <header class="page-frame-head">
+              <div class="eyebrow">对话通道</div>
+              <p class="page-frame-copy">保持简洁输入输出，主推理阅读转移至分析页。</p>
+            </header>
+            <section class="chat-shell">
+            <article class="card chat-stage">
+              <div class="section-head">
+                <div>
+                  <h3 data-i18n="chat.title">对话</h3>
+                  <p class="section-copy" data-i18n="chat.copy">保留轻量输入面，主分析阅读迁移到分析工作台。</p>
+                </div>
+              </div>
+              <div class="chat-intro" data-i18n="chat.intro">这里保留简洁对话入口，但主分析任务已经转移到分析工作台，不再把命令面板当作主要阅读方式。</div>
+              <div class="chat-toolbar">
+                <div class="chat-toolbar-copy">
+                  <span class="pill" id="chat-session-state">会话未建立</span>
+                  <span class="chat-toolbar-note">历史消息按气泡阅读，新的输入从底部进入。</span>
+                </div>
+                <button id="chat-clear" type="button" class="action-button chat-clear-button" data-i18n="chat.clear">清空聊天记录</button>
+              </div>
+              <div class="chat-history" aria-live="polite" aria-relevant="additions text">
+                <div id="chat-messages" class="message-list"></div>
+              </div>
+              <div class="chat-compose">
+                <textarea id="chat-input" placeholder="输入消息，读取当前运行体状态。" data-i18n-placeholder="chat.input.placeholder"></textarea>
+                <button id="chat-send" class="action-button primary" data-i18n="chat.send">发送</button>
+              </div>
+            </article>
+            </section>
+          </div>
+        </section>
+
+        <section id="inner-space-page" class="page">
+          <div class="page-frame page-frame-inner-space">
+            <header class="page-frame-head">
+              <div class="eyebrow">内在空间通道</div>
+              <p class="page-frame-copy">将自我叙述、思考、回忆与梦境分层展开，保持连续感。</p>
+            </header>
+            <section class="inner-space-shell">
+            <article class="card inner-space-narrative">
+              <div class="section-head">
+                <div>
+                  <div class="eyebrow">内在空间</div>
+                  <h2>自我叙述</h2>
+                  <p class="section-copy">把当前内在状态放到一张可读的页面上，先看叙述，再看思考、回忆和梦境。</p>
+                </div>
+                <span class="pill subtle" id="inner-space-status">等待输入</span>
+              </div>
+              <div id="inner-space-self-narrative" class="inner-space-narrative-flow">
+                <div class="reading-lead">这里保留一个顶层自我叙述容器，后续由 JS 注入当前内在状态、语气和摘要。</div>
+              </div>
+            </article>
+
+            <section class="inner-space-grid">
+              <article class="card inner-space-panel inner-space-thinking-panel">
+                <div class="section-head">
+                  <div>
+                    <h3>思考</h3>
+                    <p class="section-copy">保留当前思路、推演链和未完成的判断。</p>
+                  </div>
+                  <span class="pill subtle">思考</span>
+                </div>
+                <div id="inner-space-thinking" class="stack-list inner-space-feed">
+                  <div class="empty-state">思考片段会在这里展开。</div>
+                </div>
+              </article>
+
+              <article class="card inner-space-panel inner-space-memory-panel">
+                <div class="section-head">
+                  <div>
+                    <h3>回忆</h3>
+                    <p class="section-copy">保留可回溯的记忆线索、锚点和关联片段。</p>
+                  </div>
+                  <span class="pill subtle">记忆</span>
+                </div>
+                <div id="inner-space-memory" class="stack-list inner-space-feed">
+                  <div class="empty-state">记忆条目会在这里展开。</div>
+                </div>
+              </article>
+
+              <article class="card inner-space-panel inner-space-dream-panel">
+                <div class="section-head">
+                  <div>
+                    <h3>梦境</h3>
+                    <p class="section-copy">保留夜间整理留下来的意象、联想和未命名的愿景。</p>
+                  </div>
+                  <span class="pill subtle">梦境</span>
+                </div>
+                <div id="inner-space-dream" class="stack-list inner-space-feed">
+                  <div class="empty-state">梦境片段会在这里展开。</div>
+                </div>
+              </article>
+            </section>
+            </section>
+          </div>
+        </section>
+
+        <section id="settings-page" class="page">
+          <div class="page-frame page-frame-settings">
+            <header class="page-frame-head">
+              <div class="eyebrow">配置通道</div>
+              <p class="page-frame-copy">配置边界、学习与危险控制，保证运行策略可控可追溯。</p>
+            </header>
+            <section class="settings-shell">
+            <article class="card settings-stage">
+              <div class="section-head">
+                <div>
+                  <h3 data-i18n="settings.title">设置</h3>
+                  <p class="section-copy" data-i18n="settings.copy">把主体基线、权限边界、受控学习和模型绑定分层管理，不再和阅读视图混在一起。</p>
+                </div>
+                <div class="settings-actions">
+                  <span class="pill subtle" id="settings-status" data-i18n="settings.status.idle">尚未读取</span>
+                  <button id="save-settings" class="action-button primary" data-i18n="settings.save">保存设置</button>
+                </div>
+              </div>
+
+              <div class="settings-grid">
+                <section class="settings-group settings-group-configuration" aria-labelledby="settings-configuration-title">
+                  <div class="settings-group-head">
+                  <div>
+                      <div class="eyebrow">核心配置</div>
+                      <h3 id="settings-configuration-title">核心配置</h3>
+                      <p class="section-copy">管理启动基线、表达层绑定和模型路由。</p>
+                    </div>
+                    <span class="pill subtle">核心</span>
+                  </div>
+                  <div class="settings-group-body">
+                    <div id="settings-configuration-summary" class="settings-slot stack-list"></div>
+                    <div class="settings-fields">
+                      <div class="toggle-list">
+                        <label class="toggle-row">
+                          <div class="toggle-copy">
+                            <strong data-i18n="settings.clear_safe_mode.title">启动时解除保护锁</strong>
+                            <span class="muted" data-i18n="settings.clear_safe_mode.copy">开始运行时自动解除顶层保护锁。</span>
+                          </div>
+                          <input type="checkbox" id="setting-clear-safe-mode" />
+                        </label>
+                        <label class="toggle-row">
+                          <div class="toggle-copy">
+                            <strong data-i18n="settings.instinct_first.title">新生主体启用本能优先</strong>
+                            <span class="muted" data-i18n="settings.instinct_first.copy">把 instinct_first 作为默认有机模式。</span>
+                          </div>
+                          <input type="checkbox" id="setting-instinct-first" />
+                        </label>
+                      </div>
+                      <div class="settings-form-grid">
+                        <label class="field-stack">
+                          <span data-i18n="settings.spontaneous">初始自发冲动</span>
+                          <input id="setting-spontaneous" type="number" min="0" max="1" step="0.01" />
+                        </label>
+                        <label class="field-stack">
+                          <span data-i18n="settings.boundary">初始边界感</span>
+                          <input id="setting-boundary" type="number" min="0" max="1" step="0.01" />
+                        </label>
+                        <label class="field-stack field-span">
+                          <span data-i18n="settings.felt">初始感受提示词</span>
+                          <input id="setting-felt" type="text" data-i18n-placeholder="settings.felt.placeholder" placeholder="微弱自发冲动、安静但清醒" />
+                        </label>
+                        <label class="field-stack">
+                          <span data-i18n="settings.binding.renderer">认知包绑定</span>
+                          <select id="setting-binding-renderer"></select>
+                        </label>
+                        <label class="field-stack">
+                          <span data-i18n="settings.binding.planner">深度推理绑定</span>
+                          <select id="setting-binding-planner"></select>
+                        </label>
+                        <label class="field-stack">
+                          <span data-i18n="settings.binding.pfc">工具规划绑定</span>
+                          <select id="setting-binding-pfc"></select>
+                        </label>
+                        <label class="field-stack">
+                          <span data-i18n="settings.binding.perspective">深度表达绑定</span>
+                          <select id="setting-binding-perspective"></select>
+                        </label>
+                        <label class="field-stack field-span">
+                          <span data-i18n="settings.binding.consolidation">巩固摘要绑定</span>
+                          <select id="setting-binding-consolidation"></select>
+                        </label>
+                      </div>
+                      <div id="settings-model-summary" class="stack-list"></div>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="settings-group settings-group-diagnostics" aria-labelledby="settings-diagnostics-title">
+                  <div class="settings-group-head">
+                  <div>
+                      <div class="eyebrow">诊断</div>
+                      <h3 id="settings-diagnostics-title">诊断与调试</h3>
+                      <p class="section-copy">集中查看学习、日志、接口状态与可观察证据。</p>
+                    </div>
+                    <span class="pill subtle">inspect</span>
+                  </div>
+                  <div class="settings-group-body">
+                    <div id="settings-diagnostics-summary" class="settings-slot stack-list"></div>
+                    <div class="settings-fields">
+                      <div class="settings-form-grid">
+                        <label class="field-stack">
+                          <span data-i18n="settings.learning_mode">学习模式</span>
+                          <input id="setting-learning-mode" type="text" />
+                        </label>
+                        <label class="field-stack">
+                          <span data-i18n="settings.trace_external_learning">学习追踪</span>
+                          <select id="setting-trace-external-learning">
+                            <option value="true" data-i18n="common.open">开启</option>
+                            <option value="false" data-i18n="common.closed">关闭</option>
+                          </select>
+                        </label>
+                        <label class="field-stack field-span">
+                          <span data-i18n="settings.allowed_domains">允许域名</span>
+                          <textarea id="setting-allowed-domains" rows="3" data-i18n-placeholder="settings.allowed_domains.placeholder" placeholder="docs.python.org, react.dev"></textarea>
+                        </label>
+                        <label class="field-stack field-span">
+                          <span data-i18n="settings.writable_roots">可写根目录</span>
+                          <textarea id="setting-writable-roots" rows="3"></textarea>
+                        </label>
+                        <label class="field-stack field-span">
+                          <span data-i18n="settings.knowledge_roots">知识根目录</span>
+                          <textarea id="setting-knowledge-roots" rows="3"></textarea>
+                        </label>
+                        <label class="field-stack field-span">
+                          <span data-i18n="settings.learning_log_dir">学习日志目录</span>
+                          <input id="setting-learning-log-dir" type="text" />
+                        </label>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="settings-group settings-group-scheduled" aria-labelledby="settings-scheduled-title">
+                  <div class="settings-group-head">
+                  <div>
+                      <div class="eyebrow">计划任务</div>
+                      <h3 id="settings-scheduled-title">计划任务 / Scheduled Tasks</h3>
+                      <p class="section-copy">只读查看当前已登记任务的节奏、技能与目标摘录，不在这里修改调度。</p>
+                    </div>
+                    <span class="pill subtle">read-only</span>
+                  </div>
+                  <div class="settings-group-body">
+                    <div id="settings-scheduled-summary" class="settings-slot stack-list"></div>
+                    <div id="settings-scheduled-list" class="scheduled-task-list"></div>
+                  </div>
+                </section>
+
+                <section class="settings-group settings-group-danger" aria-labelledby="settings-danger-title">
+                  <div class="settings-group-head">
+                  <div>
+                      <div class="eyebrow">危险区</div>
+                      <h3 id="settings-danger-title">危险操作</h3>
+                      <p class="section-copy">把权限边界、预算和回退策略放在一起，避免误触。</p>
+                    </div>
+                    <span class="pill subtle">guarded</span>
+                  </div>
+                  <div class="settings-group-body">
+                    <div id="settings-danger-summary" class="settings-slot stack-list"></div>
+                    <div class="danger-gate" id="settings-danger-gate">
+                      <div class="danger-gate-copy">
+                        <div class="eyebrow">解锁</div>
+                        <strong>先确认，再解锁危险控制</strong>
+                        <p id="settings-danger-notice" class="section-copy">输入确认短语后，才允许提交、网络和外部 IO 这类危险设置参与保存。</p>
+                      </div>
+                      <div class="danger-gate-controls">
+                        <label class="field-stack danger-confirm-field" for="settings-danger-confirm">
+                          <span data-i18n="settings.danger.confirm">确认短语</span>
+                          <input id="settings-danger-confirm" type="text" placeholder="UNLOCK DANGER" data-i18n-placeholder="settings.danger.confirm.placeholder" />
+                        </label>
+                        <button id="settings-danger-unlock" type="button" class="action-button">解锁危险控制</button>
+                      </div>
+                    </div>
+                    <div class="settings-fields settings-danger-controls" id="settings-danger-controls" aria-disabled="true">
+                      <div class="toggle-list">
+                        <label class="toggle-row">
+                          <div class="toggle-copy">
+                            <strong data-i18n="settings.allow_commit.title">允许提交</strong>
+                            <span class="muted" data-i18n="settings.allow_commit.copy">放开 `git commit` 级别的自治写入。</span>
+                          </div>
+                          <input type="checkbox" id="setting-allow-commit" disabled />
+                        </label>
+                        <label class="toggle-row">
+                          <div class="toggle-copy">
+                            <strong data-i18n="settings.network_enabled.title">允许网络</strong>
+                            <span class="muted" data-i18n="settings.network_enabled.copy">记录网络访问边界偏好，供自治策略读取。</span>
+                          </div>
+                          <input type="checkbox" id="setting-network-enabled" disabled />
+                        </label>
+                        <label class="toggle-row">
+                          <div class="toggle-copy">
+                            <strong data-i18n="settings.external_io_enabled.title">允许外部 IO</strong>
+                            <span class="muted" data-i18n="settings.external_io_enabled.copy">记录外部读写边界偏好。</span>
+                          </div>
+                          <input type="checkbox" id="setting-external-io-enabled" disabled />
+                        </label>
+                        <label class="toggle-row">
+                          <div class="toggle-copy">
+                            <strong data-i18n="settings.auto_safe_mode.title">失败后自动回到安全模式</strong>
+                            <span class="muted" data-i18n="settings.auto_safe_mode.copy">触发失败阈值时自动切回保护态。</span>
+                          </div>
+                          <input type="checkbox" id="setting-auto-safe-mode" disabled />
+                        </label>
+                      </div>
+                      <div class="settings-form-grid">
+                        <label class="field-stack">
+                          <span data-i18n="settings.max_rounds_per_hour">每小时内生轮次上限</span>
+                          <input id="setting-max-rounds-per-hour" type="number" min="0" step="1" disabled />
+                        </label>
+                        <label class="field-stack">
+                          <span data-i18n="settings.max_tool_actions_per_hour">每小时工具动作上限</span>
+                          <input id="setting-max-tool-actions-per-hour" type="number" min="0" step="1" disabled />
+                        </label>
+                        <label class="field-stack">
+                          <span data-i18n="settings.failure_trip_threshold">失败熔断阈值</span>
+                          <input id="setting-failure-trip-threshold" type="number" min="1" step="1" disabled />
+                        </label>
+                        <label class="field-stack">
+                          <span data-i18n="settings.quiet_hours">静默时段</span>
+                          <input id="setting-quiet-hours" type="text" data-i18n-placeholder="settings.quiet_hours.placeholder" placeholder="1,2,3" disabled />
+                        </label>
+                      </div>
+                      <button id="settings-persona-reset" type="button" class="action-button danger-button" data-i18n="settings.personaReset">删除当前人格</button>
+                    </div>
+                  </div>
+                </section>
+              </div>
+            </article>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="/dashboard-static/main.js"></script>
+  </body>
+</html>

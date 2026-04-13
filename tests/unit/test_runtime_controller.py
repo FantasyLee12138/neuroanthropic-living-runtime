@@ -5,13 +5,16 @@ import time
 from pathlib import Path
 
 import duckdb
+import nalr.output.renderer as renderer_module
+import nalr.runtime.chat_kernel_v2 as chat_kernel_module
 import pytest
 
 from nalr.agents.modules import ValueAgent
-from nalr.providers.router import ModelResponse
+from nalr.providers.router import ModelRequest, ModelResponse
 from nalr.runtime.controller import RuntimeController
 from nalr.runtime.entropy import QuantumEntropyUnavailableError
 from nalr.runtime.metadata import utc_now_iso
+from nalr.runtime.scheduled_tasks import ScheduledTaskSchedule, ScheduledTaskSpec
 from nalr.schemas.models import (
     ActionCandidate,
     EndogenousTickTrigger,
@@ -185,7 +188,318 @@ def test_model_status_surfaces_route_health_and_recent_model_activity(tmp_path):
     assert status["routes"]["renderer"]["last_failure_reason"] == "fallback_to_rules"
 
 
-def test_model_status_surfaces_agent_tiers_and_bindings(tmp_path):
+def test_metrics_summary_reuses_single_round_summary_and_compact_command_totals(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="记录一下今天的计划和感受。",
+            target="user",
+            cue="计划",
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    original_metrics_round_rows_view = controller.trace_store.metrics_round_rows_view
+    original_command_subjectivity_totals = controller.trace_store.command_subjectivity_totals
+    calls = {"metrics_round_rows": 0, "command_totals": 0}
+
+    def counting_metrics_round_rows_view():
+        calls["metrics_round_rows"] += 1
+        return original_metrics_round_rows_view()
+
+    def counting_command_subjectivity_totals():
+        calls["command_totals"] += 1
+        return original_command_subjectivity_totals()
+
+    monkeypatch.setattr(controller.trace_store, "metrics_round_rows_view", counting_metrics_round_rows_view)
+    monkeypatch.setattr(
+        controller.trace_store,
+        "list_rounds",
+        lambda: (_ for _ in ()).throw(AssertionError("metrics_summary should not call full round scan when summaries exist")),
+    )
+    monkeypatch.setattr(
+        controller.trace_store,
+        "list_round_summaries",
+        lambda: (_ for _ in ()).throw(AssertionError("metrics_summary should use projected round metrics rows")),
+    )
+    monkeypatch.setattr(
+        controller.trace_store,
+        "list_commands",
+        lambda: (_ for _ in ()).throw(AssertionError("metrics_summary should not full-load command payloads")),
+    )
+    monkeypatch.setattr(controller.trace_store, "command_subjectivity_totals", counting_command_subjectivity_totals)
+
+    summary = controller.metrics_summary()
+
+    assert summary["total_rounds"] == 1
+    assert calls["metrics_round_rows"] == 1
+    assert calls["command_totals"] == 1
+
+
+def test_subjectivity_metrics_prefers_compact_totals_without_history_scan(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="记录这轮的主体性来源。",
+            target="user",
+            cue="subjectivity",
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    calls = {"round_totals": 0, "command_totals": 0}
+    original_round_subjectivity_totals = controller.trace_store.round_subjectivity_totals
+    original_command_subjectivity_totals = controller.trace_store.command_subjectivity_totals
+
+    def counting_round_subjectivity_totals():
+        calls["round_totals"] += 1
+        return original_round_subjectivity_totals()
+
+    def counting_command_subjectivity_totals():
+        calls["command_totals"] += 1
+        return original_command_subjectivity_totals()
+
+    monkeypatch.setattr(controller.trace_store, "round_subjectivity_totals", counting_round_subjectivity_totals)
+    monkeypatch.setattr(
+        controller.trace_store,
+        "list_rounds",
+        lambda: (_ for _ in ()).throw(AssertionError("subjectivity_metrics should not full-scan round history")),
+    )
+    monkeypatch.setattr(
+        controller.trace_store,
+        "list_round_summaries",
+        lambda: (_ for _ in ()).throw(AssertionError("subjectivity_metrics should not load round summaries when compact totals exist")),
+    )
+    monkeypatch.setattr(
+        controller.trace_store,
+        "list_commands",
+        lambda: (_ for _ in ()).throw(AssertionError("subjectivity_metrics should not full-load command payloads")),
+    )
+    monkeypatch.setattr(controller.trace_store, "command_subjectivity_totals", counting_command_subjectivity_totals)
+
+    payload = controller.subjectivity_metrics()
+
+    assert payload["subject_core_integrity"] is True
+    assert calls["round_totals"] == 1
+    assert calls["command_totals"] == 1
+
+
+def test_model_status_uses_recent_skill_window_without_full_history_scan(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    def fail_full_scan():
+        raise AssertionError("model_status should not call list_skill_traces full scan")
+
+    monkeypatch.setattr(controller.trace_store, "list_skill_traces", fail_full_scan)
+
+    status = controller.model_status()
+
+    assert "routes" in status
+    assert "pfc" in status["routes"]
+
+
+def test_authenticity_and_vitality_timelines_use_projected_round_metrics_without_full_scan(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="请记住我今天有点疲惫，但还想继续推进。",
+            target="user",
+            cue="疲惫",
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    calls = {"metrics_round_rows": 0}
+    original_metrics_round_rows_view = controller.trace_store.metrics_round_rows_view
+
+    def counting_metrics_round_rows_view():
+        calls["metrics_round_rows"] += 1
+        return original_metrics_round_rows_view()
+
+    monkeypatch.setattr(controller.trace_store, "metrics_round_rows_view", counting_metrics_round_rows_view)
+    monkeypatch.setattr(
+        controller.trace_store,
+        "list_rounds",
+        lambda: (_ for _ in ()).throw(AssertionError("timeline views should not call full round scan when projected rows exist")),
+    )
+    monkeypatch.setattr(
+        controller.trace_store,
+        "list_round_summaries",
+        lambda: (_ for _ in ()).throw(AssertionError("timeline views should not load full round summaries when projected rows exist")),
+    )
+
+    authenticity = controller.authenticity_timeline()
+    vitality = controller.vitality_timeline()
+
+    assert authenticity["points"][-1]["round_id"] == 1
+    assert "self_grounding_score" in authenticity["points"][-1]
+    assert vitality["points"][-1]["round_id"] == 1
+    assert "affect_residue" in vitality["points"][-1]
+    assert calls["metrics_round_rows"] >= 2
+
+
+def test_what_changed_uses_recent_round_window_without_full_history_scan(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(source="user", content="先帮我计划午饭。", target="user", cue="午饭"),
+        scenario="chat",
+        mode="interactive",
+    )
+    controller.tick(
+        RoundEvent(source="user", content="再帮我安排下午。", target="user", cue="下午"),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    calls = {"recent_rounds": 0}
+    original_recent_rounds = controller.trace_store.recent_rounds
+
+    def counting_recent_rounds(*, limit):
+        calls["recent_rounds"] += 1
+        return original_recent_rounds(limit=limit)
+
+    monkeypatch.setattr(
+        controller.trace_store,
+        "list_rounds",
+        lambda: (_ for _ in ()).throw(AssertionError("what_changed should not full-scan round history")),
+    )
+    monkeypatch.setattr(controller.trace_store, "recent_rounds", counting_recent_rounds)
+
+    payload = controller.what_changed(window=2)
+
+    assert payload["window"] == 2
+    assert calls["recent_rounds"] == 1
+
+
+def test_conflict_mode_and_metrics_timelines_avoid_full_round_scan(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    calls = {"metrics_round_rows": 0}
+    projected_row = {
+        "round_id": 7,
+        "scenario": "dream",
+        "sampled_action": "rest",
+        "mode": "sleep",
+        "cause_type": "endogenous",
+        "state_snapshot": {
+            "budget_remaining": 0.42,
+            "conflict_learning_state": {
+                "adjustment_reasons": {"resource": 2},
+                "last_learning_signal": {"source": "repair-ledger"},
+            },
+        },
+        "gate_decisions": [{"stage": "forced_mode_switch"}],
+        "conflict_arbitration": {
+            "total_score": 0.73,
+            "components": {"resource": 0.31, "identity": 0.42},
+            "winning_priority": "safety",
+            "compromise": {"template": "defer"},
+            "critical_conflict": True,
+            "critical_conflict_streak": 2,
+            "circuit_breaker": {"hot_rounds_remaining": 1},
+            "repair_mode": "guided",
+            "repair_state_snapshot": {"stage": "stabilizing"},
+            "post_error_adjustment": {"delta": -0.1},
+            "repair_ledger_summary": {"entries": 3, "latest_reason": "oscillation"},
+            "conflict_safe_mode_owned": True,
+        },
+        "top_drivers": [],
+        "rendered_expression": {"text": "rest"},
+        "render_plan": {"identity_context": {}, "expression": {}},
+        "authenticity": {},
+        "identity_evolution": {},
+        "vitality_snapshot": {},
+        "vitality_events": [],
+        "motivation_pool": {"active_motivations": [], "endogenous_activation_score": 0.0},
+        "endogenous_tick_reason": {"latest_trigger": {"trigger_type": ""}},
+    }
+
+    def counting_metrics_round_rows_view():
+        calls["metrics_round_rows"] += 1
+        return [copy.deepcopy(projected_row)]
+
+    monkeypatch.setattr(
+        controller.trace_store,
+        "recent_rounds",
+        lambda *, limit: (_ for _ in ()).throw(
+            AssertionError("timeline observer endpoints should prefer compact round summaries")
+        ),
+    )
+    monkeypatch.setattr(controller.trace_store, "metrics_round_rows_view", counting_metrics_round_rows_view)
+    monkeypatch.setattr(
+        controller.trace_store,
+        "list_rounds",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("timeline observer endpoints should not full-scan round history via list_rounds")
+        ),
+    )
+    monkeypatch.setattr(
+        controller.trace_store,
+        "list_round_summaries",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("timeline observer endpoints should use projected round metrics rows")
+        ),
+    )
+
+    conflict_payload = controller.conflict_timeline()
+    mode_payload = controller.mode_switch_timeline()
+    metrics_payload = controller.metrics_timeline()
+
+    assert conflict_payload["points"][-1]["round_id"] == 7
+    assert conflict_payload["points"][-1]["conflict_score"] == 0.73
+    assert conflict_payload["points"][-1]["repair_stage"] == "stabilizing"
+    assert conflict_payload["points"][-1]["repair_ledger_summary"]["entries"] == 3
+    assert conflict_payload["points"][-1]["repair_learning"]["adjustment_reasons"] == {"resource": 2}
+    assert mode_payload["points"][-1]["round_id"] == 7
+    assert mode_payload["points"][-1]["mode"] == "sleep"
+    assert mode_payload["points"][-1]["forced_switch"] is True
+    assert metrics_payload["rounds"][-1]["round_id"] == 7
+    assert metrics_payload["rounds"][-1]["conflict_score"] == 0.73
+    assert metrics_payload["rounds"][-1]["budget_remaining"] == 0.42
+    assert calls["metrics_round_rows"] >= 3
+
+
+def test_metrics_summary_fallback_uses_recent_rounds_without_full_scan(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="写一轮用于 metrics fallback 验证。",
+            target="user",
+            cue="metrics-fallback",
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    calls = {"recent_rounds": 0}
+    original_recent_rounds = controller.trace_store.recent_rounds
+
+    def counting_recent_rounds(*, limit):
+        calls["recent_rounds"] += 1
+        return original_recent_rounds(limit=limit)
+
+    monkeypatch.setattr(controller.trace_store, "recent_rounds", counting_recent_rounds)
+    monkeypatch.setattr(controller.trace_store, "metrics_round_rows_view", None)
+    monkeypatch.setattr(controller.trace_store, "list_round_summaries", None)
+    monkeypatch.setattr(
+        controller.trace_store,
+        "list_rounds",
+        lambda: (_ for _ in ()).throw(AssertionError("metrics_summary fallback should avoid full round scan")),
+    )
+
+    payload = controller.metrics_summary()
+
+    assert payload["total_rounds"] == 1
+    assert calls["recent_rounds"] == 1
+
+
+def test_model_status_surfaces_module_tiers_and_route_contracts(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
 
     status = controller.model_status()
@@ -194,17 +508,55 @@ def test_model_status_surfaces_agent_tiers_and_bindings(tmp_path):
     assert status["tiers"]["medium_model"]["backend"] == "deepseek"
     assert status["tiers"]["medium_model"]["api_key_env"] == "DEEPSEEK_API_KEY"
     assert status["tiers"]["small_model"]["api_key_env"] == "ARK_SMALL_MODEL_API_KEY"
-    assert status["agent_bindings"]["SalienceAgent"] == "small_model"
-    assert status["agent_bindings"]["ValueAgent"] == "small_model"
-    assert status["agent_bindings"]["planner"] == "medium_model"
-    assert status["agent_bindings"]["PerspectiveModel"] == "medium_model"
-    assert status["agent_bindings"]["PFCAgent"] == "medium_model"
+    assert status["module_model_bindings"]["cognitive_packet"] == "medium_model"
+    assert status["module_model_bindings"]["deep_renderer"] == "large_model"
+    assert status["route_policies"]["chat_micro"]["latency_budget_ms"] == 250
+    assert status["route_policies"]["chat_micro"]["decision_mode"] == "micro_shortcut"
     assert status["route_policies"]["chat_fast"]["latency_budget_ms"] == 700
-    assert status["route_policies"]["chat_fast"]["default_tier"] in {"medium_model", "small_model"}
-    assert status["route_policies"]["chat_standard"]["hot_path"] == "full_tick"
-    assert "authenticity_risk_high" in status["route_policies"]["chat_standard"]["upgrade_conditions"]
+    assert status["route_policies"]["chat_fast"]["decision_mode"] == "single_packet"
+    assert status["route_policies"]["chat_fast"]["default_tier"] == "medium_model"
+    assert "PacketAssembler" in status["route_policies"]["chat_standard"]["always_on_modules"]
+    assert "MemoryRecall" in status["route_policies"]["chat_standard"]["conditional_modules"]
+    assert "memory_cue_detected" in status["route_policies"]["chat_standard"]["upgrade_conditions"]
     assert status["route_policies"]["endogenous_light"]["entry_mode"] == "idle"
     assert status["route_policies"]["dream_sleep"]["entry_mode"] == "sleep"
+
+
+def test_model_status_surfaces_failover_truth_and_effective_routes(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    controller.model_router.activate_failover("chat_fast provider failed")
+    status = controller.model_status()
+
+    assert status["failover"]["active"] is True
+    assert status["failover"]["reason"] == "chat_fast provider failed"
+    assert status["tiers"]["small_model"]["effective_backend"] == "openai_compatible"
+    assert status["tiers"]["small_model"]["effective_model"] == "gpt-5.4"
+    assert status["tiers"]["medium_model"]["effective_backend"] == "openai_compatible"
+    assert status["tiers"]["medium_model"]["effective_model"] == "gpt-5.4"
+    assert status["routes"]["chat_fast"]["effective_backend"] == "openai_compatible"
+    assert status["routes"]["chat_fast"]["effective_model"] == "gpt-5.4"
+
+
+def test_model_status_surfaces_fault_guard_contract_and_checkpoint_relationship(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    status = controller.model_status()
+
+    fault_guard = status["fault_guard"]
+
+    assert fault_guard["heartbeat_check"]["registered"] is True
+    assert fault_guard["heartbeat_check"]["process_replace"] is False
+    assert fault_guard["replace_failed_agent_with_baseline"]["registered"] is True
+    assert fault_guard["replace_failed_agent_with_baseline"]["process_replace"] is False
+    assert fault_guard["replace_failed_agent_with_baseline"]["fallback_contract"] == "baseline_or_neutral_delta"
+    assert fault_guard["rollback_invalid_sigma"]["registered"] is True
+    assert fault_guard["rollback_invalid_sigma"]["checkpoint_backed"] is True
+    assert fault_guard["rollback_invalid_sigma"]["uses_checkpoint_rewind"] is True
+    assert fault_guard["rollback_invalid_sigma"]["process_replace"] is False
+    assert fault_guard["checkpoint_contract"]["create"] is True
+    assert fault_guard["checkpoint_contract"]["rewind"] is True
+    assert fault_guard["contract_status"] == "contract_only"
 
 
 def test_value_agent_build_value_contribution_matches_controller_compatibility_path(tmp_path):
@@ -230,12 +582,30 @@ def test_value_skill_registry_drops_proposal_tag_for_subjective_value():
     assert spec.output_kind == "score_map"
 
 
+def test_fault_guard_skill_registry_exposes_contract_only_entries():
+    registry = build_skill_registry()
+
+    assert "heartbeat_check" in registry
+    assert "replace_failed_agent_with_baseline" in registry
+    assert "rollback_invalid_sigma" in registry
+    assert "switch_to_light_cache_mode" in registry
+    assert registry["replace_failed_agent_with_baseline"].owner_module == "RuntimeController"
+    assert registry["replace_failed_agent_with_baseline"].output_kind == "state_patch"
+    assert registry["rollback_invalid_sigma"].output_kind == "rollback"
+    assert registry["switch_to_light_cache_mode"].output_kind == "state_patch"
+
+
 def test_medium_model_route_resolution_for_planner_and_perspective(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
 
     planner_route = controller._route_config_for_binding("planner", route_name="planner")
     perspective_route = controller._route_config_for_binding("PerspectiveModel", route_name="perspective")
     pfc_route = controller._route_config_for_binding("PFCAgent", route_name="pfc")
+    renderer_route = controller._route_config_for_binding(
+        "Renderer",
+        route_name="renderer",
+        metadata={"route_type": "chat_standard"},
+    )
 
     assert planner_route is not None
     assert planner_route.backend == "deepseek"
@@ -247,6 +617,39 @@ def test_medium_model_route_resolution_for_planner_and_perspective(tmp_path):
     assert pfc_route is not None
     assert pfc_route.backend == "deepseek"
     assert pfc_route.model == "deepseek-chat"
+    assert renderer_route is not None
+    assert renderer_route.backend == "deepseek"
+    assert renderer_route.model == "deepseek-chat"
+
+
+def test_route_config_for_binding_prefers_credentialed_remote_tier_when_default_tier_is_unavailable(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("ARK_SMALL_MODEL_API_KEY", raising=False)
+    monkeypatch.setenv("ARK_API_KEY", "ark-live-key")
+
+    route = controller._route_config_for_binding("planner", route_name="planner")
+
+    assert route is not None
+    assert route.backend == "doubao"
+    assert route.model == "doubao-seed-2-0-pro-260215"
+    assert route.api_key_env == "ARK_API_KEY"
+    assert getattr(route, "effective_tier", "") == "large_model"
+
+
+def test_renderer_route_escalates_to_large_model_for_chat_deep(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    route = controller._route_config_for_binding(
+        "Renderer",
+        route_name="renderer",
+        metadata={"route_type": "chat_deep"},
+    )
+
+    assert route is not None
+    assert route.backend == "doubao"
+    assert route.model == "doubao-seed-2-0-pro-260215"
+    assert getattr(route, "effective_tier", "") == "large_model"
 
 
 def test_pfc_route_escalates_to_large_model_when_relation_risk_is_high(tmp_path):
@@ -262,6 +665,138 @@ def test_pfc_route_escalates_to_large_model_when_relation_risk_is_high(tmp_path)
     assert route.backend == "doubao"
     assert route.model == "doubao-seed-2-0-pro-260215"
     assert getattr(route, "effective_tier", "") == "large_model"
+
+
+def test_route_config_for_binding_falls_back_to_named_route_when_tier_missing(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.config["models"].setdefault("pipeline_model_bindings", {})["Renderer"] = "large_model"
+    controller.config["models"]["model_tiers"].pop("large_model", None)
+
+    route = controller._route_config_for_binding("Renderer", route_name="renderer")
+
+    assert route is not None
+    assert route.backend == "doubao"
+    assert route.model == "doubao-seed-2-0-pro-260215"
+
+
+def test_call_bound_model_route_prefers_generate_config_when_generate_is_instance_wrapped(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.config["models"].setdefault("pipeline_model_bindings", {})["Renderer"] = "large_model"
+
+    request = ModelRequest(
+        system_prompt="system",
+        user_prompt="user",
+        response_schema={"text": "str"},
+    )
+    seen: dict[str, object] = {
+        "generate_calls": 0,
+        "generate_config_calls": 0,
+    }
+
+    def wrapped_generate(route_name, model_request):
+        seen["generate_calls"] = int(seen["generate_calls"]) + 1
+        return ModelResponse(
+            route=str(route_name),
+            model="named-route-model",
+            payload={"text": "named route"},
+            backend="named-route-backend",
+        )
+
+    def wrapped_generate_config(route_config, model_request):
+        seen["generate_config_calls"] = int(seen["generate_config_calls"]) + 1
+        seen["route_name"] = route_config.name
+        seen["effective_tier"] = getattr(route_config, "effective_tier", "")
+        return ModelResponse(
+            route=route_config.name,
+            model=route_config.model,
+            payload={"text": "config route"},
+            backend=route_config.backend,
+        )
+
+    monkeypatch.setattr(controller.model_router, "generate", wrapped_generate)
+    monkeypatch.setattr(controller.model_router, "generate_config", wrapped_generate_config)
+
+    response = controller._call_bound_model_route(
+        "Renderer",
+        route_name="renderer",
+        request=request,
+    )
+
+    assert seen["generate_calls"] == 0
+    assert seen["generate_config_calls"] == 1
+    assert seen["route_name"] == "renderer"
+    assert seen["effective_tier"] == "large_model"
+    assert response.model == "doubao-seed-2-0-pro-260215"
+
+
+def test_normalize_observer_settings_rejects_legacy_agent_binding_override(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    with pytest.raises(ValueError, match="agent_model_bindings"):
+        controller.normalize_observer_settings_payload(
+            {
+                "models": {
+                    "agent_model_bindings": {
+                        "Renderer": "ghost_tier",
+                        "PFCAgent": "medium_model",
+                    }
+                }
+            },
+            base=controller.observer_settings_current(),
+        )
+
+
+def test_normalize_observer_settings_keeps_module_binding_to_custom_declared_tier(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    normalized = controller.normalize_observer_settings_payload(
+        {
+            "models": {
+                "model_tiers": {
+                    "custom_remote": {
+                        "mode": "remote",
+                        "backend": "openai_compatible",
+                        "base_url": "http://127.0.0.1:11434/v1",
+                        "model": "qwen-custom",
+                        "timeout_ms": 12000,
+                        "retries": 0,
+                        "api_key_env": "LOCAL_MODEL_API_KEY",
+                        "enabled": True,
+                    }
+                },
+                "module_model_bindings": {
+                    "deep_renderer": "custom_remote",
+                },
+            }
+        },
+        base=controller.observer_settings_current(),
+    )
+
+    assert normalized["models"]["module_model_bindings"]["deep_renderer"] == "custom_remote"
+
+
+def test_load_observer_settings_file_rejects_legacy_binding_override(tmp_path):
+    runtime_dir = tmp_path / ".alive" / "runtime"
+    runtime_dir.mkdir(parents=True)
+    observer_settings_path = runtime_dir / "observer_settings.json"
+    observer_settings_path.write_text(
+        json.dumps(
+            {
+                "models": {
+                    "agent_model_bindings": {
+                        "Renderer": "ghost_tier",
+                        "PFCAgent": "medium_model",
+                    }
+                }
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="agent_model_bindings"):
+        RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
 
 
 def test_execute_parallel_skills_runs_independent_tasks_concurrently(tmp_path):
@@ -345,7 +880,80 @@ def test_execute_parallel_skills_times_out_optional_work_without_blocking(tmp_pa
     assert any(item["task_name"] == "grounding_capsule" and item["task_type"] == "callable" for item in parallel_traces)
 
 
-def test_small_model_salience_provider_uses_agent_tier_config(tmp_path, monkeypatch):
+def test_tick_does_not_rerun_value_model_after_prefetch_timeout_fallback(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    original_execute_parallel_skills = controller.round_pipeline._execute_parallel_skills
+    original_execute_skill = controller.round_pipeline._execute_skill
+
+    def fake_execute_parallel_skills(*, round_id, tasks, skill_traces, runtime_context, parallel_traces=None):
+        task_names = {task["name"] for task in tasks}
+        if task_names == {"salience_contribution", "value_scores"}:
+            return {
+                "salience_contribution": ProbabilisticContribution(
+                    module_name="SalienceAgent",
+                    module_type="salience",
+                    level="action",
+                    target_space="action",
+                    raw_signal={"respond": 0.04},
+                    modulated_delta={"respond": 0.04},
+                    confidence=0.2,
+                    trace_reason="prefetch timeout fallback",
+                    projection_reason="prefetch timeout fallback",
+                ),
+                "value_scores": {},
+            }
+        return original_execute_parallel_skills(
+            round_id=round_id,
+            tasks=tasks,
+            skill_traces=skill_traces,
+            runtime_context=runtime_context,
+            parallel_traces=parallel_traces,
+        )
+
+    def guarded_execute_skill(
+        *,
+        round_id,
+        skill_name,
+        inputs,
+        provider,
+        skill_traces,
+        runtime_context,
+        fallback_provider=None,
+        fallback_value=None,
+        seed_ref=None,
+    ):
+        if skill_name == "estimate_subjective_value":
+            raise AssertionError("value prefetch fallback should not trigger a second synchronous value-model call")
+        return original_execute_skill(
+            round_id=round_id,
+            skill_name=skill_name,
+            inputs=inputs,
+            provider=provider,
+            skill_traces=skill_traces,
+            runtime_context=runtime_context,
+            fallback_provider=fallback_provider,
+            fallback_value=fallback_value,
+            seed_ref=seed_ref,
+        )
+
+    monkeypatch.setattr(controller.round_pipeline, "_execute_parallel_skills", fake_execute_parallel_skills)
+    monkeypatch.setattr(controller.round_pipeline, "_execute_skill", guarded_execute_skill)
+    monkeypatch.setattr(
+        controller.model_router,
+        "generate_config",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
+
+    result = controller.tick(
+        RoundEvent(source="user", content="最近的内在状态怎么样？", target="user"),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    assert result.trace.runtime_metrics["route_type"] == "chat_fast"
+
+
+def test_small_model_salience_provider_uses_binding_tier_config(tmp_path, monkeypatch):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     calls: list[tuple[str, str, str]] = []
 
@@ -454,7 +1062,7 @@ def test_tick_records_model_call_metrics_for_small_model_parallel_group(tmp_path
     assert result.trace.runtime_metrics["parallel_task_count"] >= 4
     assert "salience_value_prefetch" in result.trace.runtime_metrics["parallel_groups"]
     assert "intent_prefetch" in result.trace.runtime_metrics["parallel_groups"]
-    assert any(item["agent_tier"] == "small_model" for item in result.trace.model_call_traces)
+    assert any(item["binding_tier"] == "small_model" for item in result.trace.model_call_traces)
 
 
 def test_acceptance_report_surfaces_bypass_and_parallel_evidence(tmp_path, monkeypatch):
@@ -1102,14 +1710,64 @@ def test_plan_turn_uses_fast_chat_for_simple_identity_prompt_without_task_bootst
     plan = controller.plan_turn("你好，你是谁？你有名字吗？")
 
     assert plan.route == "fast_chat"
-    assert plan.route_type == "chat_fast"
+    assert plan.route_type == "chat_micro"
     assert plan.task_bootstrap is None
 
 
-def test_plan_turn_marks_normal_chat_as_chat_standard(tmp_path):
+def test_plan_turn_uses_fast_chat_for_short_greeting_and_time_query(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    greeting_plan = controller.plan_turn("晚上好")
+    time_plan = controller.plan_turn("现在几点了？")
+    known_user_plan = controller.plan_turn("你知道我是谁吗")
+
+    assert greeting_plan.route == "fast_chat"
+    assert greeting_plan.route_type == "chat_micro"
+    assert time_plan.route == "fast_chat"
+    assert time_plan.route_type == "chat_micro"
+    assert known_user_plan.route == "fast_chat"
+    assert known_user_plan.route_type == "chat_micro"
+
+
+def test_plan_turn_marks_normal_chat_as_chat_fast(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
 
     plan = controller.plan_turn("最近的内在状态怎么样？")
+
+    assert plan.route == "direct_chat"
+    assert plan.route_type == "chat_fast"
+
+
+def test_plan_turn_upgrades_memory_cue_chat_to_chat_standard(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    plan = controller.plan_turn("你还记得我上次提到过的那段关系冲突吗？")
+
+    assert plan.route == "direct_chat"
+    assert plan.route_type == "chat_standard"
+
+
+def test_plan_turn_keeps_explicit_standard_chat_stable_even_with_heavy_probe(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    original_probe = controller._probe_distribution_for_scenario
+
+    def heavy_probe(event, *, scenario, mode, allow_model_reasoning=True):
+        probe = dict(
+            original_probe(
+                event,
+                scenario=scenario,
+                mode=mode,
+                allow_model_reasoning=allow_model_reasoning,
+            )
+        )
+        probe["task_mass"] = 0.42
+        probe["chat_mass"] = 0.34
+        probe["top_action"] = "connect"
+        return probe
+
+    monkeypatch.setattr(controller, "_probe_distribution_for_scenario", heavy_probe)
+
+    plan = controller.plan_turn("你还记得我之前提过的矛盾吗？")
 
     assert plan.route == "direct_chat"
     assert plan.route_type == "chat_standard"
@@ -1143,9 +1801,197 @@ def test_execute_turn_fast_chat_uses_chat_fast_route_once(tmp_path, monkeypatch)
     execution = controller.execute_turn(plan)
 
     assert execution.route == "fast_chat"
+    assert execution.route_type == "chat_micro"
+    assert execution.assistant_final
+    assert calls in ([], ["chat_fast"])
+
+
+def test_execute_turn_fast_chat_uses_local_deterministic_reply_for_greeting_and_time(tmp_path, monkeypatch):
+    class _FakeNow:
+        def astimezone(self):
+            return self
+
+        def strftime(self, fmt: str) -> str:
+            assert fmt == "%H:%M"
+            return "21:37"
+
+    class _FakeDateTime:
+        @staticmethod
+        def now():
+            return _FakeNow()
+
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    calls: list[str] = []
+
+    def fail_generate(route_name, request):
+        calls.append(route_name)
+        raise RuntimeError("should not call remote model for local deterministic short chat")
+
+    monkeypatch.setattr(renderer_module, "datetime", _FakeDateTime)
+    monkeypatch.setattr(controller.model_router, "generate", fail_generate)
+
+    greeting_execution = controller.execute_turn(controller.plan_turn("晚上好"))
+    time_execution = controller.execute_turn(controller.plan_turn("现在几点了？"))
+    known_user_execution = controller.execute_turn(controller.plan_turn("你知道我是谁吗"))
+
+    assert greeting_execution.route == "fast_chat"
+    assert greeting_execution.route_type == "chat_micro"
+    assert greeting_execution.assistant_final == "晚上好，我在。"
+    assert time_execution.route == "fast_chat"
+    assert time_execution.route_type == "chat_micro"
+    assert time_execution.assistant_final == "现在是 21:37。"
+    assert known_user_execution.route == "fast_chat"
+    assert known_user_execution.route_type == "chat_micro"
+    assert "线索" in known_user_execution.assistant_final
+    assert calls == []
+
+
+def test_execute_turn_chat_fast_uses_single_cognitive_packet_and_records_v2_trace(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    calls: list[str] = []
+
+    def fake_generate(route_name, request):
+        calls.append(route_name)
+        assert isinstance(request, ModelRequest)
+        if route_name != "cognitive_packet":
+            raise AssertionError(f"unexpected route: {route_name}")
+        return ModelResponse(
+            route=route_name,
+            model="deepseek-chat",
+            payload={
+                "salience": 0.31,
+                "uncertainty": 0.24,
+                "memory_need": False,
+                "tool_need": False,
+                "conflict_need": False,
+                "candidate_action_prior": "respond",
+                "draft_reply": "我现在主要围绕当前焦点和最近状态在回应你。",
+                "proposed_state_patch": {
+                    "current_focus": "继续围绕当前状态做短回应",
+                    "recent_commitments": ["继续回答当前关于内在状态的问题"],
+                },
+                "deepen_reason": "",
+            },
+            raw_text="{}",
+        )
+
+    monkeypatch.setattr(controller.model_router, "generate", fake_generate)
+
+    plan = controller.plan_turn("最近的内在状态怎么样？")
+    execution = controller.execute_turn(plan)
+
+    assert plan.route == "direct_chat"
+    assert plan.route_type == "chat_fast"
+    assert execution.route == "direct_chat"
     assert execution.route_type == "chat_fast"
-    assert execution.assistant_final == "你好，我是当前运行体实例。"
-    assert calls == ["chat_fast"]
+    assert execution.assistant_final == "我现在主要围绕当前焦点和最近状态在回应你。"
+    assert calls == ["cognitive_packet"]
+
+    state = controller.load_runtime_state()
+    assert state.round_count == 1
+
+    trace = controller.trace_round(1)
+    assert trace["runtime_metrics"]["route_type"] == "chat_fast"
+    assert trace["runtime_metrics"]["model_call_count"] == 1
+    assert trace["activation_set"] == [
+        "Router",
+        "HotStateLoader",
+        "BudgetAllocator",
+        "PacketAssembler",
+        "SafetyGate",
+        "StateWriter",
+    ]
+    assert trace["memory_tiers_read"] == ["hot"]
+    assert trace["packet_summary"]["tool_need"] is False
+    assert trace["packet_summary"]["memory_need"] is False
+    assert trace["background_jobs"]
+    assert trace["deepen_reason"] == ""
+
+
+def test_execute_turn_chat_standard_survives_empty_cognitive_packet_trace(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    def fail_generate(route_name, request):
+        if route_name != "cognitive_packet":
+            raise AssertionError(f"unexpected route: {route_name}")
+        raise RuntimeError("cognitive packet unavailable")
+
+    monkeypatch.setattr(controller.model_router, "generate", fail_generate)
+    plan = controller.plan_turn("你还记得我之前提过的矛盾吗？")
+    monkeypatch.setattr(controller.chat_kernel_v2, "_memory_context", lambda **kwargs: {})
+    perf_counter_values = iter([100.0, 100.275])
+    monkeypatch.setattr(chat_kernel_module.time, "perf_counter", lambda: next(perf_counter_values))
+    execution = controller.execute_turn(plan)
+
+    assert plan.route == "direct_chat"
+    assert plan.route_type == "chat_standard"
+    assert execution.route == "direct_chat"
+    assert execution.route_type == "chat_standard"
+    assert execution.assistant_final == "我先基于当前状态给你一个直接回应。"
+
+    trace = controller.trace_round(1)
+    assert trace["runtime_metrics"]["route_type"] == "chat_standard"
+    assert trace["runtime_metrics"]["model_call_count"] == 0
+    assert trace["runtime_metrics"]["total_turn_ms"] == 275
+    assert trace["runtime_metrics"]["local_compute_ms"] == 275
+    assert trace["rendered_expression"]["degraded"] is True
+    assert trace["rendered_expression"]["model"] == "fallback"
+
+
+def test_execute_turn_chat_standard_uses_bound_route_config_when_medium_tier_credentials_are_missing(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("ARK_SMALL_MODEL_API_KEY", raising=False)
+    monkeypatch.setenv("ARK_API_KEY", "ark-live-key")
+
+    def fail_named_route(*args, **kwargs):
+        raise AssertionError("chat kernel should not call named route generate directly")
+
+    seen: dict[str, str] = {}
+
+    def generate_config(route_config, request):
+        seen["route_name"] = route_config.name
+        seen["backend"] = route_config.backend
+        seen["model"] = route_config.model
+        seen["api_key_env"] = str(route_config.api_key_env or "")
+        seen["effective_tier"] = str(getattr(route_config, "effective_tier", ""))
+        return ModelResponse(
+            route=route_config.name,
+            model=route_config.model,
+            payload={
+                "salience": 0.58,
+                "uncertainty": 0.44,
+                "memory_need": True,
+                "tool_need": False,
+                "conflict_need": False,
+                "candidate_action_prior": "respond",
+                "draft_reply": "这是绑定路由返回的正式回复。",
+                "proposed_state_patch": {
+                    "focus": "maintain_sparse_chat_response",
+                    "obligations": ["继续沿着当前问题回答"],
+                },
+                "deepen_reason": "",
+            },
+            raw_text="{}",
+            backend=route_config.backend,
+        )
+
+    monkeypatch.setattr(controller.model_router, "generate", fail_named_route)
+    monkeypatch.setattr(controller.model_router, "generate_config", generate_config)
+    monkeypatch.setattr(controller.chat_kernel_v2, "_memory_context", lambda **kwargs: {})
+
+    plan = controller.plan_turn("你还记得我之前提过的矛盾吗？")
+    execution = controller.execute_turn(plan)
+
+    assert plan.route_type == "chat_standard"
+    assert execution.assistant_final == "这是绑定路由返回的正式回复。"
+    assert seen == {
+        "route_name": "cognitive_packet",
+        "backend": "doubao",
+        "model": "doubao-seed-2-0-pro-260215",
+        "api_key_env": "ARK_API_KEY",
+        "effective_tier": "large_model",
+    }
 
 
 def test_hot_only_budget_for_low_salience(tmp_path, monkeypatch):
@@ -1159,11 +2005,11 @@ def test_hot_only_budget_for_low_salience(tmp_path, monkeypatch):
         assert event.cue is None
         return derived_cue
 
-    def fake_recall_strength(cue, tier_budget=("hot", "warm", "archive")):
+    def fake_recall_strength(cue, tier_budget=("hot", "warm", "cold")):
         calls.append(("recall_strength", cue, tuple(tier_budget)))
         return 0.12
 
-    def fake_recall(cue, *, tier_budget=("hot", "warm", "archive")):
+    def fake_recall(cue, *, tier_budget=("hot", "warm", "cold")):
         calls.append(("recall", cue, tuple(tier_budget)))
         return {
             "cue": cue,
@@ -1226,11 +2072,11 @@ def test_full_budget_for_high_salience(tmp_path, monkeypatch):
         assert event.cue is None
         return derived_cue
 
-    def fake_recall_strength(cue, tier_budget=("hot", "warm", "archive")):
+    def fake_recall_strength(cue, tier_budget=("hot", "warm", "cold")):
         calls.append(("recall_strength", cue, tuple(tier_budget)))
         return 0.66
 
-    def fake_recall(cue, *, tier_budget=("hot", "warm", "archive")):
+    def fake_recall(cue, *, tier_budget=("hot", "warm", "cold")):
         calls.append(("recall", cue, tuple(tier_budget)))
         return {
             "cue": cue,
@@ -1272,10 +2118,10 @@ def test_full_budget_for_high_salience(tmp_path, monkeypatch):
     controller.tick(event, scenario="task", mode="interactive")
 
     assert calls == [
-        ("recall_strength", derived_cue, ("hot", "warm", "archive")),
-        ("recall", derived_cue, ("hot", "warm", "archive")),
-        ("recall_strength", derived_cue, ("hot", "warm", "archive")),
-        ("recall", derived_cue, ("hot", "warm", "archive")),
+        ("recall_strength", derived_cue, ("hot", "warm", "cold")),
+        ("recall", derived_cue, ("hot", "warm", "cold")),
+        ("recall_strength", derived_cue, ("hot", "warm", "cold")),
+        ("recall", derived_cue, ("hot", "warm", "cold")),
     ]
     assert probe_context["cue"] == derived_cue
     assert probe_context["recall_strength"] == 0.66
@@ -1614,7 +2460,7 @@ def test_chat_standard_renderer_violation_falls_back_without_resample_when_not_a
     controller._evaluate_authenticity = fake_evaluate
 
     result = controller.tick(
-        RoundEvent(source="user", content="最近状态怎么样？", target="user"),
+        RoundEvent(source="user", content="你还记得我之前提过的最近状态吗？", target="user"),
         scenario="chat",
         mode="interactive",
     )
@@ -1632,10 +2478,15 @@ def test_renderer_fallback_uses_template_bottom_line_only_after_model_chain_fail
 
     route_calls: list[str] = []
 
+    def fake_generate_config(route_config, request):
+        route_calls.append(route_config.name)
+        raise RuntimeError(f"{route_config.name} unavailable")
+
     def fake_generate(route_name, request):
         route_calls.append(route_name)
         raise RuntimeError(f"{route_name} unavailable")
 
+    controller.model_router.generate_config = fake_generate_config
     controller.model_router.generate = fake_generate
 
     result = controller.tick(
@@ -1653,6 +2504,53 @@ def test_renderer_fallback_uses_template_bottom_line_only_after_model_chain_fail
     assert route_calls[renderer_index : renderer_index + 3] == ["renderer", "renderer_fallback_fast", "renderer_fallback_small"]
     assert result.rendered_expression.model == "fallback"
     assert "晚饭" in result.rendered_expression.text or "面" in result.rendered_expression.text or "规划" in result.rendered_expression.text
+
+
+def test_renderer_fallback_handles_plain_greeting_without_generic_template(tmp_path, monkeypatch):
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("ARK_SMALL_MODEL_API_KEY", raising=False)
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    result = controller.tick(
+        RoundEvent(source="user", content="晚上好", target="user"),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    assert result.rendered_expression.model == "fallback"
+    assert result.rendered_expression.text == "晚上好，我在。"
+    assert "这轮留下来的感觉" not in result.rendered_expression.text
+
+
+def test_renderer_fallback_answers_time_query_with_local_clock(tmp_path, monkeypatch):
+    class _FakeNow:
+        def astimezone(self):
+            return self
+
+        def strftime(self, fmt: str) -> str:
+            assert fmt == "%H:%M"
+            return "21:37"
+
+    class _FakeDateTime:
+        @staticmethod
+        def now():
+            return _FakeNow()
+
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("ARK_SMALL_MODEL_API_KEY", raising=False)
+    monkeypatch.setattr(renderer_module, "datetime", _FakeDateTime)
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    result = controller.tick(
+        RoundEvent(source="user", content="现在几点了？", target="user"),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    assert result.rendered_expression.model == "fallback"
+    assert result.rendered_expression.text == "现在是 21:37。"
 
 
 def test_renderer_integrity_reads_field_native_gate_not_action_bookkeeping_snapshot(tmp_path, monkeypatch):
@@ -2494,6 +3392,32 @@ def test_run_endogenous_tick_builds_stable_micro_intent_without_external_input(t
     assert state.motivation_pool_state is not None
 
 
+def test_run_endogenous_tick_uses_recent_round_window_without_full_history_scan(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="记住一轮最近上下文，供内源 tick 复用。",
+            target="user",
+            cue="recent-window",
+            valence=-0.12,
+        ),
+        scenario="companion",
+        mode="interactive",
+    )
+
+    monkeypatch.setattr(
+        controller.trace_store,
+        "list_rounds",
+        lambda: (_ for _ in ()).throw(AssertionError("run_endogenous_tick hot path should not scan full history")),
+    )
+
+    payload = controller.run_endogenous_tick(trigger="idle")
+
+    assert payload["cause_type"] == "endogenous"
+    assert payload["round_id"] >= 2
+
+
 def test_why_motivation_and_replay_motivation_surface_endogenous_trace_fields(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     controller.tick(
@@ -2955,6 +3879,294 @@ def test_console_refresh_payload_surfaces_tlh_links_and_counterfactual_preview(t
     assert payload["recent_rounds"][-1]["round_id"] == 1
 
 
+def test_replay_reuses_counterfactual_derivations_after_why_this(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="Create one round with explainability data.",
+            target="user",
+            cue="counterfactual",
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    real_preview = controller._counterfactual_render_preview
+    preview_calls = {"count": 0}
+
+    def wrapped_preview(trace, action):
+        preview_calls["count"] += 1
+        return real_preview(trace, action)
+
+    monkeypatch.setattr(controller, "_counterfactual_render_preview", wrapped_preview)
+
+    real_stacked = controller._stacked_action_contributions
+    stacked_calls = {"count": 0}
+
+    def wrapped_stacked(action_layer, target_action, *, limit=16):
+        stacked_calls["count"] += 1
+        return real_stacked(action_layer, target_action, limit=limit)
+
+    monkeypatch.setattr(controller, "_stacked_action_contributions", wrapped_stacked)
+
+    why_payload = controller.why_this(1)
+    preview_after_why = preview_calls["count"]
+    stacked_after_why = stacked_calls["count"]
+
+    replay_payload = controller.replay(1, seed=7)
+
+    assert why_payload["counterfactual_replays"]
+    assert replay_payload["counterfactual_replays"]
+    assert preview_after_why > 0
+    assert stacked_after_why > 0
+    assert preview_calls["count"] == preview_after_why
+    assert stacked_calls["count"] == stacked_after_why
+
+
+def test_console_action_field_reuses_why_this_payload_without_extra_probability_reads(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="Create one round for action field diagnostics.",
+            target="user",
+            cue="action-field",
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    monkeypatch.setattr(
+        controller,
+        "trace_probability_field",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("console_action_field should reuse token_state from why_this payload")
+        ),
+    )
+    monkeypatch.setattr(
+        controller,
+        "contribution_breakdown",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("console_action_field should reuse action_probability_explanation from why_this payload")
+        ),
+    )
+
+    payload = controller.console_action_field(1)
+
+    assert payload["round_id"] == 1
+    assert payload["winner"]["action"]
+    assert isinstance(payload["token_field"], dict)
+
+
+def test_console_views_expose_initiative_memory_backing(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    why_payload = {
+        "round_id": 7,
+        "trace_ref": "round://7",
+        "sampled_action": "respond",
+        "top_drivers": [],
+        "vitality_snapshot": {},
+        "authenticity": {},
+        "initiative": {
+            "expression_mode": "external",
+            "proposal_type": "speak",
+            "top_intent": "follow_up_task",
+            "speech_cost": 0.21,
+            "intrinsic_value": 0.66,
+            "should_send": True,
+            "suppression_reason": "",
+            "grounded_in": {"context": [], "memory": ["写作业"], "state": []},
+            "memory_backing": {
+                "cue": "写作业",
+                "summary": "写作业",
+                "topic_relevance": 1.0,
+                "topic_source": "current_goal",
+            },
+        },
+        "expressive_trace": {},
+        "action_probability_explanation": {
+            "winner_target": "respond",
+            "winner_posterior": {"respond": 0.8},
+            "competing_peaks": [],
+            "stacked_contributions": [],
+        },
+        "conflict_arbitration": {},
+        "token_state": {},
+    }
+    monkeypatch.setattr(controller, "why_this", lambda round_ref=None: why_payload)
+    monkeypatch.setattr(controller, "contribution_breakdown", lambda round_ref=None: {"contributions": []})
+
+    action_field = controller.console_action_field(7)
+    why_current = controller.console_why_current(7)
+
+    assert action_field["expressive"]["memory_backing"]["cue"] == "写作业"
+    assert action_field["expressive"]["memory_backing"]["topic_relevance"] == 1.0
+    assert action_field["expressive"]["top_intent"] == "follow_up_task"
+    assert action_field["expressive"]["should_send"] is True
+    assert action_field["expressive"]["suppression_reason"] == ""
+    assert why_current["why"]["initiative"]["memory_backing"]["topic_source"] == "current_goal"
+    assert why_current["why"]["initiative"]["top_intent"] == "follow_up_task"
+    assert why_current["why"]["initiative"]["should_send"] is True
+    assert why_current["why"]["initiative"]["suppression_reason"] == ""
+
+
+def test_expression_channel_snapshot_exposes_initiative_memory_backing(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    monkeypatch.setattr(
+        controller,
+        "trace_round",
+        lambda round_ref=None: {
+            "round_id": 5,
+            "trace_ref": "round://5",
+            "sampled_action": "respond",
+            "rendered_expression": {
+                "text": "我还挂着“写作业”这条线。 我们继续吧。",
+                "delivery_mode": "speech",
+                "route": "renderer",
+                "model": "fallback",
+                "degraded": False,
+            },
+            "initiative": {
+                "proposal_type": "speak",
+                "expression_mode": "external",
+                "top_intent": "follow_up_task",
+                "speech_cost": 0.19,
+                "intrinsic_value": 0.63,
+                "should_send": False,
+                "suppression_reason": "cooldown_active",
+                "grounded_in": {"context": [], "memory": ["写作业"], "state": []},
+                "memory_backing": {
+                    "cue": "写作业",
+                    "summary": "写作业",
+                    "topic_relevance": 1.0,
+                    "topic_source": "recent_user_turn",
+                },
+            },
+        },
+    )
+    monkeypatch.setattr(
+        controller,
+        "_action_probability_explanation",
+        lambda trace, target_action=None: {"winner_posterior": {str(target_action or "respond"): 0.72}},
+    )
+    monkeypatch.setattr(
+        controller,
+        "_counterfactual_render_preview",
+        lambda trace, preview_action: {"action": preview_action, "text": "", "would_output": False, "terminal_intent": False},
+    )
+
+    payload = controller.expression_channel_snapshot("speak", 5)
+
+    assert payload["initiative"]["memory_backing"]["cue"] == "写作业"
+    assert payload["initiative"]["memory_backing"]["topic_source"] == "recent_user_turn"
+    assert payload["initiative"]["top_intent"] == "follow_up_task"
+    assert payload["initiative"]["should_send"] is False
+    assert payload["initiative"]["suppression_reason"] == "cooldown_active"
+
+
+def test_initiative_why_summary_prefers_meaningful_initiative_signal_over_placeholder(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    monkeypatch.setattr(
+        controller,
+        "trace_round",
+        lambda round_ref=None: {
+            "round_id": 9,
+            "trace_ref": "round://9",
+            "initiative": {
+                "top_intent": "follow_up_task",
+                "should_send": True,
+                "memory_backing": {
+                    "cue": "写作业",
+                    "summary": "写作业",
+                    "topic_relevance": 1.0,
+                },
+            },
+        },
+    )
+
+    payload = controller.initiative_why(9)
+
+    assert payload["summary"] == "follow_up_task via 写作业"
+
+
+def test_initiative_why_summary_prefers_suppression_reason_when_present(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    monkeypatch.setattr(
+        controller,
+        "trace_round",
+        lambda round_ref=None: {
+            "round_id": 10,
+            "trace_ref": "round://10",
+            "initiative": {
+                "top_intent": "follow_up_task",
+                "should_send": False,
+                "suppression_reason": "cooldown_active",
+                "memory_backing": {"cue": "写作业"},
+            },
+        },
+    )
+
+    payload = controller.initiative_why(10)
+
+    assert payload["summary"] == "cooldown_active"
+
+
+def test_evaluate_initiative_overlay_does_not_override_background_backing_with_endogenous_cue(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    observed: dict[str, object] = {}
+
+    def fake_distribution(state, **kwargs):
+        observed.update(kwargs)
+        return {"should_send": False, "expression_mode": "silent"}
+
+    monkeypatch.setattr(controller, "_initiative_distribution_payload", fake_distribution)
+
+    controller.evaluate_initiative_overlay(
+        state=controller.load_runtime_state(),
+        relation_state={},
+        vitality_snapshot={},
+        context={"cue": "endogenous:idle", "recall_strength": 0.42, "run_context": {}},
+        latest_round_recorded_at=None,
+        endogenous_turn=True,
+        rendered_preview="预览",
+    )
+
+    assert observed["cue"] == "endogenous:idle"
+    assert observed["memory_backing"] == {}
+
+
+def test_evaluate_initiative_overlay_still_passes_external_context_memory_backing(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    observed: dict[str, object] = {}
+
+    def fake_distribution(state, **kwargs):
+        observed.update(kwargs)
+        return {"should_send": False, "expression_mode": "silent"}
+
+    monkeypatch.setattr(controller, "_initiative_distribution_payload", fake_distribution)
+
+    controller.evaluate_initiative_overlay(
+        state=controller.load_runtime_state(),
+        relation_state={},
+        vitality_snapshot={},
+        context={"cue": "写作业", "recall_strength": 0.42, "run_context": {}},
+        latest_round_recorded_at=None,
+        endogenous_turn=True,
+        rendered_preview="预览",
+    )
+
+    assert observed["cue"] == "写作业"
+    assert observed["memory_backing"] == {
+        "cue": "写作业",
+        "strength": 0.42,
+        "summary": "写作业",
+        "topic_relevance": 1.0,
+        "topic_source": "context_cue",
+    }
+
+
 def test_autonomy_lifecycle_surfaces_status_and_console_payload(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
 
@@ -3000,6 +4212,45 @@ def test_autonomy_step_prefers_sleep_before_endogenous_tick_when_fatigue_is_crit
     assert restored.mode == "sleep"
     assert status["last_action_type"] == "command"
     assert status["last_action_summary"] == "mode set sleep: applied"
+
+
+def test_autonomy_step_clears_stale_failure_after_next_successful_progress(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.autonomy_policy.failure_trip_threshold = 3
+    state.body_energy = 0.05
+    state.body_state.energy = 0.05
+    state.fatigue = 0.97
+    state.body_state.fatigue = 0.97
+    state.mode = "interactive"
+    controller._save_state(state, sync=True)
+
+    original_apply_command = controller.apply_command
+
+    def broken_apply_command(command: str):
+        raise FileNotFoundError(f"forced failure for {command}")
+
+    monkeypatch.setattr(controller, "apply_command", broken_apply_command)
+
+    failed = controller.autonomy_step()
+    failed_state = controller.load_runtime_state()
+
+    assert failed["reason"] == "exception"
+    assert failed_state.autonomy_loop.failure_count == 1
+    assert "forced failure for mode set sleep" in failed_state.autonomy_loop.last_error
+    assert failed_state.autonomy_loop.running is True
+
+    monkeypatch.setattr(controller, "apply_command", original_apply_command)
+
+    recovered = controller.autonomy_step()
+    recovered_state = controller.load_runtime_state()
+
+    assert recovered["committed"] is True
+    assert recovered["reason"] == ""
+    assert recovered_state.autonomy_loop.failure_count == 0
+    assert recovered_state.autonomy_loop.last_error == ""
+    assert recovered_state.autonomy_loop.last_action_type == "command"
+    assert recovered_state.autonomy_loop.last_action_summary == "mode set sleep: applied"
 
 
 def test_autonomy_status_surfaces_rest_peak_when_fatigue_is_critical(tmp_path):
@@ -3158,6 +4409,114 @@ def test_autonomy_step_can_start_readonly_self_run_when_stable_and_no_active_run
     assert "autonomy self-study" in status["last_action_summary"]
 
 
+def test_autonomy_step_prefers_controller_goal_override_for_self_run(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.round_count = 3
+    state.body_energy = 0.82
+    state.body_state.energy = 0.82
+    state.fatigue = 0.18
+    state.body_state.fatigue = 0.18
+    state.memory_fragments = 0.36
+    state.body_state.memory_fragments = 0.36
+    state.self_continuity = 0.34
+    state.body_state.self_continuity = 0.34
+    state.meaning_strength = 0.22
+    state.body_state.meaning_strength = 0.22
+    state.mode = "interactive"
+    controller._save_state(state, sync=True)
+
+    monkeypatch.setattr(controller.endogenous_scheduler, "build_trigger", lambda **kwargs: None)
+    monkeypatch.setattr(
+        controller,
+        "_generate_autonomy_self_run_goal_via_model",
+        lambda _state: "inspect custom autonomy target",
+    )
+
+    captured: dict[str, str] = {}
+
+    def fake_start_run(goal: str, **kwargs):
+        captured["goal"] = goal
+        run_state = controller.load_runtime_state()
+        run_state.active_run_id = "run-autonomy-override"
+        run_state.run_status = "running"
+        run_state.current_goal = goal
+        controller._save_state(run_state, sync=True)
+        return {
+            "run_id": "run-autonomy-override",
+            "status": "running",
+            "goal": goal,
+            "goal_summary": "autonomy self-study",
+            "trace_ref": "run://run-autonomy-override",
+        }
+
+    monkeypatch.setattr(controller, "start_run", fake_start_run)
+
+    status = controller.autonomy_step()
+
+    assert captured["goal"] == "inspect custom autonomy target"
+    assert status["last_action_type"] == "self_run"
+
+
+def test_autonomy_step_prefers_due_scheduled_task_before_self_run(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.round_count = 3
+    state.body_energy = 0.82
+    state.body_state.energy = 0.82
+    state.fatigue = 0.18
+    state.body_state.fatigue = 0.18
+    state.memory_fragments = 0.12
+    state.body_state.memory_fragments = 0.12
+    state.self_continuity = 0.76
+    state.body_state.self_continuity = 0.76
+    state.meaning_strength = 0.63
+    state.body_state.meaning_strength = 0.63
+    state.mode = "interactive"
+    controller._save_state(state, sync=True)
+    controller.start_autonomy(profile="tool_level")
+
+    autonomy_state = controller.load_runtime_state()
+    autonomy_state.autonomy_policy.quiet_hours = []
+    controller._save_state(autonomy_state, sync=True)
+
+    controller.scheduled_task_store.upsert_task(
+        ScheduledTaskSpec(
+            task_id="scheduled-runtime-review",
+            skill_name="runtime_review",
+            prompt="检查 runtime 闭环还有哪些未收口的点。",
+            toolset_policy={"operator_level": "read_only", "allow_commit": False},
+            schedule=ScheduledTaskSchedule(schedule_type="hourly", interval_hours=1),
+        ),
+        recorded_at="2000-01-01T00:00:00Z",
+    )
+
+    monkeypatch.setattr(controller.endogenous_scheduler, "build_trigger", lambda **kwargs: None)
+    monkeypatch.setattr(controller, "_autonomy_candidate_action", lambda _state, _policy: "self_run")
+    monkeypatch.setattr(controller, "start_run", lambda *args, **kwargs: pytest.fail("due scheduled task should preempt self_run"))
+
+    seen: dict[str, str] = {}
+
+    def fake_trigger(task_id: str):
+        seen["task_id"] = task_id
+        return {
+            "task": {"task_id": task_id},
+            "run": {
+                "run_id": "scheduled-run-1",
+                "goal_summary": "scheduled runtime review",
+                "trace_ref": "run://scheduled-run-1",
+            },
+        }
+
+    monkeypatch.setattr(controller, "trigger_scheduled_task", fake_trigger)
+
+    status = controller.autonomy_step()
+
+    assert seen["task_id"] == "scheduled-runtime-review"
+    assert status["last_action_type"] == "scheduled_task"
+    assert "scheduled runtime review" in status["last_action_summary"]
+
+
 def test_autonomy_status_reports_candidate_competition_for_self_run(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     state = controller.load_runtime_state()
@@ -3217,8 +4576,66 @@ def test_autonomy_runtime_status_is_lightweight_and_skips_field_probe(tmp_path, 
 
     assert status["enabled"] is True
     assert status["running"] is True
+    assert "runtime_revision" in status
+    assert "run_blocking" in status
     assert "candidate_scores" not in status
     assert "decision_surface" not in status
+
+
+def test_save_runtime_state_increments_revision_and_updates_last_mutation_at(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    state = controller.load_runtime_state()
+    initial_revision = int(state.runtime_revision or 0)
+
+    controller._save_state(state, sync=True)
+    first = controller.load_runtime_state()
+
+    assert first.runtime_revision > initial_revision
+    assert first.last_mutation_at
+
+
+def test_runtime_truth_payload_treats_dirty_paused_run_as_visible_but_non_blocking(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    monkeypatch.setattr(controller, "_dirty_worktree_snapshot", lambda: {"detected": True, "entries": ["M stale.py"]})
+
+    run_payload = controller.start_run("inspect paused blocker", allow_commit=False, operator_level="read_only")
+    state = controller.load_runtime_state()
+
+    truth = controller.runtime_status_truth_payload(state)
+    autonomy = controller.autonomy_runtime_status()
+    state_payload = controller.state_payload()
+    current_run = controller.run_status(run_payload["run_id"])
+
+    assert truth["run_visible"] is True
+    assert truth["run_id"] == run_payload["run_id"]
+    assert truth["run_status"] == "paused"
+    assert truth["run_blocking"] is False
+    assert truth["run_block_reason"] == "dirty_worktree"
+    assert autonomy["run_blocking"] is False
+    assert state_payload["run_blocking"] is False
+    assert state_payload["runtime_revision"] >= 1
+    assert current_run["run_blocking"] is False
+    assert current_run["run_block_reason"] == "dirty_worktree"
+
+
+def test_autonomy_step_does_not_repeat_field_probe_for_return_status(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    monkeypatch.setattr(controller.endogenous_scheduler, "build_trigger", lambda **kwargs: None)
+
+    probe_calls = {"count": 0}
+    original_probe = controller._autonomy_action_field_probe
+
+    def counted_probe():
+        probe_calls["count"] += 1
+        return original_probe()
+
+    monkeypatch.setattr(controller, "_autonomy_action_field_probe", counted_probe)
+
+    status = controller.autonomy_step()
+
+    assert status["running"] is True
+    assert probe_calls["count"] == 1
 
 
 def test_build_base_distribution_includes_monologue_action_slot(tmp_path):
@@ -3287,37 +4704,39 @@ def test_collect_parallel_contributions_includes_self_run_field_bias_for_endogen
     assert contribution.modulated_delta["self_run"] > 0.0
 
 
-def test_collect_parallel_contributions_includes_monologue_stream_field_bias_for_endogenous_round(tmp_path, monkeypatch):
+def test_collect_parallel_contributions_includes_monologue_stream_field_bias_for_endogenous_round(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     state = controller.load_runtime_state()
     state.round_count = 2
     state.mode = "idle"
+    bucket = controller._monologue_state_bucket(state)
+    generated = [
+        {
+            "fragment_id": "frag-1",
+            "recorded_at": "2026-04-08T12:00:00Z",
+            "category": "free_association",
+            "content": "我脑子里突然蹦出一个词。",
+            "source": "model",
+        },
+        {
+            "fragment_id": "frag-2",
+            "recorded_at": "2026-04-08T12:00:00Z",
+            "category": "blank_fragment",
+            "content": "……",
+            "source": "model",
+        },
+    ]
+    committed_bucket, _ = controller.monologue_runtime.commit_catch_up(
+        {
+            "bucket": bucket,
+            "settings": dict(bucket.get("settings", {}) or {}),
+            "pulse_index": int(bucket.get("pulse_index", 0) or 0) + 1,
+            "next_pulse_at": "2026-04-08T12:01:00Z",
+        },
+        generated,
+    )
+    state.session_metadata["monologue_stream"] = committed_bucket
     controller._save_state(state, sync=True)
-
-    def fake_catch_up(bucket, *, now_iso=None, fragment_builder=None):
-        updated = controller.monologue_runtime.ensure_bucket(bucket, now_iso=now_iso)
-        updated["last_generated_at"] = "2026-04-08T12:00:00Z"
-        updated["generated_total"] = int(updated.get("generated_total", 0) or 0) + 2
-        updated["category_counts"] = {"free_association": 1, "blank_fragment": 1}
-        generated = [
-            {
-                "fragment_id": "frag-1",
-                "recorded_at": "2026-04-08T12:00:00Z",
-                "category": "free_association",
-                "content": "我脑子里突然蹦出一个词。",
-                "source": "model",
-            },
-            {
-                "fragment_id": "frag-2",
-                "recorded_at": "2026-04-08T12:00:00Z",
-                "category": "blank_fragment",
-                "content": "……",
-                "source": "model",
-            },
-        ]
-        return updated, generated
-
-    monkeypatch.setattr(controller.monologue_runtime, "catch_up", fake_catch_up)
 
     round_context = controller.build_round_context(
         RoundEvent(
@@ -3339,6 +4758,64 @@ def test_collect_parallel_contributions_includes_monologue_stream_field_bias_for
     assert contribution.module_name == "MonologueStream"
     assert contribution.modulated_delta["monologue"] > 0.0
     assert contribution.modulated_delta["respond"] < 0.0
+
+
+def test_endogenous_monologue_contribution_does_not_call_remote_fragment_builder(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    state = controller.load_runtime_state()
+    state.round_count = 2
+    state.mode = "idle"
+    bucket = controller._monologue_state_bucket(state)
+    bucket["settings"]["generator_mode"] = "model"
+    committed_bucket, _ = controller.monologue_runtime.commit_catch_up(
+        {
+            "bucket": bucket,
+            "settings": dict(bucket.get("settings", {}) or {}),
+            "pulse_index": int(bucket.get("pulse_index", 0) or 0) + 1,
+            "next_pulse_at": "2026-04-08T12:01:00Z",
+        },
+        [
+            {
+                "fragment_id": "frag-1",
+                "recorded_at": "2026-04-08T12:00:00Z",
+                "category": "free_association",
+                "content": "我脑子里突然蹦出一个词。",
+                "source": "model",
+            }
+        ],
+    )
+    state.session_metadata["monologue_stream"] = committed_bucket
+    controller._save_state(state, sync=True)
+
+    monkeypatch.setattr(
+        controller,
+        "_generate_monologue_fragments_via_model",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("endogenous monologue should not call remote fragment builder")),
+    )
+    monkeypatch.setattr(
+        controller,
+        "_estimate_subjective_value_via_model",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("endogenous light should not call remote value model")),
+    )
+
+    round_context = controller.build_round_context(
+        RoundEvent(
+            source="endogenous",
+            content="endogenous trigger idle",
+            target="self",
+            cue="endogenous:idle",
+        ),
+        "companion",
+        "endogenous_light",
+    )
+
+    collected = controller.collect_parallel_contributions(
+        round_context=round_context,
+        scenario="companion",
+    )
+
+    contribution = collected["direct_action_contributions"]["MonologueStream"]
+    assert contribution.module_name == "MonologueStream"
 
 
 def test_endogenous_tick_can_realize_self_run_via_main_action_field(tmp_path, monkeypatch):
@@ -3418,14 +4895,15 @@ def test_monologue_trace_payload_surfaces_hidden_stream_evidence(tmp_path, monke
     state = controller.load_runtime_state()
     state.round_count = 2
     state.mode = "idle"
-    controller._save_state(state, sync=True)
-
-    def fake_catch_up(bucket, *, now_iso=None, fragment_builder=None):
-        updated = controller.monologue_runtime.ensure_bucket(bucket, now_iso=now_iso)
-        updated["last_generated_at"] = "2026-04-08T12:00:00Z"
-        updated["generated_total"] = int(updated.get("generated_total", 0) or 0) + 2
-        updated["category_counts"] = {"free_association": 1, "blank_fragment": 1}
-        generated = [
+    bucket = controller._monologue_state_bucket(state)
+    committed_bucket, _ = controller.monologue_runtime.commit_catch_up(
+        {
+            "bucket": bucket,
+            "settings": dict(bucket.get("settings", {}) or {}),
+            "pulse_index": int(bucket.get("pulse_index", 0) or 0) + 1,
+            "next_pulse_at": "2026-04-08T12:02:00Z",
+        },
+        [
             {
                 "fragment_id": "frag-a",
                 "recorded_at": "2026-04-08T12:00:00Z",
@@ -3440,10 +4918,10 @@ def test_monologue_trace_payload_surfaces_hidden_stream_evidence(tmp_path, monke
                 "content": "……",
                 "source": "model",
             },
-        ]
-        return updated, generated
-
-    monkeypatch.setattr(controller.monologue_runtime, "catch_up", fake_catch_up)
+        ],
+    )
+    state.session_metadata["monologue_stream"] = committed_bucket
+    controller._save_state(state, sync=True)
     monkeypatch.setattr(
         controller,
         "_sample_action_from_distribution",
@@ -3457,7 +4935,7 @@ def test_monologue_trace_payload_surfaces_hidden_stream_evidence(tmp_path, monke
     monologue_stream = trace["expressive_trace"]["monologue_stream"]
 
     assert monologue_stream["active"] is True
-    assert monologue_stream["fresh_generated"] is True
+    assert monologue_stream["fresh_generated"] is False
     assert monologue_stream["sample_fragments"][0]["content"] == "我脑子里突然蹦出一个词。"
     assert why_current["why"]["expressive_trace"]["monologue_stream"]["sample_fragments"][0]["category"] == "free_association"
 
@@ -3467,14 +4945,15 @@ def test_why_not_monologue_surfaces_hidden_stream_reason_summary(tmp_path, monke
     state = controller.load_runtime_state()
     state.round_count = 2
     state.mode = "idle"
-    controller._save_state(state, sync=True)
-
-    def fake_catch_up(bucket, *, now_iso=None, fragment_builder=None):
-        updated = controller.monologue_runtime.ensure_bucket(bucket, now_iso=now_iso)
-        updated["last_generated_at"] = "2026-04-08T12:00:00Z"
-        updated["generated_total"] = int(updated.get("generated_total", 0) or 0) + 2
-        updated["category_counts"] = {"free_association": 1, "blank_fragment": 1}
-        generated = [
+    bucket = controller._monologue_state_bucket(state)
+    committed_bucket, _ = controller.monologue_runtime.commit_catch_up(
+        {
+            "bucket": bucket,
+            "settings": dict(bucket.get("settings", {}) or {}),
+            "pulse_index": int(bucket.get("pulse_index", 0) or 0) + 1,
+            "next_pulse_at": "2026-04-08T12:02:00Z",
+        },
+        [
             {
                 "fragment_id": "frag-a",
                 "recorded_at": "2026-04-08T12:00:00Z",
@@ -3489,10 +4968,10 @@ def test_why_not_monologue_surfaces_hidden_stream_reason_summary(tmp_path, monke
                 "content": "……",
                 "source": "model",
             },
-        ]
-        return updated, generated
-
-    monkeypatch.setattr(controller.monologue_runtime, "catch_up", fake_catch_up)
+        ],
+    )
+    state.session_metadata["monologue_stream"] = committed_bucket
+    controller._save_state(state, sync=True)
     monkeypatch.setattr(
         controller,
         "_sample_action_from_distribution",
@@ -3859,6 +5338,34 @@ def test_console_refresh_payload_surfaces_latency_split_and_internal_labels_for_
     assert "endogenous_light" not in recent_actions["actions"][0]["summary"]
 
 
+def test_console_refresh_payload_reuses_cached_round_trace_for_same_round(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="Create one trace round for refresh diagnostics.",
+            target="user",
+            cue="refresh",
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    read_calls = {"count": 0}
+    real_read_round_record = controller.trace_store.read_round_record
+
+    def counted_read_round_record(round_id: int):
+        read_calls["count"] += 1
+        return real_read_round_record(round_id)
+
+    monkeypatch.setattr(controller.trace_store, "read_round_record", counted_read_round_record)
+
+    payload = controller.console_refresh_payload("latest")
+
+    assert payload["action_field"]["round_id"] == controller.load_runtime_state().round_count
+    assert read_calls["count"] == 1
+
+
 def test_state_payload_exposes_runtime_metrics_as_first_class_diagnostics(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     controller.tick(
@@ -3882,10 +5389,43 @@ def test_state_payload_exposes_runtime_metrics_as_first_class_diagnostics(tmp_pa
     assert runtime_metrics["total_turn_ms"] >= 1
     assert runtime_metrics["local_compute_ms"] >= 0
     assert performance["latency"]["local_compute_ms"] == runtime_metrics["local_compute_ms"]
-    assert performance["latency"]["latency_dominant"] in {"model_wait", "local_compute", "mixed"}
 
 
-def test_chat_tick_runtime_metrics_use_chat_standard_route_type(tmp_path):
+def test_console_state_reuses_runtime_metrics_from_state_payload(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="Please produce one round for console diagnostics.",
+            target="user",
+            cue="console",
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    real_state_payload = controller.state_runtime.state_payload
+    state_payload_calls = {"count": 0}
+
+    def wrapped_state_payload():
+        state_payload_calls["count"] += 1
+        return real_state_payload()
+
+    monkeypatch.setattr(controller.state_runtime, "state_payload", wrapped_state_payload)
+    monkeypatch.setattr(
+        controller.diagnostics_runtime,
+        "performance_payload",
+        lambda: (_ for _ in ()).throw(AssertionError("console_state should reuse performance from state_payload")),
+    )
+
+    payload = controller.console_state()
+
+    assert state_payload_calls["count"] == 1
+    assert payload["performance"]["runtime_metrics"]["route_type"]
+    assert payload["performance"]["latency"]["latency_dominant"] in {"model_wait", "local_compute", "mixed"}
+
+
+def test_chat_tick_runtime_metrics_use_chat_fast_route_type(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
 
     result = controller.tick(
@@ -3899,7 +5439,7 @@ def test_chat_tick_runtime_metrics_use_chat_standard_route_type(tmp_path):
         mode="interactive",
     )
 
-    assert result.trace.runtime_metrics["route_type"] == "chat_standard"
+    assert result.trace.runtime_metrics["route_type"] == "chat_fast"
 
 
 def test_chat_tick_runtime_metrics_can_upgrade_to_chat_deep_route_type(tmp_path):
@@ -3926,6 +5466,37 @@ def test_endogenous_tick_runtime_metrics_use_endogenous_light_route_type(tmp_pat
     trace = controller.trace_round(payload["round_id"])
 
     assert trace["runtime_metrics"]["route_type"] == "endogenous_light"
+
+
+def test_endogenous_light_tick_avoids_pfc_and_renderer_model_routes(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    route_hits = {"pfc": 0}
+
+    def fail_generate_pfc(event, state, scenario, context, *, model_call_traces=None):
+        route_hits["pfc"] += 1
+        return controller.agent_map["PFCAgent"].fallback_generate_candidates(event, state, scenario, context)
+
+    def fake_generate(route_name, request):
+        if str(route_name).startswith("renderer"):
+            raise AssertionError("endogenous_light should not call renderer model routes")
+        raise RuntimeError(f"fallback route for {route_name}")
+
+    def fake_generate_config(route_config, request):
+        route_name = str(getattr(route_config, "route_name", "") or getattr(route_config, "name", "") or "")
+        if route_name.startswith("renderer"):
+            raise AssertionError("endogenous_light should not call renderer model routes")
+        raise RuntimeError(f"fallback route for {route_name}")
+
+    monkeypatch.setattr(controller, "_generate_pfc_candidates_via_model", fail_generate_pfc)
+    monkeypatch.setattr(controller.model_router, "generate", fake_generate)
+    monkeypatch.setattr(controller.model_router, "generate_config", fake_generate_config)
+
+    payload = controller.run_endogenous_tick(trigger="idle", mode="endogenous_light")
+    trace = controller.trace_round(payload["round_id"])
+
+    assert trace["runtime_metrics"]["route_type"] == "endogenous_light"
+    assert route_hits["pfc"] == 0
+    assert all(item.get("binding_key") not in {"PFCAgent", "Renderer"} for item in list(trace.get("model_call_traces", []) or []))
 
 
 def test_endogenous_replay_runtime_metrics_use_endogenous_deep_route_type(tmp_path):

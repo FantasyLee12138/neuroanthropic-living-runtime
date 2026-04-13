@@ -21,7 +21,7 @@ def test_memory_store_promotes_hot_entries_into_warm_tier(tmp_path):
     top = store.memory_top(limit=5)
 
     assert (tmp_path / ".alive" / "memory" / "episodic_warm.json").exists()
-    assert (tmp_path / ".alive" / "memory" / "episodic_archive.json").exists()
+    assert (tmp_path / ".alive" / "memory" / "episodic_cold.json").exists()
     assert (tmp_path / ".alive" / "memory" / "stable_priors.json").exists()
     assert any(item["cue"] == "coffee" and item["tier"] == "warm" for item in top)
 

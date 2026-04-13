@@ -9,6 +9,7 @@ Make user-visible fallback expression a last-resort bottom line instead of the d
 - Keep internal typed fallbacks unchanged.
 - Change only user-visible rendering fallback behavior.
 - Use `deepseek` and `doubao-lite` as the fallback rendering model chain.
+- Do not apply this fallback humanization rule to observer/workbench read models such as thinking, memory, dream, trace, or diagnostics surfaces.
 
 ## Design
 
@@ -16,6 +17,7 @@ Make user-visible fallback expression a last-resort bottom line instead of the d
 
 - Skill-level typed fallback for `state_patch`, `score_map`, `contribution`, `gist`, and similar contracts remains deterministic and schema-safe.
 - The existing `fallback_render_text()` function remains the final deterministic bottom line.
+- Read models that surface existing runtime evidence should continue to expose their free-form body text and may only humanize labels or layout.
 
 ### What changes
 
