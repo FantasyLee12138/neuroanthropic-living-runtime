@@ -863,7 +863,95 @@ def test_observer_exposes_model_status(tmp_path):
     assert payload["agent_bindings"]["planner"] == "medium_model"
     assert "chat_fast" in payload["routes"]
     assert payload["route_policies"]["chat_fast"]["latency_budget_ms"] == 700
-    assert payload["route_policies"]["task_run"]["hot_path"] == "supervisor_run"
+    assert set(payload["route_policies"]) == {
+        "chat_fast",
+        "chat_standard",
+        "chat_deep",
+        "endogenous_light",
+        "endogenous_deep",
+        "dream_sleep",
+    }
+    assert "task_run" not in payload["route_policies"]
+
+
+def test_observer_read_models_share_canonical_overlap_fields(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(source="user", content="帮我看看现在的状态，并记住咖啡。", target="user", cue="咖啡"),
+        scenario="chat",
+        mode="interactive",
+    )
+    controller.flush_pending_io(raise_on_error=True)
+
+    client = TestClient(
+        create_app(
+            project_root=tmp_path,
+            config_root=CONFIG_ROOT,
+            service_metadata={
+                "instance_id": "observer-test-instance",
+                "pid": 4242,
+                "host": "127.0.0.1",
+                "port": 9876,
+                "url": "http://127.0.0.1:9876/dashboard",
+                "started_at": "2026-04-08T12:00:00+08:00",
+            },
+        )
+    )
+
+    state_payload = client.get("/state").json()
+    service_payload = client.get("/service/status").json()
+    refresh_payload = client.get("/console/refresh").json()
+    bootstrap_payload = client.get("/web/runtime/bootstrap").json()
+
+    service_keys = {
+        "instance_id",
+        "pid",
+        "host",
+        "port",
+        "url",
+        "started_at",
+        "healthy",
+        "accepting_http",
+        "http_ready",
+        "event_loop_alive",
+        "runtime_serial_active",
+        "observer_turn_active",
+        "active_turn_sessions",
+        "autonomy_runner_alive",
+        "autonomy_runner_stalled",
+        "project_root",
+        "config_root",
+    }
+    assert {key: state_payload["service"][key] for key in service_keys} == {key: service_payload[key] for key in service_keys}
+    assert {key: bootstrap_payload["service"][key] for key in service_keys} == {key: service_payload[key] for key in service_keys}
+    assert {key: refresh_payload["service"][key] for key in service_keys} == {key: service_payload[key] for key in service_keys}
+    autonomy_keys = {
+        "enabled",
+        "running",
+        "desired_running",
+        "loop_should_run",
+        "runner_attached",
+        "runner_alive",
+        "stalled",
+        "heartbeat_state",
+        "runner_source",
+        "profile",
+        "stop_reason",
+        "last_error",
+        "kill_switch_available",
+        "allowed_commands",
+        "blocked_commands",
+    }
+    assert {key: refresh_payload["autonomy"][key] for key in autonomy_keys} == {
+        key: bootstrap_payload["autonomy"][key] for key in autonomy_keys
+    }
+    assert {key: state_payload["autonomy"][key] for key in autonomy_keys} == {
+        key: bootstrap_payload["autonomy"][key] for key in autonomy_keys
+    }
+    assert state_payload["current_round"] == refresh_payload["state"]["current_round"]
+    assert state_payload["controls"] == refresh_payload["controls"]
+    assert state_payload["alerts"] == refresh_payload["alerts"]
+    assert state_payload["dashboards"] == refresh_payload["dashboards"]
 
 
 def test_observer_settings_can_override_newborn_unlocks_and_local_model(tmp_path):
@@ -1023,6 +1111,127 @@ def test_observer_settings_allow_zero_autonomy_hourly_caps(tmp_path):
     assert autonomy_state["max_tool_actions_per_hour"] == 0
     assert budget_usage["max_rounds_per_hour"] == 0
     assert budget_usage["max_tool_actions_per_hour"] == 0
+
+
+def test_observer_exposes_cognitive_chain_metrics_and_control_proposals(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="Remember tea and walk through the full cognitive chain.",
+            target="user",
+            cue="tea",
+            valence=0.2,
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+    controller.flush_pending_io(raise_on_error=True)
+
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+
+    cognitive_chain_response = client.get("/trace/layer-chain/1")
+    replay_layer_response = client.get("/replay/layer/1/memory")
+    cognitive_metrics_response = client.get("/metrics/cognitive")
+    feedback_metrics_response = client.get("/metrics/feedback")
+    controls_current_response = client.get("/controls/current")
+    proposal_create_response = client.post(
+        "/controls/proposals",
+        json={
+            "title": "Throttle initiative",
+            "target": "initiative",
+            "patch": {"behavior_policies": {"initiative": {"trigger_interval_minutes": 12}}},
+        },
+    )
+
+    assert cognitive_chain_response.status_code == 200
+    assert replay_layer_response.status_code == 200
+    assert cognitive_metrics_response.status_code == 200
+    assert feedback_metrics_response.status_code == 200
+    assert controls_current_response.status_code == 200
+    assert proposal_create_response.status_code == 200
+
+    chain_payload = cognitive_chain_response.json()
+    assert [item["layer"] for item in chain_payload["cognitive_chain"]] == [
+        "perception",
+        "memory",
+        "cognition",
+        "decision",
+        "execution",
+        "feedback",
+    ]
+    assert replay_layer_response.json()["layer"] == "memory"
+    assert "memory_awakening_rate" in cognitive_metrics_response.json()
+    assert "behavior_effectiveness" in feedback_metrics_response.json()
+
+    proposal_payload = proposal_create_response.json()
+    proposal_id = proposal_payload["proposal"]["proposal_id"]
+
+    proposal_apply_response = client.post(f"/controls/proposals/{proposal_id}/apply", json={"approved": True})
+    proposal_promote_response = client.post(f"/controls/proposals/{proposal_id}/promote", json={})
+    alerts_rules_response = client.get("/alerts/rules")
+    dashboards_current_response = client.get("/dashboards/current")
+
+    assert proposal_apply_response.status_code == 200
+    assert proposal_promote_response.status_code == 200
+    assert alerts_rules_response.status_code == 200
+    assert dashboards_current_response.status_code == 200
+    assert proposal_apply_response.json()["current"]["layer_controls"]["behavior_policies"]["initiative"]["trigger_interval_minutes"] == 12
+    assert dashboards_current_response.json()["dashboards"]
+    assert "rules" in alerts_rules_response.json()
+
+
+def test_observer_supports_layer_fuse_and_alert_history_round_trip(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="Remember tea and expose the full observer chain.",
+            target="user",
+            cue="tea",
+            valence=0.18,
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+    controller.flush_pending_io(raise_on_error=True)
+
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+
+    proposal_response = client.post(
+        "/controls/proposals",
+        json={
+            "title": "Alert rule for fuse hint",
+            "target": "alerts",
+            "patch": {
+                "alerts": {
+                    "rules": [
+                        {
+                            "rule_id": "effectiveness-watch",
+                            "metric": "behavior_effectiveness",
+                            "operator": "<",
+                            "threshold": 1.1,
+                            "window": 1,
+                            "action": "suggest_fuse",
+                        }
+                    ]
+                }
+            },
+        },
+    )
+    proposal_id = proposal_response.json()["proposal"]["proposal_id"]
+    apply_response = client.post(f"/controls/proposals/{proposal_id}/apply", json={"approved": True})
+    fuse_response = client.post("/controls/fuses/cognition", json={"mode": "degraded", "throttle": 0.25, "reason": "api_guard"})
+    restore_response = client.post("/controls/fuses/cognition/restore", json={"reason": "api_restore"})
+    alert_history_response = client.get("/alerts/history")
+
+    assert apply_response.status_code == 200
+    assert fuse_response.status_code == 200
+    assert restore_response.status_code == 200
+    assert alert_history_response.status_code == 200
+    assert fuse_response.json()["layer_fuses"]["cognition"]["mode"] == "degraded"
+    assert restore_response.json()["layer_fuses"]["cognition"]["mode"] == "normal"
+    assert any(item["rule_id"] == "effectiveness-watch" for item in alert_history_response.json()["history"])
 
 
 def test_observer_exposes_terminal_session_mapping(tmp_path):
@@ -1305,8 +1514,28 @@ def test_dashboard_shell_surfaces_tlh_observer_sections(tmp_path):
     assert "自治状态" in response.text
     assert "最近自治动作" in response.text
     assert "权限边界与预算" in response.text
+    assert "认知链路" in response.text
+    assert "层级配置" in response.text
+    assert "应急熔断" in response.text
     assert 'id="language-switch"' in response.text
     assert 'data-mode=' not in response.text
+
+
+def test_dashboard_shell_wires_cognitive_chain_control_surfaces(tmp_path):
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+
+    response = client.get("/dashboard")
+
+    assert response.status_code == 200
+    assert "/trace/layer-chain/" in response.text
+    assert "/replay/layer/" in response.text
+    assert "/metrics/cognitive" in response.text
+    assert "/metrics/feedback" in response.text
+    assert "/controls/current" in response.text
+    assert "/controls/proposals" in response.text
+    assert "/controls/fuses/" in response.text
+    assert "/alerts/history" in response.text
+    assert "/dashboards/current" in response.text
 
 
 def test_dashboard_shell_surfaces_web_first_workspace_entry(tmp_path):
@@ -1349,6 +1578,9 @@ def test_observer_console_talk_and_endogenous_tick_return_console_refresh_payloa
     assert "timeline" in talk_payload["console"]
     assert "why_current" in talk_payload["console"]
     assert "why_not" in talk_payload["console"]
+    assert "service" in talk_payload["console"]
+    assert "controls" in talk_payload["console"]
+    assert "alerts" in talk_payload["console"]
 
     tick_response = client.post("/console/endogenous/tick", json={"trigger": "idle", "mode": "endogenous_light"})
 
@@ -1359,6 +1591,70 @@ def test_observer_console_talk_and_endogenous_tick_return_console_refresh_payloa
     assert "state" in tick_payload["console"]
     assert "action_field" in tick_payload["console"]
     assert "why_not" in tick_payload["console"]
+    assert "service" in tick_payload["console"]
+    assert "controls" in tick_payload["console"]
+    assert "alerts" in tick_payload["console"]
+
+
+def test_runtime_start_pause_resume_and_wake_reuse_canonical_runtime_state_surface(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    controller.tick(
+        RoundEvent(source="user", content="请告诉我当前状态。", target="user", cue="状态"),
+        scenario="chat",
+        mode="interactive",
+    )
+    run_payload = controller.start_run("inspect runtime state")
+    controller.pause_run(run_payload["run_id"])
+    controller.flush_pending_io(raise_on_error=True)
+
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+
+    state_response = client.get("/state")
+    start_response = client.post("/web/runtime/start", json={})
+    pause_response = client.post("/web/runtime/pause", json={})
+    resume_response = client.post("/web/runtime/resume", json={})
+    wake_response = client.post("/web/runtime/wake", json={})
+
+    assert state_response.status_code == 200
+    assert start_response.status_code == 200
+    assert pause_response.status_code == 200
+    assert resume_response.status_code == 200
+    assert wake_response.status_code == 200
+
+    state_payload = state_response.json()
+    start_payload = start_response.json()
+    pause_payload = pause_response.json()
+    resume_payload = resume_response.json()
+    wake_payload = wake_response.json()
+
+    expected_state_keys = {"current_round", "controls", "alerts", "dashboards", "service", "autonomy"}
+    stable_controls = {
+        "layer_controls": state_payload["controls"]["layer_controls"],
+        "layer_fuses": state_payload["controls"]["layer_fuses"],
+        "proposals": state_payload["controls"]["proposals"],
+    }
+    stable_alerts = {
+        "rules": state_payload["alerts"]["rules"]["rules"],
+        "history": state_payload["alerts"]["history"]["history"],
+    }
+    stable_dashboards = {
+        "dashboards": state_payload["dashboards"]["dashboards"],
+    }
+    for payload in (start_payload, pause_payload, resume_payload, wake_payload):
+        assert payload["state"]["current_round"] == state_payload["current_round"]
+        assert {
+            "layer_controls": payload["state"]["controls"]["layer_controls"],
+            "layer_fuses": payload["state"]["controls"]["layer_fuses"],
+            "proposals": payload["state"]["controls"]["proposals"],
+        } == stable_controls
+        assert {
+            "rules": payload["state"]["alerts"]["rules"]["rules"],
+            "history": payload["state"]["alerts"]["history"]["history"],
+        } == stable_alerts
+        assert {
+            "dashboards": payload["state"]["dashboards"]["dashboards"],
+        } == stable_dashboards
+        assert expected_state_keys.issubset(payload["state"])
 
 
 def test_observer_exposes_autonomy_lifecycle_routes_and_console_payload(tmp_path):

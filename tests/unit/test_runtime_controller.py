@@ -199,12 +199,29 @@ def test_model_status_surfaces_agent_tiers_and_bindings(tmp_path):
     assert status["agent_bindings"]["planner"] == "medium_model"
     assert status["agent_bindings"]["PerspectiveModel"] == "medium_model"
     assert status["agent_bindings"]["PFCAgent"] == "medium_model"
+    assert set(status["route_policies"]) == {
+        "chat_fast",
+        "chat_standard",
+        "chat_deep",
+        "endogenous_light",
+        "endogenous_deep",
+        "dream_sleep",
+    }
     assert status["route_policies"]["chat_fast"]["latency_budget_ms"] == 700
     assert status["route_policies"]["chat_fast"]["default_tier"] in {"medium_model", "small_model"}
     assert status["route_policies"]["chat_standard"]["hot_path"] == "full_tick"
     assert "authenticity_risk_high" in status["route_policies"]["chat_standard"]["upgrade_conditions"]
     assert status["route_policies"]["endogenous_light"]["entry_mode"] == "idle"
     assert status["route_policies"]["dream_sleep"]["entry_mode"] == "sleep"
+
+
+def test_plan_turn_keeps_task_run_internal_but_uses_frozen_public_route_type(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    plan = controller.plan_turn("总结这个仓库结构")
+
+    assert plan.route == "task_run"
+    assert plan.route_type == "chat_deep"
 
 
 def test_value_agent_build_value_contribution_matches_controller_compatibility_path(tmp_path):
@@ -575,6 +592,128 @@ def test_acceptance_report_and_why_this_surface_memory_write_gate(tmp_path, monk
     assert why_payload["memory_write_gate"]["reason"] == "pollution_guard"
     assert report["memory_write_gate"]["suppressed_round_rate"] == 1.0
     assert report["memory_write_gate"]["samples"][0]["reason"] == "pollution_guard"
+
+
+def test_why_this_and_replay_layer_surface_cognitive_chain(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="Remember tea and explain the full reasoning chain.",
+            target="user",
+            cue="tea",
+            valence=0.2,
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+
+    why_payload = controller.why_this(1)
+    replay_payload = controller.replay_layer(1, "memory")
+
+    assert [item["layer"] for item in why_payload["cognitive_chain"]] == [
+        "perception",
+        "memory",
+        "cognition",
+        "decision",
+        "execution",
+        "feedback",
+    ]
+    assert "cognitive" in why_payload["layer_metrics"]
+    assert "feedback" in why_payload["layer_metrics"]
+    assert why_payload["feedback_loop"]["feedback_metrics"]["behavior_effectiveness"] >= 0.0
+    assert replay_payload["round_id"] == 1
+    assert replay_payload["layer"] == "memory"
+    assert replay_payload["snapshot"]["input_vector"]
+    assert replay_payload["snapshot"]["transform_summary"]
+
+
+def test_control_proposal_apply_and_promote_updates_runtime_controls(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    proposal = controller.create_control_proposal(
+        {
+            "title": "Tighten initiative cadence",
+            "target": "initiative",
+            "patch": {
+                "behavior_policies": {
+                    "initiative": {
+                        "trigger_interval_minutes": 15,
+                    }
+                }
+            },
+        }
+    )
+
+    assert proposal["status"] == "pending"
+
+    applied = controller.apply_control_proposal(proposal["proposal_id"], approved=True)
+    current = controller.controls_current()
+
+    assert applied["status"] == "applied"
+    assert current["layer_controls"]["behavior_policies"]["initiative"]["trigger_interval_minutes"] == 15
+
+    promoted = controller.promote_control_proposal(proposal["proposal_id"])
+
+    assert promoted["status"] == "promoted"
+    runtime_yaml = tmp_path / "config" / "runtime.yaml"
+    assert runtime_yaml.exists()
+    assert "trigger_interval_minutes: 15" in runtime_yaml.read_text(encoding="utf-8")
+
+
+def test_alert_history_and_layer_fuse_round_trip_are_audited(tmp_path):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+
+    controller.tick(
+        RoundEvent(
+            source="user",
+            content="Remember tea and reflect on the cognitive chain.",
+            target="user",
+            cue="tea",
+            valence=0.12,
+        ),
+        scenario="chat",
+        mode="interactive",
+    )
+    controller.flush_pending_io(raise_on_error=True)
+
+    proposal = controller.create_control_proposal(
+        {
+            "title": "Force alert trigger",
+            "target": "alerts",
+            "patch": {
+                "alerts": {
+                    "rules": [
+                        {
+                            "rule_id": "effectiveness-watch",
+                            "metric": "behavior_effectiveness",
+                            "operator": "<",
+                            "threshold": 1.1,
+                            "window": 1,
+                            "action": "suggest_fuse",
+                        }
+                    ]
+                }
+            },
+        }
+    )
+    controller.apply_control_proposal(proposal["proposal_id"], approved=True)
+
+    alert_history = controller.alert_history_payload()
+    fuse_payload = controller.apply_layer_fuse(
+        "cognition",
+        {"mode": "degraded", "throttle": 0.35, "muted": False},
+        reason="operator_overload_guard",
+    )
+    restored_payload = controller.restore_layer_fuse("cognition", reason="operator_restore")
+
+    assert any(item["rule_id"] == "effectiveness-watch" for item in alert_history["history"])
+    assert fuse_payload["layer_fuses"]["cognition"]["mode"] == "degraded"
+    assert restored_payload["layer_fuses"]["cognition"]["mode"] == "normal"
+    event_types = [item["event_type"] for item in restored_payload["recent_control_events"]]
+    assert "fuse_engaged" in event_types
+    assert "fuse_restored" in event_types
 
 
 def test_why_this_and_acceptance_report_surface_failure_taxonomy(tmp_path, monkeypatch):

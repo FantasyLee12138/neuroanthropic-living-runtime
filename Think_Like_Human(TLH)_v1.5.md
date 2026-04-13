@@ -33,6 +33,14 @@ TLH v1.5 的核心不是再加一个“更像人”的 sidecar，而是让以下
 - **受控自主学习**
   网络访问和文件夹操作可以开放，但只能在 allowlist、可回滚、可观测的边界内开放。
 
+## 六层 observer / control contract
+
+- TLH v1.5 的正式观测与控制主轴是六层链路：`感知 -> 记忆 -> 认知 -> 决策 -> 执行 -> 反馈`。
+- 反馈层由 `FeedbackLoopRuntime` 闭合，负责把 trace 末层反馈、control events、fuse hits 和 memory writeback gate 归并到唯一反馈面。
+- `trace / why / why-not / replay` 必须直接读取同一 round trace，禁止为了解释再跑一次模型。
+- `config/runtime.yaml`、runtime overlay、observer proposal/apply/promote 共同构成唯一控制面，前端不允许持有第二份可写控制状态。
+- 六层扩展是对 TLH 单一真相面的纵向展开，不是引入第二状态源或 sidecar runtime。
+
 ## 受控自主学习原则
 
 - 默认学习模式是 `guided-learn`

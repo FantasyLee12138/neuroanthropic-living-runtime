@@ -257,6 +257,7 @@ class RoundTrace:
     motivation_feedback: dict[str, Any] = field(default_factory=dict)
     initiative: dict[str, Any] = field(default_factory=dict)
     expressive_trace: dict[str, Any] = field(default_factory=dict)
+    feedback_loop: dict[str, Any] = field(default_factory=dict)
     endogenous_tick_reason: dict[str, Any] = field(default_factory=dict)
     endogenous_policy_shift: dict[str, Any] = field(default_factory=dict)
     endogenous_trigger_context: EndogenousTriggerContext | dict[str, Any] | None = None
@@ -279,6 +280,9 @@ class RoundTrace:
     dream_effect_summary: dict[str, Any] = field(default_factory=dict)
     model_call_traces: list[dict[str, Any]] = field(default_factory=list)
     runtime_metrics: dict[str, Any] = field(default_factory=dict)
+    cognitive_chain: list[dict[str, Any]] = field(default_factory=list)
+    layer_metrics: dict[str, Any] = field(default_factory=dict)
+    control_events: list[dict[str, Any]] = field(default_factory=list)
     resample_count: int = 0
 
     def __post_init__(self) -> None:
@@ -1133,6 +1137,10 @@ class RuntimeState:
     stop_reason: dict[str, Any] = field(default_factory=dict)
     dirty_worktree_detected: bool = False
     commit_permission_required: bool = True
+    layer_controls: dict[str, Any] = field(default_factory=dict)
+    layer_fuses: dict[str, Any] = field(default_factory=dict)
+    dashboard_state: dict[str, Any] = field(default_factory=dict)
+    alert_state: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if isinstance(self.subject_core, dict):
