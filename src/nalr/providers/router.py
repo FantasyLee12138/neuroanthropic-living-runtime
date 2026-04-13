@@ -658,7 +658,9 @@ class ModelRouter:
     def _route_failure_triggers_failover(self, route: ModelRouteConfig, exc: Exception) -> bool:
         if not self.failover.get("enabled") or not self._is_remote_route(route):
             return False
-        if isinstance(exc, (MissingModelCredentialError, ModelProviderError, TimeoutError, OSError)):
+        if isinstance(exc, MissingModelCredentialError):
+            return False
+        if isinstance(exc, (ModelProviderError, TimeoutError, OSError)):
             return True
         return isinstance(exc, httpx.HTTPError)
 

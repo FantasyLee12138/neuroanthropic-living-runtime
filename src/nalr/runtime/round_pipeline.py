@@ -753,12 +753,12 @@ class RoundPipelineRuntime(_ControllerBackedRuntime):
     ) -> bool:
         if not violation_types:
             return False
+        if render_plan.identity_context.query_kind in {"self_identity", "provider_identity", "answer_explanation"}:
+            return True
         if route_type in {"chat_deep", "task_run", "endogenous_deep"}:
             return True
         if route_type in {"chat_fast", "endogenous_light", "dream_sleep"}:
             return False
-        if render_plan.identity_context.query_kind in {"self_identity", "provider_identity", "answer_explanation"}:
-            return True
         if any(item in {"provider_leak", "false_self_claim"} for item in violation_types):
             return True
         return (
@@ -1453,7 +1453,7 @@ class RoundPipelineRuntime(_ControllerBackedRuntime):
                 task_name = str(task["name"])
                 priority = str(task.get("priority", "required"))
                 parallel_group = task.get("parallel_group")
-                agent_tier = task.get("agent_tier")
+                binding_tier = task.get("binding_tier")
                 timeout_ms = int(task.get("timeout_ms", 0) or 0)
                 task_outcome = "completed"
                 try:
@@ -1477,7 +1477,7 @@ class RoundPipelineRuntime(_ControllerBackedRuntime):
                             result,
                             extra={
                                 "parallel_group": parallel_group,
-                                "agent_tier": agent_tier,
+                                "binding_tier": binding_tier,
                                 "task_priority": priority,
                                 "task_outcome": task_outcome,
                                 "task_type": task_type,
@@ -1502,7 +1502,7 @@ class RoundPipelineRuntime(_ControllerBackedRuntime):
                             result,
                             extra={
                                 "parallel_group": parallel_group,
-                                "agent_tier": agent_tier,
+                                "binding_tier": binding_tier,
                                 "task_priority": priority,
                                 "task_outcome": task_outcome,
                                 "task_type": task_type,
@@ -1515,7 +1515,7 @@ class RoundPipelineRuntime(_ControllerBackedRuntime):
                     if task_type == "skill":
                         output, result = raw_result
                         result.parallel_group = parallel_group
-                        result.agent_tier = agent_tier
+                        result.binding_tier = binding_tier
                         setattr(result, "task_priority", priority)
                         setattr(result, "task_outcome", "fallback" if result.degraded else "completed")
                         setattr(result, "task_type", task_type)
@@ -1526,7 +1526,7 @@ class RoundPipelineRuntime(_ControllerBackedRuntime):
                             result,
                             extra={
                                 "parallel_group": parallel_group,
-                                "agent_tier": agent_tier,
+                                "binding_tier": binding_tier,
                                 "task_priority": priority,
                                 "task_outcome": getattr(result, "task_outcome", "completed"),
                                 "task_type": task_type,
@@ -1547,7 +1547,7 @@ class RoundPipelineRuntime(_ControllerBackedRuntime):
                             "task_outcome": task_outcome,
                             "timeout_ms": timeout_ms,
                             "latency_ms": latency_ms,
-                            "agent_tier": agent_tier,
+                            "binding_tier": binding_tier,
                             "started_at_ms": round(started * 1000, 3),
                             "finished_at_ms": round(time.perf_counter() * 1000, 3),
                         }
@@ -1594,7 +1594,7 @@ class RoundPipelineRuntime(_ControllerBackedRuntime):
             fallback_cost_class=spec.fallback_route.cost_class if spec.fallback_route else None,
             breaker_state={},
             parallel_group=task.get("parallel_group"),
-            agent_tier=task.get("agent_tier"),
+            binding_tier=task.get("binding_tier"),
             task_priority=str(task.get("priority", "required")),
             task_outcome="timeout" if failure_policy == "parallel_timeout" else "fallback",
             task_type=str(task.get("task_type", "skill")),
@@ -2608,7 +2608,7 @@ class RoundPipelineRuntime(_ControllerBackedRuntime):
                     "parallel_group": "intent_prefetch",
                     "priority": "required",
                     "task_type": "callable",
-                    "agent_tier": "state_machine",
+                    "binding_tier": "state_machine",
                 },
                 {
                     "name": "grounding_capsule",
@@ -2624,7 +2624,7 @@ class RoundPipelineRuntime(_ControllerBackedRuntime):
                     "parallel_group": "intent_prefetch",
                     "priority": "speculative",
                     "task_type": "callable",
-                    "agent_tier": "state_machine",
+                    "binding_tier": "state_machine",
                 },
             ],
             skill_traces=skill_traces,
@@ -2712,7 +2712,7 @@ class RoundPipelineRuntime(_ControllerBackedRuntime):
                         projection_reason="typed fallback",
                     ),
                     "parallel_group": "salience_value_prefetch",
-                    "agent_tier": self._agent_tier("SalienceAgent"),
+                    "binding_tier": self._pipeline_tier("SalienceAgent"),
                 },
                 {
                     "name": "value_scores",
@@ -2728,7 +2728,7 @@ class RoundPipelineRuntime(_ControllerBackedRuntime):
                     ),
                     "fallback_value": {"scores": {}},
                     "parallel_group": "salience_value_prefetch",
-                    "agent_tier": self._agent_tier("ValueAgent"),
+                    "binding_tier": self._pipeline_tier("ValueAgent"),
                     "priority": "optional" if value_prefetch_timeout_ms > 0 else "required",
                     "timeout_ms": value_prefetch_timeout_ms,
                 },
@@ -3853,7 +3853,7 @@ class RoundPipelineRuntime(_ControllerBackedRuntime):
                     "inputs": {"expression_profile": expression},
                     "provider": lambda expression_profile: output_gate.run_skill("render_tone_profile", expression_profile),
                     "parallel_group": "output_profiles",
-                    "agent_tier": self._agent_tier("OutputGate"),
+                    "binding_tier": self._pipeline_tier("OutputGate"),
                 },
                 {
                     "name": "delay_params",
@@ -3861,7 +3861,7 @@ class RoundPipelineRuntime(_ControllerBackedRuntime):
                     "inputs": {"expression_profile": expression},
                     "provider": lambda expression_profile: output_gate.run_skill("compute_delay_profile", expression_profile),
                     "parallel_group": "output_profiles",
-                    "agent_tier": self._agent_tier("OutputGate"),
+                    "binding_tier": self._pipeline_tier("OutputGate"),
                 },
             ],
             skill_traces=skill_traces,
@@ -3900,7 +3900,7 @@ class RoundPipelineRuntime(_ControllerBackedRuntime):
                         ),
                         "fallback_provider": lambda event, state, scenario, context, sampled_action, relation_state: perspective.fallback_infer_other_state(event, state, scenario, context),
                         "parallel_group": "late_perspective",
-                        "agent_tier": self._agent_tier("PerspectiveModel"),
+                        "binding_tier": self._pipeline_tier("PerspectiveModel"),
                     },
                     {
                         "name": "reaction_hypothesis",
@@ -3918,7 +3918,7 @@ class RoundPipelineRuntime(_ControllerBackedRuntime):
                         ),
                         "fallback_provider": lambda event, state, scenario, context, sampled_action, relation_state: perspective.fallback_simulate_other_reaction(event, state, scenario, context),
                         "parallel_group": "late_perspective",
-                        "agent_tier": self._agent_tier("PerspectiveModel"),
+                        "binding_tier": self._pipeline_tier("PerspectiveModel"),
                     },
                 ],
                 skill_traces=skill_traces,

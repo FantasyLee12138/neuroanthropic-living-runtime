@@ -213,7 +213,7 @@ class DiagnosticsRuntimeService:
         latest_trace: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         controller = self.controller
-        payload = state_payload or controller.state_hot_payload()
+        payload = state_payload or controller.state_payload()
         truth_payload = {
             "runtime_revision": int(payload.get("runtime_revision", 0) or 0),
             "last_mutation_at": str(payload.get("last_mutation_at") or ""),

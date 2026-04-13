@@ -622,6 +622,21 @@ def test_medium_model_route_resolution_for_planner_and_perspective(tmp_path):
     assert renderer_route.model == "deepseek-chat"
 
 
+def test_route_config_for_binding_prefers_credentialed_remote_tier_when_default_tier_is_unavailable(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("ARK_SMALL_MODEL_API_KEY", raising=False)
+    monkeypatch.setenv("ARK_API_KEY", "ark-live-key")
+
+    route = controller._route_config_for_binding("planner", route_name="planner")
+
+    assert route is not None
+    assert route.backend == "doubao"
+    assert route.model == "doubao-seed-2-0-pro-260215"
+    assert route.api_key_env == "ARK_API_KEY"
+    assert getattr(route, "effective_tier", "") == "large_model"
+
+
 def test_renderer_route_escalates_to_large_model_for_chat_deep(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
 
@@ -654,7 +669,7 @@ def test_pfc_route_escalates_to_large_model_when_relation_risk_is_high(tmp_path)
 
 def test_route_config_for_binding_falls_back_to_named_route_when_tier_missing(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
-    controller.config["models"]["agent_model_bindings"]["Renderer"] = "large_model"
+    controller.config["models"].setdefault("pipeline_model_bindings", {})["Renderer"] = "large_model"
     controller.config["models"]["model_tiers"].pop("large_model", None)
 
     route = controller._route_config_for_binding("Renderer", route_name="renderer")
@@ -666,7 +681,7 @@ def test_route_config_for_binding_falls_back_to_named_route_when_tier_missing(tm
 
 def test_call_bound_model_route_prefers_generate_config_when_generate_is_instance_wrapped(tmp_path, monkeypatch):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
-    controller.config["models"]["agent_model_bindings"]["Renderer"] = "large_model"
+    controller.config["models"].setdefault("pipeline_model_bindings", {})["Renderer"] = "large_model"
 
     request = ModelRequest(
         system_prompt="system",
@@ -714,30 +729,24 @@ def test_call_bound_model_route_prefers_generate_config_when_generate_is_instanc
     assert response.model == "doubao-seed-2-0-pro-260215"
 
 
-def test_normalize_observer_settings_drops_invalid_binding_override_but_keeps_builtin_tier_names(tmp_path):
+def test_normalize_observer_settings_rejects_legacy_agent_binding_override(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
 
-    normalized = controller.normalize_observer_settings_payload(
-        {
-            "models": {
-                "agent_model_bindings": {
-                    "Renderer": "ghost_tier",
-                    "PFCAgent": "medium_model",
-                    "planner": "large_model",
+    with pytest.raises(ValueError, match="agent_model_bindings"):
+        controller.normalize_observer_settings_payload(
+            {
+                "models": {
+                    "agent_model_bindings": {
+                        "Renderer": "ghost_tier",
+                        "PFCAgent": "medium_model",
+                    }
                 }
-            }
-        },
-        base=controller.observer_settings_current(),
-    )
-
-    bindings = normalized["models"]["agent_model_bindings"]
-
-    assert "Renderer" not in bindings
-    assert bindings["PFCAgent"] == "medium_model"
-    assert bindings["planner"] == "large_model"
+            },
+            base=controller.observer_settings_current(),
+        )
 
 
-def test_normalize_observer_settings_keeps_binding_to_custom_declared_tier(tmp_path):
+def test_normalize_observer_settings_keeps_module_binding_to_custom_declared_tier(tmp_path):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
 
     normalized = controller.normalize_observer_settings_payload(
@@ -755,18 +764,18 @@ def test_normalize_observer_settings_keeps_binding_to_custom_declared_tier(tmp_p
                         "enabled": True,
                     }
                 },
-                "agent_model_bindings": {
-                    "Renderer": "custom_remote",
+                "module_model_bindings": {
+                    "deep_renderer": "custom_remote",
                 },
             }
         },
         base=controller.observer_settings_current(),
     )
 
-    assert normalized["models"]["agent_model_bindings"]["Renderer"] == "custom_remote"
+    assert normalized["models"]["module_model_bindings"]["deep_renderer"] == "custom_remote"
 
 
-def test_load_observer_settings_file_rewrites_invalid_binding_override(tmp_path):
+def test_load_observer_settings_file_rejects_legacy_binding_override(tmp_path):
     runtime_dir = tmp_path / ".alive" / "runtime"
     runtime_dir.mkdir(parents=True)
     observer_settings_path = runtime_dir / "observer_settings.json"
@@ -786,14 +795,8 @@ def test_load_observer_settings_file_rewrites_invalid_binding_override(tmp_path)
         encoding="utf-8",
     )
 
-    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
-
-    bindings = controller.observer_settings_current()["models"]["agent_model_bindings"]
-    persisted = json.loads(observer_settings_path.read_text(encoding="utf-8"))
-
-    assert "Renderer" not in bindings
-    assert "Renderer" not in persisted["models"]["agent_model_bindings"]
-    assert persisted["models"]["agent_model_bindings"]["PFCAgent"] == "medium_model"
+    with pytest.raises(ValueError, match="agent_model_bindings"):
+        RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
 
 
 def test_execute_parallel_skills_runs_independent_tasks_concurrently(tmp_path):
@@ -950,7 +953,7 @@ def test_tick_does_not_rerun_value_model_after_prefetch_timeout_fallback(tmp_pat
     assert result.trace.runtime_metrics["route_type"] == "chat_fast"
 
 
-def test_small_model_salience_provider_uses_agent_tier_config(tmp_path, monkeypatch):
+def test_small_model_salience_provider_uses_binding_tier_config(tmp_path, monkeypatch):
     controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
     calls: list[tuple[str, str, str]] = []
 
@@ -1059,7 +1062,7 @@ def test_tick_records_model_call_metrics_for_small_model_parallel_group(tmp_path
     assert result.trace.runtime_metrics["parallel_task_count"] >= 4
     assert "salience_value_prefetch" in result.trace.runtime_metrics["parallel_groups"]
     assert "intent_prefetch" in result.trace.runtime_metrics["parallel_groups"]
-    assert any(item["agent_tier"] == "small_model" for item in result.trace.model_call_traces)
+    assert any(item["binding_tier"] == "small_model" for item in result.trace.model_call_traces)
 
 
 def test_acceptance_report_surfaces_bypass_and_parallel_evidence(tmp_path, monkeypatch):
@@ -1933,6 +1936,62 @@ def test_execute_turn_chat_standard_survives_empty_cognitive_packet_trace(tmp_pa
     assert trace["runtime_metrics"]["local_compute_ms"] == 275
     assert trace["rendered_expression"]["degraded"] is True
     assert trace["rendered_expression"]["model"] == "fallback"
+
+
+def test_execute_turn_chat_standard_uses_bound_route_config_when_medium_tier_credentials_are_missing(tmp_path, monkeypatch):
+    controller = RuntimeController(project_root=tmp_path, config_root=CONFIG_ROOT)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("ARK_SMALL_MODEL_API_KEY", raising=False)
+    monkeypatch.setenv("ARK_API_KEY", "ark-live-key")
+
+    def fail_named_route(*args, **kwargs):
+        raise AssertionError("chat kernel should not call named route generate directly")
+
+    seen: dict[str, str] = {}
+
+    def generate_config(route_config, request):
+        seen["route_name"] = route_config.name
+        seen["backend"] = route_config.backend
+        seen["model"] = route_config.model
+        seen["api_key_env"] = str(route_config.api_key_env or "")
+        seen["effective_tier"] = str(getattr(route_config, "effective_tier", ""))
+        return ModelResponse(
+            route=route_config.name,
+            model=route_config.model,
+            payload={
+                "salience": 0.58,
+                "uncertainty": 0.44,
+                "memory_need": True,
+                "tool_need": False,
+                "conflict_need": False,
+                "candidate_action_prior": "respond",
+                "draft_reply": "这是绑定路由返回的正式回复。",
+                "proposed_state_patch": {
+                    "focus": "maintain_sparse_chat_response",
+                    "obligations": ["继续沿着当前问题回答"],
+                },
+                "deepen_reason": "",
+            },
+            raw_text="{}",
+            backend=route_config.backend,
+        )
+
+    monkeypatch.setattr(controller.model_router, "generate", fail_named_route)
+    monkeypatch.setattr(controller.model_router, "generate_config", generate_config)
+    monkeypatch.setattr(controller.chat_kernel_v2, "_memory_context", lambda **kwargs: {})
+
+    plan = controller.plan_turn("你还记得我之前提过的矛盾吗？")
+    execution = controller.execute_turn(plan)
+
+    assert plan.route_type == "chat_standard"
+    assert execution.assistant_final == "这是绑定路由返回的正式回复。"
+    assert seen == {
+        "route_name": "cognitive_packet",
+        "backend": "doubao",
+        "model": "doubao-seed-2-0-pro-260215",
+        "api_key_env": "ARK_API_KEY",
+        "effective_tier": "large_model",
+    }
 
 
 def test_hot_only_budget_for_low_salience(tmp_path, monkeypatch):

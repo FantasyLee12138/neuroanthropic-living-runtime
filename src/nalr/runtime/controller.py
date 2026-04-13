@@ -2602,7 +2602,7 @@ class RuntimeController:
             "policy_rejection_reason": result.policy_rejection_reason,
             "breaker_state": result.breaker_state,
             "parallel_group": getattr(result, "parallel_group", None),
-            "agent_tier": getattr(result, "agent_tier", None),
+            "binding_tier": getattr(result, "binding_tier", None),
             "task_priority": getattr(result, "task_priority", None),
             "task_outcome": getattr(result, "task_outcome", None),
             "task_type": getattr(result, "task_type", None),
@@ -2926,26 +2926,28 @@ class RuntimeController:
     def _provider_descriptor_for_route(self, route_name: str = "renderer") -> tuple[str, str]:
         return self.model_routing_runtime._provider_descriptor_for_route(route_name)
 
-    def _provider_descriptor(self) -> tuple[str, str]:
-        return self.model_routing_runtime._provider_descriptor()
+    def _provider_descriptor(self, *, query_kind: str | None = None) -> tuple[str, str]:
+        if query_kind is None:
+            return self.model_routing_runtime._provider_descriptor()
+        return self.model_routing_runtime._provider_descriptor(query_kind=query_kind)
 
-    def provider_descriptor(self) -> tuple[str, str]:
-        return self._provider_descriptor()
+    def provider_descriptor(self, *, query_kind: str | None = None) -> tuple[str, str]:
+        return self._provider_descriptor(query_kind=query_kind)
 
     def _model_tiers(self) -> dict[str, Any]:
         return self.model_routing_runtime._model_tiers()
 
-    def _agent_model_bindings(self) -> dict[str, str]:
-        return self.model_routing_runtime._agent_model_bindings()
+    def _pipeline_model_bindings(self) -> dict[str, str]:
+        return self.model_routing_runtime._pipeline_model_bindings()
 
     def _module_model_bindings(self) -> dict[str, str]:
         return self.model_routing_runtime._module_model_bindings()
 
-    def _agent_tier(self, binding_key: str) -> str:
-        return self.model_routing_runtime._agent_tier(binding_key)
+    def _pipeline_tier(self, binding_key: str) -> str:
+        return self.model_routing_runtime._pipeline_tier(binding_key)
 
-    def _effective_agent_tier(self, binding_key: str, *, metadata: dict[str, Any] | None = None) -> str:
-        return self.model_routing_runtime._effective_agent_tier(binding_key, metadata=metadata)
+    def _effective_pipeline_tier(self, binding_key: str, *, metadata: dict[str, Any] | None = None) -> str:
+        return self.model_routing_runtime._effective_pipeline_tier(binding_key, metadata=metadata)
 
     def _tier_config(self, tier_name: str) -> dict[str, Any]:
         return self.model_routing_runtime._tier_config(tier_name)
@@ -2976,6 +2978,17 @@ class RuntimeController:
             binding_key,
             route_name=route_name,
             metadata=metadata,
+        )
+
+    def _route_config_for_module(
+        self,
+        module_name: str,
+        *,
+        route_name: str,
+    ) -> ModelRouteConfig | None:
+        return self.model_routing_runtime._route_config_for_module(
+            module_name,
+            route_name=route_name,
         )
 
     def _record_model_call(
@@ -3015,6 +3028,25 @@ class RuntimeController:
             route_name=route_name,
             request=request,
             binding_metadata=binding_metadata,
+            model_call_traces=model_call_traces,
+            skill_name=skill_name,
+            parallel_group=parallel_group,
+        )
+
+    def _call_module_bound_model_route(
+        self,
+        module_name: str,
+        *,
+        route_name: str,
+        request: ModelRequest,
+        model_call_traces: list[dict[str, Any]] | None = None,
+        skill_name: str | None = None,
+        parallel_group: str | None = None,
+    ):
+        return self.model_routing_runtime._call_module_bound_model_route(
+            module_name,
+            route_name=route_name,
+            request=request,
             model_call_traces=model_call_traces,
             skill_name=skill_name,
             parallel_group=parallel_group,

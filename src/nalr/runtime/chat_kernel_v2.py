@@ -259,8 +259,13 @@ class ChatKernelV2(_ControllerBackedRuntime):
         traces: list[dict[str, Any]] = []
         request = self._packet_request(plan=plan, hot_state=hot_state, cue=cue)
         try:
-            response = self.model_router.generate("cognitive_packet", request)
-            traces.append(self._model_call_trace("cognitive_packet", request, response))
+            response = self._call_module_bound_model_route(
+                "cognitive_packet",
+                route_name="cognitive_packet",
+                request=request,
+                model_call_traces=traces,
+                skill_name="cognitive_packet",
+            )
             payload = dict(response.payload or {})
             raw_patch = dict(payload.get("proposed_state_patch", {}) or {})
             if "focus" not in raw_patch and raw_patch.get("current_focus"):
@@ -303,8 +308,13 @@ class ChatKernelV2(_ControllerBackedRuntime):
             cue=cue,
         )
         try:
-            response = self.model_router.generate("deliberation", request)
-            traces.append(self._model_call_trace("deliberation", request, response))
+            response = self._call_module_bound_model_route(
+                "deliberation",
+                route_name="deliberation",
+                request=request,
+                model_call_traces=traces,
+                skill_name="deliberation",
+            )
             payload = dict(response.payload or {})
             message = str(payload.get("draft_reply") or packet.draft_reply or "").strip()
             reason = str(payload.get("deepen_reason") or packet.deepen_reason or "long_horizon_alignment").strip()

@@ -14,6 +14,8 @@ def _clip(value: float, low: float = 0.0, high: float = 1.0) -> float:
 
 
 class ObserverSettingsRuntime:
+    _LEGACY_MODEL_BINDING_KEYS = ("agent_model_bindings",)
+
     def __init__(
         self,
         *,
@@ -124,7 +126,6 @@ class ObserverSettingsRuntime:
                     "api_key_env": "GPT54_FALLBACK_API_KEY",
                 },
                 "module_model_bindings": {},
-                "agent_model_bindings": {},
                 "model_routes": {},
             },
         }
@@ -144,6 +145,12 @@ class ObserverSettingsRuntime:
             except OSError:
                 pass
         return normalized
+
+    def _reject_legacy_fields(self, models_payload: dict[str, Any]) -> None:
+        legacy_keys = [key for key in self._LEGACY_MODEL_BINDING_KEYS if key in models_payload]
+        if legacy_keys:
+            joined = ", ".join(sorted(legacy_keys))
+            raise ValueError(f"legacy settings field removed: {joined}; use models.module_model_bindings")
 
     def normalize_settings(
         self,
@@ -235,6 +242,7 @@ class ObserverSettingsRuntime:
             )
 
         models = data.get("models", {}) if isinstance(data.get("models"), dict) else {}
+        self._reject_legacy_fields(models)
         provider_endpoints = models.get("provider_endpoints", {}) if isinstance(models.get("provider_endpoints"), dict) else {}
         for endpoint_name, endpoint in provider_endpoints.items():
             if not isinstance(endpoint, dict):
@@ -267,7 +275,6 @@ class ObserverSettingsRuntime:
             if isinstance(value, dict)
         }
         module_bindings = models.get("module_model_bindings", {}) if isinstance(models.get("module_model_bindings"), dict) else {}
-        bindings = models.get("agent_model_bindings", {}) if isinstance(models.get("agent_model_bindings"), dict) else {}
         known_tiers = self.known_model_tier_names(
             observer_model_tiers=defaults["models"]["model_tiers"],
             current_config=current_config,
@@ -275,11 +282,6 @@ class ObserverSettingsRuntime:
         defaults["models"]["module_model_bindings"] = {
             str(key): str(value).strip()
             for key, value in module_bindings.items()
-            if str(value).strip() in known_tiers
-        }
-        defaults["models"]["agent_model_bindings"] = {
-            str(key): str(value).strip()
-            for key, value in bindings.items()
             if str(value).strip() in known_tiers
         }
         return defaults
@@ -359,12 +361,10 @@ class ObserverSettingsRuntime:
         route_overrides = model_settings.get("model_routes", {}) if isinstance(model_settings.get("model_routes"), dict) else {}
         tier_overrides = model_settings.get("model_tiers", {}) if isinstance(model_settings.get("model_tiers"), dict) else {}
         module_binding_overrides = model_settings.get("module_model_bindings", {}) if isinstance(model_settings.get("module_model_bindings"), dict) else {}
-        binding_overrides = model_settings.get("agent_model_bindings", {}) if isinstance(model_settings.get("agent_model_bindings"), dict) else {}
         failover_override = model_settings.get("failover", {}) if isinstance(model_settings.get("failover"), dict) else {}
         merged.setdefault("model_routes", {})
         merged.setdefault("model_tiers", {})
         merged.setdefault("module_model_bindings", {})
-        merged.setdefault("agent_model_bindings", {})
         merged["failover"] = {**dict(merged.get("failover", {}) or {}), **failover_override}
         for route_name, override in route_overrides.items():
             if not isinstance(override, dict):
@@ -376,8 +376,6 @@ class ObserverSettingsRuntime:
             merged["model_tiers"][tier_name] = {**merged["model_tiers"].get(tier_name, {}), **override}
         for binding_key, override in module_binding_overrides.items():
             merged["module_model_bindings"][binding_key] = str(override)
-        for binding_key, override in binding_overrides.items():
-            merged["agent_model_bindings"][binding_key] = str(override)
         return merged
 
     def current_settings(self, config: dict[str, Any] | None = None) -> dict[str, Any]:

@@ -3,6 +3,8 @@ import json
 from pathlib import Path
 import threading
 
+import pytest
+
 from nalr.memory.store import MemoryStore
 from nalr.runtime.dynamics import bounded_drift_delta, smooth_decay_rate, smooth_resource_pressure
 from nalr.schemas.models import RoundEvent
@@ -413,6 +415,22 @@ def test_memory_store_default_recall_searches_full_tiers(tmp_path):
     assert recall["found"] is True
     assert recall["tier"] == "cold"
     assert recall["strength"] == 0.6
+
+
+def test_memory_store_rejects_removed_archive_tier_name(tmp_path):
+    store = MemoryStore(tmp_path / ".alive")
+
+    with pytest.raises(ValueError, match="archive"):
+        store.recall("tea", tier_budget=("hot", "warm", "archive"))
+
+
+def test_memory_store_fails_fast_on_legacy_archive_files(tmp_path):
+    legacy_memory_dir = tmp_path / ".alive" / "memory"
+    legacy_memory_dir.mkdir(parents=True)
+    (legacy_memory_dir / "episodic_archive.json").write_text("[]", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="episodic_archive"):
+        MemoryStore(tmp_path / ".alive")
 
 
 def test_memory_store_hot_only_budget_skips_warm_and_cold(tmp_path, monkeypatch):

@@ -2633,7 +2633,7 @@ function renderAnalysis() {
     ? modelTraces
         .slice(0, 10)
         .map(
-          (row) => `<div class="stack-item"><span>${escapeHtml(humanizeRuntimeToken(row.binding_key || row.skill_name || "model"))}</span><strong>${escapeHtml(`${humanizeRuntimeToken(row.agent_tier || "--")} / ${humanizeRuntimeToken(row.backend || "--")} / ${row.model || "--"}`)}</strong></div>`,
+          (row) => `<div class="stack-item"><span>${escapeHtml(humanizeRuntimeToken(row.binding_key || row.skill_name || "model"))}</span><strong>${escapeHtml(`${humanizeRuntimeToken(row.binding_tier || "--")} / ${humanizeRuntimeToken(row.backend || "--")} / ${row.model || "--"}`)}</strong></div>`,
         )
         .join("")
     : fallbackModelRoute

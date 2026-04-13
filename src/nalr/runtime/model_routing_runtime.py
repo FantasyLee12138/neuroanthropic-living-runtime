@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any
 
 from nalr.providers import MissingModelCredentialError, ModelRequest, ModelRouteConfig
@@ -17,7 +18,7 @@ class _ControllerBackedRuntime:
 
 
 class ModelRoutingRuntime(_ControllerBackedRuntime):
-    _DEFAULT_AGENT_MODEL_BINDINGS = {
+    _DEFAULT_PIPELINE_MODEL_BINDINGS = {
         "planner": "medium_model",
         "PFCAgent": "medium_model",
         "InitiativeInteractionAgent": "state_machine",
@@ -44,7 +45,12 @@ class ModelRoutingRuntime(_ControllerBackedRuntime):
         "OutputGate": "state_machine",
     }
 
-    def _provider_descriptor_for_route(self, route_name: str = "renderer") -> tuple[str, str]:
+    def _provider_descriptor_for_route(
+        self,
+        route_name: str = "renderer",
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[str, str]:
         route_cfg = self.config["models"]["model_routes"].get(route_name, {})
         binding_key = {
             "planner": "planner",
@@ -54,7 +60,7 @@ class ModelRoutingRuntime(_ControllerBackedRuntime):
             "autonomy_self_run": "AutonomySelfRun",
         }.get(route_name)
         if binding_key:
-            resolved_route = self._route_config_for_binding(binding_key, route_name=route_name)
+            resolved_route = self._route_config_for_binding(binding_key, route_name=route_name, metadata=metadata)
             if resolved_route is not None:
                 route_cfg = {
                     "backend": resolved_route.backend,
@@ -69,15 +75,16 @@ class ModelRoutingRuntime(_ControllerBackedRuntime):
             provider_label = f"{backend.title()} route"
         return provider_label, str(route_cfg.get("model", "")).strip()
 
-    def _provider_descriptor(self) -> tuple[str, str]:
-        return self._provider_descriptor_for_route("renderer")
+    def _provider_descriptor(self, *, query_kind: str | None = None) -> tuple[str, str]:
+        metadata = {"query_kind": query_kind} if query_kind else None
+        return self._provider_descriptor_for_route("renderer", metadata=metadata)
 
     def _model_tiers(self) -> dict[str, Any]:
         return dict(self.config["models"].get("model_tiers", {}))
 
-    def _agent_model_bindings(self) -> dict[str, str]:
-        bindings = self.config["models"].get("agent_model_bindings", {})
-        normalized = dict(self._DEFAULT_AGENT_MODEL_BINDINGS)
+    def _pipeline_model_bindings(self) -> dict[str, str]:
+        bindings = self.config["models"].get("pipeline_model_bindings", {})
+        normalized = dict(self._DEFAULT_PIPELINE_MODEL_BINDINGS)
         normalized.update({str(key): str(value) for key, value in dict(bindings).items()})
         return normalized
 
@@ -97,12 +104,12 @@ class ModelRoutingRuntime(_ControllerBackedRuntime):
     def _module_tier(self, module_name: str) -> str:
         return self._module_model_bindings().get(module_name, "state_machine")
 
-    def _agent_tier(self, binding_key: str) -> str:
-        bindings = self._agent_model_bindings()
+    def _pipeline_tier(self, binding_key: str) -> str:
+        bindings = self._pipeline_model_bindings()
         return bindings.get(binding_key, "state_machine")
 
-    def _effective_agent_tier(self, binding_key: str, *, metadata: dict[str, Any] | None = None) -> str:
-        base_tier = self._agent_tier(binding_key)
+    def _effective_pipeline_tier(self, binding_key: str, *, metadata: dict[str, Any] | None = None) -> str:
+        base_tier = self._pipeline_tier(binding_key)
         info = dict(metadata or {})
         if base_tier == "state_machine":
             return base_tier
@@ -135,6 +142,69 @@ class ModelRoutingRuntime(_ControllerBackedRuntime):
 
     def _tier_config(self, tier_name: str) -> dict[str, Any]:
         return dict(self._model_tiers().get(tier_name, {}))
+
+    def _route_credential_present(self, route_cfg: ModelRouteConfig | None) -> bool:
+        if route_cfg is None:
+            return False
+        if route_cfg.api_key_env:
+            return bool(os.getenv(route_cfg.api_key_env))
+        if route_cfg.backend == "doubao":
+            return bool(os.getenv("ARK_API_KEY"))
+        if route_cfg.backend == "deepseek":
+            return bool(os.getenv("DEEPSEEK_API_KEY"))
+        return True
+
+    def _named_route_credential_present(self, route_name: str) -> bool:
+        route_cfg = self.model_router.route_configs.get(route_name)
+        if route_cfg is None:
+            return False
+        effective_route = self.model_router.effective_route_config(route_cfg)
+        return self._route_credential_present(effective_route)
+
+    def _tier_fallback_candidates(self, preferred_tier: str) -> list[str]:
+        ordered = {
+            "small_model": ["small_model", "medium_model", "large_model"],
+            "medium_model": ["medium_model", "large_model", "small_model"],
+            "large_model": ["large_model", "medium_model", "small_model"],
+        }.get(preferred_tier, [preferred_tier])
+        for tier_name in self._model_tiers().keys():
+            if tier_name not in ordered:
+                ordered.append(tier_name)
+        return ordered
+
+    def _remote_route_from_tier(self, tier_name: str, *, route_name: str) -> ModelRouteConfig | None:
+        tier_cfg = self._tier_config(tier_name)
+        if not tier_cfg:
+            return None
+        mode = str(tier_cfg.get("mode", "local")).lower()
+        if mode == "local":
+            return None
+        route_config = ModelRouteConfig(
+            name=route_name,
+            backend=str(tier_cfg.get("backend", "")),
+            model=str(tier_cfg.get("model", "")),
+            timeout_ms=int(tier_cfg.get("timeout_ms", 12000)),
+            retries=int(tier_cfg.get("retries", 0)),
+            enabled=bool(tier_cfg.get("enabled", True)),
+            base_url=str(tier_cfg.get("base_url", self.config["models"]["models"].get("base_url", ""))),
+            api_key_env=str(tier_cfg.get("api_key_env", "")).strip() or None,
+        )
+        route_config = self.model_router.effective_route_config(route_config)
+        setattr(route_config, "effective_tier", tier_name)
+        setattr(route_config, "effective_mode", mode)
+        return route_config
+
+    def _resolve_remote_tier_route(self, preferred_tier: str, *, route_name: str) -> ModelRouteConfig | None:
+        first_candidate: ModelRouteConfig | None = None
+        for tier_name in self._tier_fallback_candidates(preferred_tier):
+            candidate = self._remote_route_from_tier(tier_name, route_name=route_name)
+            if candidate is None:
+                continue
+            if first_candidate is None:
+                first_candidate = candidate
+            if self._route_credential_present(candidate):
+                return candidate
+        return first_candidate
 
     def _infer_tier_name_for_route(self, route_cfg: ModelRouteConfig | None) -> str | None:
         if route_cfg is None:
@@ -214,7 +284,7 @@ class ModelRoutingRuntime(_ControllerBackedRuntime):
                 "entry_mode": "interactive",
                 "decision_mode": "supervisor_run",
                 "default_binding": "planner",
-                "default_tier": self._agent_tier("planner"),
+                "default_tier": self._pipeline_tier("planner"),
                 "always_on_modules": ["RunSupervisor"],
                 "conditional_modules": ["ToolPlanner", "RecoveryAligner"],
                 "upgrade_routes": [],
@@ -225,7 +295,7 @@ class ModelRoutingRuntime(_ControllerBackedRuntime):
                 "entry_mode": "idle",
                 "decision_mode": "endogenous_tick",
                 "default_binding": "monologue_stream",
-                "default_tier": self._agent_tier("MonologueStream"),
+                "default_tier": self._pipeline_tier("MonologueStream"),
                 "always_on_modules": ["Router", "HotStateLoader", "Reflection/DMN"],
                 "conditional_modules": ["HabitController"],
                 "upgrade_routes": [],
@@ -293,7 +363,7 @@ class ModelRoutingRuntime(_ControllerBackedRuntime):
         route_name: str,
         metadata: dict[str, Any] | None = None,
     ) -> ModelRouteConfig | None:
-        tier_name = self._effective_agent_tier(binding_key, metadata=metadata)
+        tier_name = self._effective_pipeline_tier(binding_key, metadata=metadata)
         tier_cfg = self._tier_config(tier_name)
         if not tier_cfg:
             route_cfg = self.model_router.route_configs.get(route_name)
@@ -316,19 +386,38 @@ class ModelRoutingRuntime(_ControllerBackedRuntime):
         mode = str(tier_cfg.get("mode", "local")).lower()
         if mode == "local":
             return None
-        route_config = ModelRouteConfig(
-            name=route_name,
-            backend=str(tier_cfg.get("backend", "")),
-            model=str(tier_cfg.get("model", "")),
-            timeout_ms=int(tier_cfg.get("timeout_ms", 12000)),
-            retries=int(tier_cfg.get("retries", 0)),
-            enabled=bool(tier_cfg.get("enabled", True)),
-            base_url=str(tier_cfg.get("base_url", self.config["models"]["models"].get("base_url", ""))),
-            api_key_env=str(tier_cfg.get("api_key_env", "")).strip() or None,
-        )
-        setattr(route_config, "effective_tier", tier_name)
-        setattr(route_config, "effective_mode", mode)
-        return route_config
+        return self._resolve_remote_tier_route(tier_name, route_name=route_name)
+
+    def _route_config_for_module(
+        self,
+        module_name: str,
+        *,
+        route_name: str,
+    ) -> ModelRouteConfig | None:
+        tier_name = self._module_tier(module_name)
+        tier_cfg = self._tier_config(tier_name)
+        if not tier_cfg:
+            route_cfg = self.model_router.route_configs.get(route_name)
+            if route_cfg is None:
+                return None
+            fallback_route = ModelRouteConfig(
+                name=route_cfg.name,
+                backend=route_cfg.backend,
+                model=route_cfg.model,
+                timeout_ms=route_cfg.timeout_ms,
+                retries=route_cfg.retries,
+                enabled=route_cfg.enabled,
+                base_url=route_cfg.base_url,
+                api_key_env=route_cfg.api_key_env,
+            )
+            fallback_route = self.model_router.effective_route_config(fallback_route)
+            setattr(fallback_route, "effective_tier", tier_name)
+            setattr(fallback_route, "effective_mode", "route_fallback")
+            return fallback_route
+        mode = str(tier_cfg.get("mode", "local")).lower()
+        if mode == "local":
+            return None
+        return self._resolve_remote_tier_route(tier_name, route_name=route_name)
 
     def _record_model_call(
         self,
@@ -346,7 +435,7 @@ class ModelRoutingRuntime(_ControllerBackedRuntime):
             {
                 "skill_name": skill_name,
                 "binding_key": binding_key,
-                "agent_tier": getattr(route_config, "effective_tier", self._agent_tier(binding_key)),
+                "binding_tier": getattr(route_config, "effective_tier", self._pipeline_tier(binding_key)),
                 "route": response.route,
                 "backend": getattr(response, "backend", route_config.backend),
                 "model": response.model,
@@ -382,6 +471,8 @@ class ModelRoutingRuntime(_ControllerBackedRuntime):
             try:
                 response = self.model_router.generate_config(route_config, request)
             except MissingModelCredentialError:
+                if not self._named_route_credential_present(route_name):
+                    raise
                 response = self.model_router.generate(route_name, request)
         if model_call_traces is not None:
             self._record_model_call(
@@ -389,6 +480,44 @@ class ModelRoutingRuntime(_ControllerBackedRuntime):
                 skill_name=skill_name or route_name,
                 binding_key=binding_key,
                 route_config=route_config,
+                response=response,
+                prompt_chars=len(request.system_prompt) + len(request.user_prompt),
+                parallel_group=parallel_group,
+            )
+        return response
+
+    def _call_module_bound_model_route(
+        self,
+        module_name: str,
+        *,
+        route_name: str,
+        request: ModelRequest,
+        model_call_traces: list[dict[str, Any]] | None = None,
+        skill_name: str | None = None,
+        parallel_group: str | None = None,
+    ):
+        route_config = self._route_config_for_module(module_name, route_name=route_name)
+        generate_override = getattr(getattr(self, "model_router", None), "__dict__", {}).get("generate")
+        generate_config_override = getattr(getattr(self, "model_router", None), "__dict__", {}).get("generate_config")
+        if route_config is not None and callable(generate_config_override):
+            response = generate_config_override(route_config, request)
+        elif callable(generate_override):
+            response = generate_override(route_name, request)
+        elif route_config is None:
+            response = self.model_router.generate(route_name, request)
+        else:
+            try:
+                response = self.model_router.generate_config(route_config, request)
+            except MissingModelCredentialError:
+                if not self._named_route_credential_present(route_name):
+                    raise
+                response = self.model_router.generate(route_name, request)
+        if model_call_traces is not None:
+            self._record_model_call(
+                model_call_traces,
+                skill_name=skill_name or route_name,
+                binding_key=module_name,
+                route_config=route_config or self.model_router.route_configs[route_name],
                 response=response,
                 prompt_chars=len(request.system_prompt) + len(request.user_prompt),
                 parallel_group=parallel_group,

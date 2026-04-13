@@ -158,7 +158,6 @@ class MemoryStore:
         self.episodic_warm_dir = self.memory_dir / "episodic_warm"
         self.episodic_cold_dir = self.memory_dir / "episodic_cold"
         self.legacy_episodic_archive_dir = self.memory_dir / "episodic_archive"
-        self.episodic_archive_dir = self.episodic_cold_dir
         self.relation_dir = self.memory_dir / "relation"
         self.habit_dir = self.memory_dir / "habit"
         self.raw_dir = self.memory_dir / "raw"
@@ -167,7 +166,6 @@ class MemoryStore:
             self.episodic_hot_dir,
             self.episodic_warm_dir,
             self.episodic_cold_dir,
-            self.legacy_episodic_archive_dir,
             self.relation_dir,
             self.habit_dir,
             self.raw_dir,
@@ -182,7 +180,6 @@ class MemoryStore:
         self.episodic_warm_path = self.memory_dir / "episodic_warm.json"
         self.episodic_cold_path = self.memory_dir / "episodic_cold.json"
         self.legacy_episodic_archive_path = self.memory_dir / "episodic_archive.json"
-        self.episodic_archive_path = self.episodic_cold_path
         self.habit_path = self.memory_dir / "habit.json"
         self.relation_path = self.memory_dir / "relation.json"
         self.relation_trace_path = self.memory_dir / "relation_trace.json"
@@ -215,7 +212,7 @@ class MemoryStore:
             self._write_text_atomic(self.raw_events_path, "")
         if not self.storage_status_path.exists():
             self._write_storage_status(self._default_storage_status())
-        self._migrate_legacy_cold_files()
+        self._fail_on_legacy_archive_files()
         self._migrate_legacy_if_needed()
         self._migrate_schema_if_needed()
         self._io_worker = AsyncIOWorker("nalr-memory-io")
@@ -260,7 +257,7 @@ class MemoryStore:
     def _normalize_tier_name(self, tier: str | None) -> str:
         normalized = str(tier or "").strip().lower()
         if normalized == "archive":
-            return "cold"
+            raise ValueError("memory tier 'archive' has been removed; use 'cold'")
         return normalized
 
     def _public_tier_name(self, tier: str | None) -> str:
@@ -270,33 +267,25 @@ class MemoryStore:
         normalized: list[str] = []
         for tier in tier_budget:
             tier_name = self._normalize_tier_name(tier)
-            if tier_name in {"hot", "warm", "cold"} and tier_name not in normalized:
+            if tier_name not in {"hot", "warm", "cold"}:
+                raise ValueError(f"unsupported memory tier '{tier_name}'; use hot, warm, or cold")
+            if tier_name not in normalized:
                 normalized.append(tier_name)
         return tuple(normalized or ("hot", "warm", "cold"))
 
-    def _migrate_legacy_cold_files(self) -> None:
-        if not self.legacy_episodic_archive_path.exists() and not self.legacy_episodic_archive_dir.exists():
-            return
-        cold_payload_empty = (
-            not self.episodic_cold_path.exists()
-            or not self.episodic_cold_path.read_text(encoding="utf-8").strip()
-            or self.episodic_cold_path.read_text(encoding="utf-8").strip() == "[]"
-        )
-        if cold_payload_empty and self.legacy_episodic_archive_path.exists():
-            self._write_text_atomic(self.episodic_cold_path, self.legacy_episodic_archive_path.read_text(encoding="utf-8"))
-        if self.legacy_episodic_archive_dir.exists() and not any(self.episodic_cold_dir.iterdir()):
-            for source in self.legacy_episodic_archive_dir.iterdir():
-                target = self.episodic_cold_dir / source.name
-                if target.exists():
-                    continue
-                if source.is_dir():
-                    shutil.copytree(source, target)
-                else:
-                    shutil.copy2(source, target)
+    def _fail_on_legacy_archive_files(self) -> None:
         legacy_parquet = self.current_dir / "episodic_archive.parquet"
-        cold_parquet = self.current_dir / "episodic_cold.parquet"
-        if legacy_parquet.exists() and not cold_parquet.exists():
-            shutil.copy2(legacy_parquet, cold_parquet)
+        legacy_paths = [
+            self.legacy_episodic_archive_path,
+            self.legacy_episodic_archive_dir,
+            legacy_parquet,
+        ]
+        if not any(path.exists() for path in legacy_paths):
+            return
+        raise ValueError(
+            "legacy memory tier files detected: episodic_archive has been removed; "
+            "rename or migrate them to episodic_cold before starting the runtime"
+        )
 
     def _default_storage_status(self) -> dict:
         parquet_live_ready = all(path.exists() for path in self._snapshot_targets.values())
@@ -483,13 +472,13 @@ class MemoryStore:
         habits = self._load_list_from_json_legacy(self.habit_path)
         episodic_hot = self._load_list_from_json_legacy(self.episodic_path)
         episodic_warm = self._load_list_from_json_legacy(self.episodic_warm_path)
-        episodic_archive = self._load_list_from_json_legacy(self.episodic_archive_path)
+        episodic_cold = self._load_list_from_json_legacy(self.episodic_cold_path)
 
         migrated_priors, prior_merges = self._merge_prior_records(stable_priors)
         migrated_habits, habit_merges = self._merge_habit_records(habits)
         migrated_hot, hot_merges = self._merge_memory_records(episodic_hot)
         migrated_warm, warm_merges = self._merge_memory_records(episodic_warm)
-        migrated_archive, archive_merges = self._merge_memory_records(episodic_archive)
+        migrated_cold, cold_merges = self._merge_memory_records(episodic_cold)
 
         self._write_text_atomic(self.stable_priors_path, json.dumps(migrated_priors, ensure_ascii=False, indent=2))
         self._rewrite_snapshot_if_present(self.stable_priors_path, migrated_priors)
@@ -499,8 +488,8 @@ class MemoryStore:
         self._rewrite_snapshot_if_present(self.episodic_path, migrated_hot)
         self._write_text_atomic(self.episodic_warm_path, json.dumps(migrated_warm, ensure_ascii=False, indent=2))
         self._rewrite_snapshot_if_present(self.episodic_warm_path, migrated_warm)
-        self._write_text_atomic(self.episodic_archive_path, json.dumps(migrated_archive, ensure_ascii=False, indent=2))
-        self._rewrite_snapshot_if_present(self.episodic_archive_path, migrated_archive)
+        self._write_text_atomic(self.episodic_cold_path, json.dumps(migrated_cold, ensure_ascii=False, indent=2))
+        self._rewrite_snapshot_if_present(self.episodic_cold_path, migrated_cold)
 
         report = {
             **status,
@@ -508,8 +497,8 @@ class MemoryStore:
             "schema_version": MEMORY_SCHEMA_VERSION,
             "migrated_at": utc_now_iso(),
             "removed_aliases_count": 0,
-            "merged_cue_clusters_count": prior_merges + habit_merges + hot_merges + warm_merges + archive_merges,
-            "preserved_memory_count": len(migrated_hot) + len(migrated_warm) + len(migrated_archive),
+            "merged_cue_clusters_count": prior_merges + habit_merges + hot_merges + warm_merges + cold_merges,
+            "preserved_memory_count": len(migrated_hot) + len(migrated_warm) + len(migrated_cold),
             "identity_evidence_rebuilt": True,
         }
         self.migration_status_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -537,7 +526,7 @@ class MemoryStore:
             return []
         if not isinstance(payload, list):
             return []
-        if path in {self.episodic_path, self.episodic_warm_path, self.episodic_archive_path}:
+        if path in {self.episodic_path, self.episodic_warm_path, self.episodic_cold_path}:
             return [self._normalize_memory_record(item) for item in payload]
         if path == self.habit_path:
             return [self._normalize_habit_record(item) for item in payload]
@@ -562,7 +551,7 @@ class MemoryStore:
         tier = {
             self.episodic_hot_dir: "hot",
             self.episodic_warm_dir: "warm",
-            self.episodic_archive_dir: "cold",
+            self.episodic_cold_dir: "cold",
         }[tier_dir]
         return self._read_parquet_dataset(self._compacted_dataset_dir(tier))
 
@@ -583,13 +572,13 @@ class MemoryStore:
                 payload = self._load_list_from_json_legacy(path)
                 self._write_text_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2))
                 self._rewrite_snapshot(snapshot_path, payload)
-                if path in {self.episodic_path, self.episodic_warm_path, self.episodic_archive_path}:
+                if path in {self.episodic_path, self.episodic_warm_path, self.episodic_cold_path}:
                     return [self._normalize_memory_record(item) for item in payload]
                 if path == self.habit_path:
                     return [self._normalize_habit_record(item) for item in payload]
                 return payload
             payload = self._read_parquet_payload_rows(snapshot_path)
-            if path in {self.episodic_path, self.episodic_warm_path, self.episodic_archive_path}:
+            if path in {self.episodic_path, self.episodic_warm_path, self.episodic_cold_path}:
                 return [self._normalize_memory_record(item) for item in payload]
             if path == self.habit_path:
                 return [self._normalize_habit_record(item) for item in payload]
@@ -616,7 +605,7 @@ class MemoryStore:
             path.replace(backup_path)
             self._write_text_atomic(path, "[]")
             return []
-        if path in {self.episodic_path, self.episodic_warm_path, self.episodic_archive_path}:
+        if path in {self.episodic_path, self.episodic_warm_path, self.episodic_cold_path}:
             return [self._normalize_memory_record(item) for item in payload]
         if path == self.habit_path:
             return [self._normalize_habit_record(item) for item in payload]
@@ -809,7 +798,7 @@ class MemoryStore:
         tier = {
             self.episodic_hot_dir: "hot",
             self.episodic_warm_dir: "warm",
-            self.episodic_archive_dir: "cold",
+            self.episodic_cold_dir: "cold",
         }[tier_dir]
         snapshot = copy.deepcopy(artifacts)
         self._artifact_cache[tier] = snapshot

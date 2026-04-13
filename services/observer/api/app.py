@@ -1942,7 +1942,10 @@ def create_app(
 
     @app.post("/settings")
     async def update_observer_settings(payload: dict = Body(default={})):  # type: ignore[valid-type]
-        result = controller.update_observer_settings(payload)
+        try:
+            result = controller.update_observer_settings(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         _install_autonomy_model_phase_hooks()
         return result
 

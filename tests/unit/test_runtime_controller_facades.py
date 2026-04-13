@@ -136,8 +136,8 @@ def test_observer_settings_facades_delegate_to_observer_settings_runtime(tmp_pat
 
     monkeypatch.setattr(controller, "observer_settings_runtime", FakeObserverSettingsRuntime(), raising=False)
 
-    payload = {"models": {"agent_model_bindings": {"Renderer": "medium_model"}}}
-    base = {"models": {"agent_model_bindings": {}}}
+    payload = {"models": {"module_model_bindings": {"deep_renderer": "medium_model"}}}
+    base = {"models": {"module_model_bindings": {}}}
     model_payload = {"backend": "openai_compatible"}
     observer_model_tiers = {"medium_model": {"enabled": True}}
     models_cfg = {"model_routes": {}}
@@ -1476,16 +1476,16 @@ def test_model_routing_facades_delegate_to_model_routing_runtime(tmp_path, monke
             seen["_model_tiers"] = True
             return tiers
 
-        def _agent_model_bindings(self):
-            seen["_agent_model_bindings"] = True
+        def _pipeline_model_bindings(self):
+            seen["_pipeline_model_bindings"] = True
             return bindings
 
-        def _agent_tier(self, binding_key):
-            seen["_agent_tier"] = binding_key
+        def _pipeline_tier(self, binding_key):
+            seen["_pipeline_tier"] = binding_key
             return "large_model"
 
-        def _effective_agent_tier(self, binding_key, *, metadata=None):
-            seen["_effective_agent_tier"] = {"binding_key": binding_key, "metadata": metadata}
+        def _effective_pipeline_tier(self, binding_key, *, metadata=None):
+            seen["_effective_pipeline_tier"] = {"binding_key": binding_key, "metadata": metadata}
             return "small_model"
 
         def _tier_config(self, tier_name):
@@ -1557,9 +1557,9 @@ def test_model_routing_facades_delegate_to_model_routing_runtime(tmp_path, monke
     assert controller._provider_descriptor() == ("provider", "model")
     assert controller.provider_descriptor() == ("provider", "model")
     assert controller._model_tiers() is tiers
-    assert controller._agent_model_bindings() is bindings
-    assert controller._agent_tier("Renderer") == "large_model"
-    assert controller._effective_agent_tier("PFCAgent", metadata={"relation_risk": 0.8}) == "small_model"
+    assert controller._pipeline_model_bindings() is bindings
+    assert controller._pipeline_tier("Renderer") == "large_model"
+    assert controller._effective_pipeline_tier("PFCAgent", metadata={"relation_risk": 0.8}) == "small_model"
     assert controller._tier_config("small_model") == {"backend": "openai_compatible"}
     assert controller._infer_tier_name_for_route(route_config) == "medium_model"
     assert controller._route_policy_contract() == {"chat_standard": {"decision_mode": "packet_plus_conditional_modules"}}
@@ -1586,9 +1586,9 @@ def test_model_routing_facades_delegate_to_model_routing_runtime(tmp_path, monke
     assert seen["_provider_descriptor_for_route"] == "planner"
     assert seen["_provider_descriptor"] is True
     assert seen["_model_tiers"] is True
-    assert seen["_agent_model_bindings"] is True
-    assert seen["_agent_tier"] == "Renderer"
-    assert seen["_effective_agent_tier"] == {"binding_key": "PFCAgent", "metadata": {"relation_risk": 0.8}}
+    assert seen["_pipeline_model_bindings"] is True
+    assert seen["_pipeline_tier"] == "Renderer"
+    assert seen["_effective_pipeline_tier"] == {"binding_key": "PFCAgent", "metadata": {"relation_risk": 0.8}}
     assert seen["_tier_config"] == "small_model"
     assert seen["_infer_tier_name_for_route"] is route_config
     assert seen["_route_policy_contract"] is True

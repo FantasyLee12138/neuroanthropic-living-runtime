@@ -1738,7 +1738,7 @@ class SkillResult:
     policy_rejection_reason: str | None = None
     breaker_state: dict[str, Any] = field(default_factory=dict)
     parallel_group: str | None = None
-    agent_tier: str | None = None
+    binding_tier: str | None = None
     task_priority: str | None = None
     task_outcome: str | None = None
     task_type: str | None = None

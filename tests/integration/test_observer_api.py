@@ -2081,6 +2081,24 @@ def test_observer_settings_can_override_newborn_unlocks_and_local_model(tmp_path
         assert state_payload["subjective_state"]["spontaneous"] == 0.11
 
 
+def test_observer_settings_reject_legacy_agent_model_bindings(tmp_path):
+    client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
+
+    response = client.post(
+        "/settings",
+        json={
+            "models": {
+                "agent_model_bindings": {
+                    "Renderer": "local_model",
+                }
+            }
+        },
+    )
+
+    assert response.status_code == 400
+    assert "agent_model_bindings" in response.json()["detail"]
+
+
 def test_observer_settings_can_override_autonomy_command_permissions(tmp_path):
     client = TestClient(create_app(project_root=tmp_path, config_root=CONFIG_ROOT))
 
